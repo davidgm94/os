@@ -4,148 +4,175 @@ const Builder = std.build.Builder;
 const CrossTarget = std.zig.CrossTarget;
 const Target = std.Target;
 const FileSource = std.build.FileSource;
+const Step = std.build.Step;
+const RunStep = std.build.RunStep;
 
-pub fn build(b: *std.build.Builder) void
+const ArrayList = std.ArrayList;
+const print = std.debug.print;
+const assert = std.debug.assert;
+
+pub fn build(b: *std.build.Builder) !void
 {
-    //var kernel = build_kernel(b);
-    //build_bios(b, kernel);
-    //build_uefi(b, kernel);
-    build_bootloader(b);
+    try build_bootloader(b);
+
+    // Add clear
+    const remove_cache = b.addRemoveDirTree("zig-cache");
+    const remove_bin = b.addRemoveDirTree("zig-out");
+    const clear_step = b.step("clear", "Clear the cache and binary directories");
+    clear_step.dependOn(&remove_cache.step);
+    clear_step.dependOn(&remove_bin.step);
 }
 
-const boot_dir = "src/boot/";
-const qemu = "qemu-system-x86_64";
+const build_cache_dir = "zig-cache/";
+const build_output_dir = "zig-out/bin/";
+const bios_source_root_dir = "src/boot/x86/";
 
-fn build_bios(b: *std.build.Builder, kernel: *std.build.LibExeObjStep) void
+const mbr_source_file = bios_source_root_dir ++ "mbr.S";
+const mbr_output_file = "mbr.bin";
+const mbr_output_path = build_cache_dir ++ mbr_output_file;
+
+const bios_stage_1_source_file = bios_source_root_dir ++ "bios_stage_1.S";
+const bios_stage_1_output_file = "bios_stage_1.bin";
+const bios_stage_1_output_path = build_cache_dir ++ bios_stage_1_output_file;
+
+const disk_image_output_file = "disk.img";
+const disk_image_output_path = build_cache_dir ++ disk_image_output_file;
+
+const final_disk_image = build_output_dir ++ disk_image_output_file;
+
+fn build_bootloader(b: *Builder) !void
 {
-    const nasm = "nasm";
-    const format = "-f bin";
-    const bios_source = boot_dir ++ "x86/bios.asm";
-    const bios_output = "zig-cache/bios.bin";
-    const nasm_command = &[_][]const u8 { nasm, format, bios_source, "-o", bios_output };
-    const nasm_step = b.addSystemCommand(nasm_command);
-    nasm_step.step.dependOn(&kernel.step);
-    b.default_step.dependOn(&nasm_step.step);
+    const mbr = nasm_compile_binary(b, mbr_source_file, mbr_output_path);
 
-    const qemu_command = &[_][]const u8 { qemu, bios_output };
-    const run_command = b.addSystemCommand(qemu_command);
+    const bios_stage_1 = nasm_compile_binary(b, bios_stage_1_source_file, bios_stage_1_output_path);
+    b.default_step.dependOn(&mbr.step);
+    b.default_step.dependOn(&bios_stage_1.step);
 
-    const run = b.step("bios", "Run the kernel");
-    run.dependOn(&run_command.step);
-}
+    var disk_image = try DiskImage.create(b);
+    disk_image.step.dependOn(&mbr.step);
+    disk_image.step.dependOn(&bios_stage_1.step);
 
-const uefi_mount_dir = "./zig-out/bin/EFI_MOUNT/";
-fn build_uefi(b: *std.build.Builder, kernel: *std.build.LibExeObjStep) void
-{
-    const uefi_bootloader = blk:
+    const install_disk_image = b.addInstallBinFile(FileSource.relative(disk_image_output_path), disk_image_output_file);
+    install_disk_image.step.dependOn(&disk_image.step);
+
+    const qemu_command_str = &[_][]const u8 { "qemu-system-x86_64", "-hda", final_disk_image, "-no-reboot", "-no-shutdown", "-D", "logging.txt", "-d", "guest_errors,int,cpu,cpu_reset,in_asm"};
+    if (false)
     {
-        if (true)
-        {
-            const uefi_target = std.zig.CrossTarget
-            {
-                .cpu_arch = .x86_64,
-                .os_tag = .uefi,
-                .abi = .msvc,
-            };
-
-            const uefi_bootloader_name = "bootx64";
-            const uefi_build_mode = b.standardReleaseOptions();
-            const uefi_main_file = "src/boot/uefi.zig";
-
-            const uefi_bootloader_dir = "EFI/BOOT/";
-
-            const bootloader = b.addExecutable(uefi_bootloader_name, uefi_main_file);
-            bootloader.setMainPkgPath("src");
-            bootloader.setBuildMode(uefi_build_mode);
-            bootloader.setTarget(uefi_target);
-            bootloader.force_pic = true;
-            bootloader.setOutputDir(uefi_mount_dir ++ uefi_bootloader_dir);
-            bootloader.install();
-
-            bootloader.step.dependOn(&kernel.step);
-            b.default_step.dependOn(&bootloader.step);
-
-            break :blk bootloader;
-        }
-        else
-        {
-            const bootloader = b.addInstallBinFile(std.build.FileSource.relative("uefi"), "EFI_MOUNT/EFI/BOOT/bootx64.efi");
-            bootloader.step.dependOn(&kernel.step);
-            b.default_step.dependOn(&bootloader.step);
-
-            break :blk bootloader;
-        }
-    };
-
-    const dst_file ="uefi_loader.bin"; 
-    const dst_path ="zig-cache/" ++ dst_file;
-    const uefi_loader = b.addSystemCommand(&[_][]const u8 {"nasm", "-fbin", boot_dir ++ "x86/uefi_loader.asm", "-o", dst_path });
-    b.default_step.dependOn(&uefi_loader.step);
-
-    const install_uefi_loader = b.addInstallBinFile(std.build.FileSource.relative(dst_path), "EFI_MOUNT/" ++ dst_file);
-    install_uefi_loader.step.dependOn(&uefi_loader.step);
-    b.default_step.dependOn(&install_uefi_loader.step);
-    install_uefi_loader.step.dependOn(&uefi_bootloader.step);
-
-    const ovmf_path = "/usr/share/OVMF/x64/OVMF.fd";
-    const bios_selection = "-bios";
-    const hdd_selection = "-hdd";
-    const vdisk_target = "fat:rw:" ++ uefi_mount_dir;
-    const qemu_command = &[_][]const u8 { qemu, bios_selection, ovmf_path, hdd_selection, vdisk_target, "-net", "none", "-serial", "stdio", "-M", "q35", "-cpu", "qemu64", "-enable-kvm", "-no-shutdown", "-no-reboot", "-d", "guest_errors,int,cpu_reset,out_asm,in_asm"};
-        //"-s", "-S" };
-    const run_command = b.addSystemCommand(qemu_command);
-    run_command.step.dependOn(&install_uefi_loader.step);
-    const run = b.step("uefi", "Run the kernel");
-
-    run.dependOn(&run_command.step);
-}
-
-fn build_kernel(b: *std.build.Builder) *std.build.LibExeObjStep
-{
-    const kernel_target = std.zig.CrossTarget
-    {
-        .cpu_arch = .x86_64,
-        .os_tag = .freestanding,
-        .abi = .none,
-    };
-
-    const kernel_name = "kernel.elf";
-    const kernel_build_mode = b.standardReleaseOptions();
-    const kernel_main_file = "src/kernel/main.zig";
-    const kernel_x86_file = "src/kernel/x86.asm";
-    const kernel_x86_obj_file = "kernel_x86.o";
-    const kernel_x86_obj_file_path = "zig-cache/" ++ kernel_x86_obj_file;
-    const kernel_x86 = b.addSystemCommand(&[_][]const u8 { "nasm", kernel_x86_file, "-felf64", "-Fdwarf", "-o", kernel_x86_obj_file_path });
-
-    const kernel = b.addExecutable(kernel_name, kernel_main_file);
-    kernel.addObjectFileSource(std.build.FileSource.relative(kernel_x86_obj_file_path));
-    kernel.setLinkerScriptPath(std.build.FileSource.relative("src/kernel/linker.ld"));
-    kernel.red_zone = false;
-    kernel.setMainPkgPath("src");
-    kernel.setBuildMode(kernel_build_mode);
-    kernel.setTarget(kernel_target);
-    kernel.setOutputDir(uefi_mount_dir);
-    kernel.step.dependOn(&kernel_x86.step);
-    kernel.install();
-
-    return kernel;
-}
-
-fn build_bootloader(b: *std.build.Builder) void
-{
-    const bios_output_file = "bios.bin";
-    const bios_output_path = "zig-cache/" ++ bios_output_file;
-    const bootloader = b.addSystemCommand(&[_][]const u8 { "nasm", "-fbin", "src/boot/x86/bios.S", "-o", bios_output_path });
-    b.default_step.dependOn(&bootloader.step);
-
-    const bootloader_install = b.addInstallBinFile(FileSource.relative(bios_output_path), bios_output_file);
-    bootloader_install.step.dependOn(&bootloader.step);
-    b.default_step.dependOn(&bootloader_install.step);
-
-    const bootloader_install_path = "zig-out/bin/" ++ bios_output_file;
-    const run_command = b.addSystemCommand(&[_][]const u8 { "qemu-system-x86_64", "-hda", bootloader_install_path, "-d", "guest_errors,int,cpu_reset,in_asm"});
-    run_command.step.dependOn(&bootloader_install.step);
+        const qemu_cmd = try std.mem.join(b.allocator, " ", qemu_command_str);
+        print("QEMU command:\n{s}\n", .{qemu_cmd});
+    }
+    const run_command = b.addSystemCommand(qemu_command_str);
+    run_command.step.dependOn(&install_disk_image.step);
 
     const run_step = b.step("run", "Run the bootloader");
     run_step.dependOn(&run_command.step);
+}
+
+const a_megabyte = 1024 * 1024;
+const disk_size: u64 = 256 * a_megabyte;
+const memory_size: u64 = disk_size;
+
+const DiskImage = struct
+{
+    const Self = @This();
+
+    step: Step,
+    builder: *Builder,
+    file_buffer: ArrayList(u8),
+
+    fn build(step: *Step) !void
+    {
+        const self = @fieldParentPtr(Self, "step", step);
+        const MBR = @import("src/boot/x86/mbr.zig");
+
+        self.file_buffer = try ArrayList(u8).initCapacity(self.builder.allocator, disk_size);
+        self.file_buffer.items.len = disk_size;
+        std.mem.set(u8, self.file_buffer.items, 0);
+        self.file_buffer.items.len = 0;
+
+        print("Reading MBR file...\n", .{});
+        try self.copy_file(mbr_output_path, MBR.length);
+        var partitions = @intToPtr(*align(1) [16]u32, @ptrToInt(&self.file_buffer.items[MBR.Offset.partition]));
+        partitions[0] = 0x80; // bootable
+        partitions[1] = 0x83; // type
+        partitions[2] = 0x800; // offset
+        partitions[3] = @intCast(u32, disk_size / 0x200) - 0x800; // sector count
+        fix_partition(partitions);
+
+        if (true)
+        {
+            // fill out 0s for this space
+            const blank_size = 0x800 * 0x200 - 0x200;
+            self.file_buffer.items.len += blank_size;
+        }
+        else
+        {
+            self.file_buffer.items.len = 0x800;
+        }
+
+        const bios_stage_1_max_length = 0x200;
+        print("Reading BIOS stage 1 file...\n", .{});
+        try self.copy_file(bios_stage_1_output_path, bios_stage_1_max_length);
+
+        // @TODO: continue writing to the disk
+        print("Writing image disk to {s}\n", .{disk_image_output_path});
+        self.file_buffer.items.len = self.file_buffer.capacity;
+        print("Disk size: {}\n", .{self.file_buffer.items.len});
+        try std.fs.cwd().writeFile(disk_image_output_path, self.file_buffer.items[0..]);
+    }
+
+    fn fix_partition(partitions: *align(1) [16]u32) void
+    {
+        const heads_per_cylinder = 256;
+        const sectors_per_track = 63;
+        const partition_offset_cylinder = (partitions[2] / sectors_per_track) / heads_per_cylinder;
+        const partition_offset_head = (partitions[2] / sectors_per_track) % heads_per_cylinder;
+        const partition_offset_sector = (partitions[2] % sectors_per_track) + 1;
+        const partition_size_cylinder = (partitions[3] / sectors_per_track) / heads_per_cylinder;
+        const partition_size_head = (partitions[3] / sectors_per_track) % heads_per_cylinder;
+        const partition_size_sector = (partitions[3] % sectors_per_track) + 1;
+
+        partitions[0] |= (partition_offset_head << 8) | (partition_offset_sector << 16) | (partition_offset_cylinder << 24) | ((partition_offset_cylinder >> 8) << 16);
+        partitions[1] |= (partition_size_head << 8) | (partition_size_sector << 16) | (partition_size_cylinder << 24) | ((partition_size_cylinder >> 8) << 16);
+    }
+
+    fn create(b: *Builder) !*Self
+    {
+        var self = b.allocator.create(Self) catch @panic("out of memory");
+        self.* = Self
+        {
+            .step = Step.init(.custom, "image", b.allocator, Self.build),
+            .builder = b,
+            .file_buffer = undefined,
+            
+        };
+
+        return self;
+    }
+
+    fn copy_file(self: *Self, filename: []const u8, expected_length: ?u64) !void
+    {
+        print("Copying file {s} to file buffer at offset {}...\n", .{filename, self.file_buffer.items.len});
+
+        const file = try std.fs.cwd().openFile(filename, .{});
+        const file_size = try file.getEndPos();
+        const file_buffer_offset = self.file_buffer.items.len;
+        self.file_buffer.items.len += file_size;
+        const written_byte_count = try file.readAll(self.file_buffer.items[file_buffer_offset..]);
+        assert(written_byte_count == file_size);
+        if (expected_length) |file_expected_length| assert(written_byte_count <= file_expected_length);
+        print("Done! Copied {} bytes.\n", .{written_byte_count});
+    }
+
+    fn append_to_file(self: *Self, data: []const u8) void
+    {
+        print("Copying {} bytes to file buffer...\n", .{data.len});
+        self.file_buffer.appendSliceAssumeCapacity(data);
+    }
+};
+
+fn nasm_compile_binary(builder: *Builder, src: []const u8, out: []const u8) *RunStep
+{
+    const nasm_command = builder.addSystemCommand(&[_][]const u8 { "nasm", "-fbin", src, "-o", out });
+    return nasm_command;
 }
