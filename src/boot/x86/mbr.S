@@ -68,20 +68,10 @@ found_partition:
     mov bx, 0x7c00
     call load_sector
 
+    mov dl, [drive_number]
+    pop si
+    mov dh, 0x01
     jmp 0x0:0x7c00
-
-error:
-    .loop:
-    lodsb
-    or al, al
-    jz .break
-    mov ah, 0x0e
-    int 0x10
-    jmp .loop
-
-    .break:
-    cli
-    hlt
 
 ; di - LBA.
 ; es:bx - buffer
@@ -115,6 +105,18 @@ load_sector:
 
 	ret
 
+error:
+    .loop:
+    lodsb
+    or al, al
+    jz .break
+    mov ah, 0x0e
+    int 0x10
+    jmp .loop
+
+    .break:
+    cli
+    hlt
 
 error_cannot_read_disk: db "Error: the disk could not be read (MBR)", 0
 error_invalid_geometry: db "Error: invalid disk geometry (MBR)", 0

@@ -35,6 +35,10 @@ const bios_stage_1_source_file = bios_source_root_dir ++ "bios_stage_1.S";
 const bios_stage_1_output_file = "bios_stage_1.bin";
 const bios_stage_1_output_path = build_cache_dir ++ bios_stage_1_output_file;
 
+const bios_stage_2_source_file = bios_source_root_dir ++ "bios_stage_2.S";
+const bios_stage_2_output_file = "bios_stage_2.bin";
+const bios_stage_2_output_path = build_cache_dir ++ bios_stage_2_output_file;
+
 const disk_image_output_file = "disk.img";
 const disk_image_output_path = build_cache_dir ++ disk_image_output_file;
 
@@ -45,12 +49,13 @@ fn build_bootloader(b: *Builder) !void
     const mbr = nasm_compile_binary(b, mbr_source_file, mbr_output_path);
 
     const bios_stage_1 = nasm_compile_binary(b, bios_stage_1_source_file, bios_stage_1_output_path);
+    const bios_stage_2 = nasm_compile_binary(b, bios_stage_2_source_file, bios_stage_2_output_path);
     b.default_step.dependOn(&mbr.step);
     b.default_step.dependOn(&bios_stage_1.step);
+    b.default_step.dependOn(&bios_stage_2.step);
 
     var disk_image = try DiskImage.create(b);
-    disk_image.step.dependOn(&mbr.step);
-    disk_image.step.dependOn(&bios_stage_1.step);
+    disk_image.step.dependOn(b.default_step);
 
     const install_disk_image = b.addInstallBinFile(FileSource.relative(disk_image_output_path), disk_image_output_file);
     install_disk_image.step.dependOn(&disk_image.step);
@@ -113,6 +118,12 @@ const DiskImage = struct
         const bios_stage_1_max_length = 0x200;
         print("Reading BIOS stage 1 file...\n", .{});
         try self.copy_file(bios_stage_1_output_path, bios_stage_1_max_length);
+
+        const bios_stage_2_max_length = 0x200 * 15;
+        const file_offset = self.file_buffer.items.len;
+        print("Reading BIOS stage 1 file...\n", .{});
+        try self.copy_file(bios_stage_2_output_path, bios_stage_2_max_length);
+        self.file_buffer.items.len = file_offset + bios_stage_2_max_length;
 
         // @TODO: continue writing to the disk
         print("Writing image disk to {s}\n", .{disk_image_output_path});
