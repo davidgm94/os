@@ -1,5 +1,5 @@
 [bits 16]
-[org 0x0600]
+[org 0x600]
 
 start: 
     cli
@@ -32,11 +32,11 @@ find_partition:
     int 0x13
     mov si, error_cannot_read_disk
     jc error
-    and cl, 0x3f
-    mov byte [sector_count], cl
+    and cx, 0x3f
+    mov word [sector_count], cx
     inc dh
     shr dx, 8
-    mov byte [head_count], dl
+    mov word [head_count], dx
     mov si, error_invalid_geometry
     or cx, cx
     jz error
@@ -70,6 +70,19 @@ found_partition:
 
     jmp 0x0:0x7c00
 
+error:
+    .loop:
+    lodsb
+    or al, al
+    jz .break
+    mov ah, 0x0e
+    int 0x10
+    jmp .loop
+
+    .break:
+    cli
+    hlt
+
 ; di - LBA.
 ; es:bx - buffer
 load_sector:
@@ -102,30 +115,14 @@ load_sector:
 
 	ret
 
-error:
-    .loop:
-    lodsb
-    or al, al
-    jz .break
-    mov ah, 0x0e
-    int 0x10
-    jmp .loop
-
-    .break:
-    cli
-    hlt
-
-breakpoint:
-    hlt
-    jmp breakpoint
 
 error_cannot_read_disk: db "Error: the disk could not be read (MBR)", 0
 error_invalid_geometry: db "Error: invalid disk geometry (MBR)", 0
 error_no_bootable_partition: db "Error: no bootable partition (MBR)", 0
 
 drive_number: db 0
-sector_count: db 0
-head_count: db 0
+sector_count: dw 0
+head_count: dw 0
 
 times 0x1b4-($-$$) db 0
 
