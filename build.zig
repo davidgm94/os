@@ -39,7 +39,6 @@ const bios_stage_2_source_file = bios_source_root_dir ++ "bios_stage_2.S";
 const bios_stage_2_output_file = "bios_stage_2.bin";
 const bios_stage_2_output_path = build_cache_dir ++ bios_stage_2_output_file;
 
-const bios_loader_source_file = bios_source_root_dir ++ "bios_loader.S";
 const kernel_source_file = "src/kernel/main.zig";
 const kernel_output_file = "kernel.elf";
 const kernel_output_path = build_cache_dir ++ kernel_output_file;
@@ -70,12 +69,12 @@ fn build_bootloader(b: *Builder) !void
     const mbr = nasm_compile_binary(b, mbr_source_file, mbr_output_path);
 
     const bios_stage_1 = nasm_compile_binary(b, bios_stage_1_source_file, bios_stage_1_output_path);
-    const bios_stage_2 = nasm_compile_binary(b, bios_loader_source_file, bios_stage_2_output_path);
-    //const kernel = build_kernel(b);
+    const bios_stage_2 = nasm_compile_binary(b, bios_stage_2_source_file, bios_stage_2_output_path);
+    const kernel = build_kernel(b);
     b.default_step.dependOn(&mbr.step);
     b.default_step.dependOn(&bios_stage_1.step);
     b.default_step.dependOn(&bios_stage_2.step);
-    //b.default_step.dependOn(&kernel.step);
+    b.default_step.dependOn(&kernel.step);
 
     var disk_image = try DiskImage.create(b);
     disk_image.step.dependOn(b.default_step);
@@ -132,17 +131,17 @@ const DiskImage = struct
         print("File offset: {}\n", .{self.file_buffer.items.len});
 
         const bios_stage_2_max_length = 0x200 * 15;
-        //const file_offset = self.file_buffer.items.len;
+        const file_offset = self.file_buffer.items.len;
         print("Reading BIOS stage 2 file...\n", .{});
         try self.copy_file(bios_stage_2_output_path, bios_stage_2_max_length);
-        //const kernel_offset = file_offset + bios_stage_2_max_length;
-        //self.file_buffer.items.len = kernel_offset;
-        //print("File offset: {}\n", .{self.file_buffer.items.len});
-        //var kernel_size: u32 = 0;
-        //try self.copy_file(kernel_output_path, null);
-        //kernel_size = @intCast(u32, self.file_buffer.items.len - kernel_offset);
-        //var kernel_size_writer = @ptrCast(*align(1) u32, &self.file_buffer.items[MBR.Offset.kernel_size]);
-        //kernel_size_writer.* = kernel_size;
+        const kernel_offset = file_offset + bios_stage_2_max_length;
+        self.file_buffer.items.len = kernel_offset;
+        print("File offset: {}\n", .{self.file_buffer.items.len});
+        var kernel_size: u32 = 0;
+        try self.copy_file(kernel_output_path, null);
+        kernel_size = @intCast(u32, self.file_buffer.items.len - kernel_offset);
+        var kernel_size_writer = @ptrCast(*align(1) u32, &self.file_buffer.items[MBR.Offset.kernel_size]);
+        kernel_size_writer.* = kernel_size;
 
         // @TODO: continue writing to the disk
         print("Writing image disk to {s}\n", .{disk_image_output_path});

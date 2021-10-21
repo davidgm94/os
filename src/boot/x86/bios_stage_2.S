@@ -191,7 +191,7 @@ load_memory_map:
     mov eax, [.total_memory + 4]
     mov dword [fs:bx + 12], eax
 
-    jmp allocated_kernel_buffer
+    jmp allocate_kernel_buffer
 
     .fail:
     mov si, error_could_not_get_memory_map
@@ -206,31 +206,9 @@ load_memory_map:
         .acpi: dd 0
     .total_memory: dq 0
 
-;load_kernel:
-	; Load the superblock.
-    ; CX = sector count to load
-    ; EAX = source sector
-    ; EDI = destination raw address
-	;mov	eax, kernel_sector
-	;mov	edi, 0x8000
-	;mov	cx, 1
-	;call load_sectors
-	;mov	ax, 0x8000 / 16
-	;mov	fs,ax
-
-	;; Check the ELF signature.
-	;mov	eax, dword [fs:0]
-	;cmp	eax, 0x464c457f
-	;mov	si, error_not_elf
-	;jne	error
-
-    ; @TODO: do further checks
-
-    ;cli
-    ;hlt
 
 
-allocated_kernel_buffer:
+allocate_kernel_buffer:
     push ds
     push es
     push ss
@@ -306,6 +284,7 @@ load_kernel_into_memory:
     ; CX = sector count to load
     ; EAX = source sector
     ; EDI = destination raw address
+
     mov eax, dword [kernel_size]
     xor edx, edx
     mov ecx, 0x200
@@ -315,93 +294,34 @@ load_kernel_into_memory:
     jge error
     mov cx, ax
     mov edi, [kernel_buffer]
+
+    ;mov edi, 0x8000
+    ;mov cx, 45
+
+    mov eax, kernel_sector
     call load_sectors
-    cli
-    hlt
+check_elf:
+    mov eax, [kernel_buffer]
+    shr eax, 4
+    mov fs, eax
 
-;check_for_data_indirect:
-    ;mov ax, superblock / 16
+    ;mov ax, 0x8000 / 0x10
     ;mov fs, ax
-    ;mov bx, [kernel_data_stream_position]
-    ;mov ax, [fs:bx + 4]
-    ;mov si, error_unexpected_file_problem
-    ;cmp al, 2
-    ;jne error
 
-;load_each_extent:
-    ;mov edi, [kernel_buffer]
-    ;mov si, [fs:bx + 6]
-    ;add bx, 32
-
-    ;; @TODO: implement more than 1 extent
-    ;push si
-    ;cmp si, 1
-    ;mov si, error_unexpected_file_problem
-    ;jne error
-    ;pop si
-
-    ;.extent_loop:
-    ;; @TODO: implement other extents other than offset = 1 and count = 2
-    ;mov al, [fs:bx]
-    ;cmp al, 0x08
-    ;push si
-    ;mov si, error_unexpected_file_problem
-    ;jne error
-    ;pop si
-    
-    ;mov eax, [fs:64]
-    ;shr eax, 9
-    ;xor ecx, ecx
-    ;mov cx, [fs:bx + 2]
-    ;xchg ch, cl
-    ;mul cx
-    ;mov cx, ax
-
-    ;xor eax, eax
-    ;mov al, [fs:bx + 1]
-    ;mul dword [fs:64]
-    ;shr eax, 9
-
-    ;xchg bx, bx
-
-    ;; CX = sector count to load
-    ;; EAX = source sector
-    ;; EDI = destination raw address
-    ;call load_sectors
-    ;add bx, 4
-
-    ;sub si, 1
-    ;cmp si, 0
-    ;jne .extent_loop
-
-enable_video_mode:
-    cli
-    hlt
+    mov eax, dword [fs:0]
+    cmp eax, 0x464c457f
+    mov si, error_not_elf
+    jne error
 
 stall:
     cli
     hlt
 
-check_a20:
-; Set the carry flag if the A20 line is enabled
-	mov	ax,0
-	mov	es,ax
-	mov	ax,0xFFFF
-	mov	fs,ax
-	mov	byte [es:0x600],0
-	mov	byte [fs:0x610],0xFF
-	cmp	byte [es:0x600],0xFF
-	je	.enabled
-	stc
-	ret
-	.enabled: 
-	clc
-	ret
-
-    ; CX = sector count to load
-    ; EAX = source sector
-    ; EDI = destination raw address
+; CX = sector count to load
+; EAX = source sector
+; EDI = destination raw address
 load_sectors:
+    .loop:
     pushad
     push edi
 
@@ -414,7 +334,7 @@ load_sectors:
     mov dl, [drive_number]
     mov si, read_structure
     ; @TODO: emulator branching
-    call load_sector_emu
+    call load_sector
 
     mov si, error_cannot_read_disk
     jc error
@@ -425,10 +345,10 @@ load_sectors:
     popad
     add edi, 0x200
     inc eax
-    loop load_sectors
+    loop .loop
     ret
 
-load_sector_emu:
+load_sector:
     mov di, [read_structure.lba]
     xor ax, ax
     mov es, ax
@@ -498,6 +418,22 @@ move_sector_to_target:
     pop ss
     sti
     ret
+
+check_a20:
+; Set the carry flag if the A20 line is enabled
+	mov	ax,0
+	mov	es,ax
+	mov	ax,0xFFFF
+	mov	fs,ax
+	mov	byte [es:0x600],0
+	mov	byte [fs:0x610],0xFF
+	cmp	byte [es:0x600],0xFF
+	je	.enabled
+	stc
+	ret
+	.enabled: 
+	clc
+	ret
 
 [bits 32]
 error_32:
