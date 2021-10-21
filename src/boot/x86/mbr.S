@@ -71,6 +71,10 @@ found_partition:
     mov dl, [drive_number]
     pop si
     mov dh, 0x01
+    mov eax, dword [kernel_size]
+    cmp eax, 0x300000
+    mov si, error_kernel_too_large
+    jg error
     jmp 0x0:0x7c00
 
 ; di - LBA.
@@ -121,12 +125,16 @@ error:
 error_cannot_read_disk: db "Error: the disk could not be read (MBR)", 0
 error_invalid_geometry: db "Error: invalid disk geometry (MBR)", 0
 error_no_bootable_partition: db "Error: no bootable partition (MBR)", 0
+error_kernel_too_large: db "Error: kernel is too large (MBR)", 0
 
 drive_number: db 0
 sector_count: dw 0
 head_count: dw 0
 
-times 0x1b4-($-$$) db 0
+times 0x1b0-($-$$) db 0
+
+; Here the kernel size is stored by a patch to the MBR binary file
+kernel_size: dd 0
 
 disk_identifier: times 10 db 0
 partition_entry_1: times 16 db 0

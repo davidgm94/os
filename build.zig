@@ -39,20 +39,43 @@ const bios_stage_2_source_file = bios_source_root_dir ++ "bios_stage_2.S";
 const bios_stage_2_output_file = "bios_stage_2.bin";
 const bios_stage_2_output_path = build_cache_dir ++ bios_stage_2_output_file;
 
+const bios_loader_source_file = bios_source_root_dir ++ "bios_loader.S";
+const kernel_source_file = "src/kernel/main.zig";
+const kernel_output_file = "kernel.elf";
+const kernel_output_path = build_cache_dir ++ kernel_output_file;
+const kernel_linker_script_path = "src/kernel/linker.ld";
+
 const disk_image_output_file = "disk.img";
 const disk_image_output_path = build_cache_dir ++ disk_image_output_file;
 
 const final_disk_image = build_output_dir ++ disk_image_output_file;
+
+fn build_kernel(b: *Builder) *std.build.LibExeObjStep
+{
+    const kernel = b.addExecutable(kernel_output_file, kernel_source_file);
+    kernel.setTarget(CrossTarget
+        {
+            .cpu_arch = Target.Cpu.Arch.x86_64,
+            .os_tag = Target.Os.Tag.freestanding,
+            .abi = Target.Abi.none,
+        });
+    kernel.setLinkerScriptPath(FileSource.relative(kernel_linker_script_path));
+    kernel.setOutputDir(build_cache_dir);
+
+    return kernel;
+}
 
 fn build_bootloader(b: *Builder) !void
 {
     const mbr = nasm_compile_binary(b, mbr_source_file, mbr_output_path);
 
     const bios_stage_1 = nasm_compile_binary(b, bios_stage_1_source_file, bios_stage_1_output_path);
-    const bios_stage_2 = nasm_compile_binary(b, bios_stage_2_source_file, bios_stage_2_output_path);
+    const bios_stage_2 = nasm_compile_binary(b, bios_loader_source_file, bios_stage_2_output_path);
+    //const kernel = build_kernel(b);
     b.default_step.dependOn(&mbr.step);
     b.default_step.dependOn(&bios_stage_1.step);
     b.default_step.dependOn(&bios_stage_2.step);
+    //b.default_step.dependOn(&kernel.step);
 
     var disk_image = try DiskImage.create(b);
     disk_image.step.dependOn(b.default_step);
@@ -61,11 +84,6 @@ fn build_bootloader(b: *Builder) !void
     install_disk_image.step.dependOn(&disk_image.step);
 
     const qemu_command_str = &[_][]const u8 { "qemu-system-x86_64", "-hda", final_disk_image, "-no-reboot", "-no-shutdown", "-D", "logging.txt", "-d", "guest_errors,int,cpu,cpu_reset,in_asm"};
-    if (false)
-    {
-        const qemu_cmd = try std.mem.join(b.allocator, " ", qemu_command_str);
-        print("QEMU command:\n{s}\n", .{qemu_cmd});
-    }
     const run_command = b.addSystemCommand(qemu_command_str);
     run_command.step.dependOn(&install_disk_image.step);
 
@@ -104,26 +122,27 @@ const DiskImage = struct
         partitions[3] = @intCast(u32, disk_size / 0x200) - 0x800; // sector count
         fix_partition(partitions);
 
-        if (true)
-        {
-            // fill out 0s for this space
-            const blank_size = 0x800 * 0x200 - 0x200;
-            self.file_buffer.items.len += blank_size;
-        }
-        else
-        {
-            self.file_buffer.items.len = 0x800;
-        }
+        // fill out 0s for this space
+        const blank_size = 0x800 * 0x200 - 0x200;
+        self.file_buffer.items.len += blank_size;
 
         const bios_stage_1_max_length = 0x200;
         print("Reading BIOS stage 1 file...\n", .{});
         try self.copy_file(bios_stage_1_output_path, bios_stage_1_max_length);
+        print("File offset: {}\n", .{self.file_buffer.items.len});
 
         const bios_stage_2_max_length = 0x200 * 15;
-        const file_offset = self.file_buffer.items.len;
-        print("Reading BIOS stage 1 file...\n", .{});
+        //const file_offset = self.file_buffer.items.len;
+        print("Reading BIOS stage 2 file...\n", .{});
         try self.copy_file(bios_stage_2_output_path, bios_stage_2_max_length);
-        self.file_buffer.items.len = file_offset + bios_stage_2_max_length;
+        //const kernel_offset = file_offset + bios_stage_2_max_length;
+        //self.file_buffer.items.len = kernel_offset;
+        //print("File offset: {}\n", .{self.file_buffer.items.len});
+        //var kernel_size: u32 = 0;
+        //try self.copy_file(kernel_output_path, null);
+        //kernel_size = @intCast(u32, self.file_buffer.items.len - kernel_offset);
+        //var kernel_size_writer = @ptrCast(*align(1) u32, &self.file_buffer.items[MBR.Offset.kernel_size]);
+        //kernel_size_writer.* = kernel_size;
 
         // @TODO: continue writing to the disk
         print("Writing image disk to {s}\n", .{disk_image_output_path});
@@ -182,8 +201,8 @@ const DiskImage = struct
     }
 };
 
-fn nasm_compile_binary(builder: *Builder, src: []const u8, out: []const u8) *RunStep
+fn nasm_compile_binary(builder: *Builder, comptime src: []const u8, comptime out: []const u8) *RunStep
 {
-    const nasm_command = builder.addSystemCommand(&[_][]const u8 { "nasm", "-fbin", src, "-o", out });
-    return nasm_command;
+    const base_nasm_command = &[_][]const u8 { "nasm", "-fbin", src, "-o", out };
+    return builder.addSystemCommand(base_nasm_command);
 }

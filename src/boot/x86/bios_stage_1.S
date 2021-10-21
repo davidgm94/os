@@ -1,4 +1,4 @@
-    ; @TODO: implement emulator branching
+; @TODO: implement emulator branching
 [bits 16]
 [org 0x7c00]
 
@@ -7,7 +7,8 @@
 
 start:
     cli
-    xor ax, ax
+    mov dword [kernel_size], eax
+    xor eax, eax
     mov ds, ax
     mov es, ax
     mov fs, ax
@@ -54,7 +55,8 @@ start:
     mov si, [partition_entry]
     mov bx, [sector_count]
     mov cx, [head_count]
-    jmp 0:stage_2_address
+    mov eax, dword [kernel_size]
+    jmp 0x0:stage_2_address
 
 load_sectors:
     pusha
@@ -131,11 +133,11 @@ error:
     cli
     hlt
 
-
-drive_number: db 0
+kernel_size: dd 0
 partition_entry: dw 0
 sector_count: dw 0
 head_count: dw 0
+drive_number: db 0
 
 read_structure:
     dw 0x10
