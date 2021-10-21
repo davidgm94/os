@@ -12,6 +12,8 @@
 %define kernel_sector 0x10
 
 start:
+    cli
+    hlt
     mov dword [kernel_size], eax
     mov esp, 0x7c00
 
