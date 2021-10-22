@@ -61,6 +61,23 @@ enable_a20:
     jmp error
     .a20_enabled:
     sti
+    jmp identity_paging
+
+check_a20:
+; Set the carry flag if the A20 line is enabled
+	mov	ax,0
+	mov	es,ax
+	mov	ax,0xFFFF
+	mov	fs,ax
+	mov	byte [es:0x600],0
+	mov	byte [fs:0x610],0xFF
+	cmp	byte [es:0x600],0xFF
+	je	.enabled
+	stc
+	ret
+	.enabled: 
+	clc
+	ret
 
 identity_paging:
     mov eax, page_directory / 16
@@ -300,33 +317,7 @@ load_kernel_into_memory:
 
     mov eax, kernel_sector
     call load_sectors
-
-switch_to_protected_mode:
-    cli
-    mov eax, cr0
-    or eax, 0x80000001
-    mov cr0, eax
-    jmp 0x8:.protected_mode
-
-    [bits 32]
-    .protected_mode:
-    mov ax, 0x10
-    mov ds, ax
-    mov es, ax
-    mov ss, ax
-
-check_elf:
-    mov ebx, [kernel_buffer]
-    mov esi, error_not_elf
-    cmp dword [ebx + 0], 0x464c457f
-    jne error_32
-    mov esi, error_not_64_bit
-    cmp byte [ebx + 4], 2
-    jne error_32
-
-stall:
-    cli
-    hlt
+    jmp switch_to_protected_mode
 
 ; CX = sector count to load
 ; EAX = source sector
@@ -430,23 +421,46 @@ move_sector_to_target:
     sti
     ret
 
-check_a20:
-; Set the carry flag if the A20 line is enabled
-	mov	ax,0
-	mov	es,ax
-	mov	ax,0xFFFF
-	mov	fs,ax
-	mov	byte [es:0x600],0
-	mov	byte [fs:0x610],0xFF
-	cmp	byte [es:0x600],0xFF
-	je	.enabled
-	stc
-	ret
-	.enabled: 
-	clc
-	ret
+error:
+    .loop:
+    lodsb
+    or al, al
+    jz .break
+    mov ah, 0x0e
+    int 0x10
+    jmp .loop
+
+    .break:
+    cli
+    hlt
+
+switch_to_protected_mode:
+    cli
+    mov eax, cr0
+    or eax, 0x80000001
+    mov cr0, eax
+    jmp 0x8:protected_mode
 
 [bits 32]
+protected_mode:
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov ss, ax
+
+check_elf:
+    mov ebx, [kernel_buffer]
+    mov esi, error_not_elf
+    cmp dword [ebx + 0], 0x464c457f
+    jne error_32
+    mov esi, error_not_64_bit
+    cmp byte [ebx + 4], 2
+    jne error_32
+
+stall:
+    cli
+    hlt
+
 error_32:
     mov eax, cr0
     and eax, 0x7FFFFFFF
@@ -467,18 +481,6 @@ error_32:
     mov ss, ax
     jmp error
 
-error:
-    .loop:
-    lodsb
-    or al, al
-    jz .break
-    mov ah, 0x0e
-    int 0x10
-    jmp .loop
-
-    .break:
-    cli
-    hlt
 
 read_structure:
     dw 0x10
@@ -494,22 +496,22 @@ gdt_data:
         dw 0xcf9a
         db 0
     .data_entry:
-        dd 0xffff ; 0x08
+        dd 0xffff ; 0x10
         db 0
         dw 0xcf92
         db 0
     .code_entry_16:
-        dd 0xffff ; 0x08
+        dd 0xffff ; 0x18
         db 0
         dw 0x0f9a
         db 0
     .data_entry_16:
-        dd 0xffff ; 0x08
+        dd 0xffff ; 0x20
         db 0
         dw 0x0f92
         db 0
     .user_code:
-        dd 0xffff ; 0x08
+        dd 0xffff ; 0x28
         db 0
         dw 0xcffa
         db 0
