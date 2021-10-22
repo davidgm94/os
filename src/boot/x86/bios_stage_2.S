@@ -298,7 +298,7 @@ allocate_kernel_buffer:
     pop ds
 
 load_kernel_into_memory:
-    ; CX = sector count to load
+    ; CX = sector count to load (max 0xffff)
     ; EAX = source sector
     ; EDI = destination raw address
 
@@ -306,14 +306,11 @@ load_kernel_into_memory:
     xor edx, edx
     mov ecx, 0x200
     div ecx ; eax = sector count
-    cmp eax, 0x100
+    cmp eax, 0xffff
     mov si, error_kernel_sector_count_too_big
-    jge error
+    jg error
     mov cx, ax
     mov edi, [kernel_buffer]
-
-    ;mov edi, 0x8000
-    ;mov cx, 45
 
     mov eax, kernel_sector
     call load_sectors

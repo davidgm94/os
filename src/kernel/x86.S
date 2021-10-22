@@ -329,8 +329,48 @@ CPU0_setup:
     wrmsr
 
     .setup_cpu_local_storage:
-    cli
-    hlt
+    mov ecx, 0xC0000101
+    mov rax, cpu_local_storage
+    mov rdx, cpu_local_storage
+    shr rdx, 32
+    mov rdi, cpu_local_storage_index
+    add rax, [rdi]
+    add qword [rdi], 32 ; space for 4 8-byte values at gs:0 - gs:31
+    wrmsr
+
+    .IDTR_load:
+    mov rax, idt
+    lidt [rax]
+    sti
+
+    .APIC_enable:
+    mov ecx, 0x1b
+    rdmsr
+    and eax, ~0xfff
+    mov edi, eax
+    test eax, 1 << 8
+    jne $
+    or eax, 0x900
+    wrmsr
+
+
+    ; set spurious interrupt vector to 0xff
+    mov rax, 0xFFFFFE00000000F0
+    add rax, rdi
+    mov ebx, [rax]
+    or ebx, 0x1ff
+    mov [rax], ebx
+
+    ; use flat processor addressing model
+    mov rax, 0xFFFFFE00000000E0
+    add rax, rdi
+    mov dword [rax], 0xffffffff
+
+    ; make sure that no external interrupts are masked
+    xor rax, rax
+    mov cr8, rax
+
+    ret
 
 syscall_entry:
     mov rsp, [gs:8]
