@@ -49,17 +49,25 @@ const disk_image_output_path = build_cache_dir ++ disk_image_output_file;
 
 const final_disk_image = build_output_dir ++ disk_image_output_file;
 
+fn nasm_compile_elf_object(builder: *Builder, executable: *std.build.LibExeObjStep, comptime src: []const u8, comptime out: []const u8) void
+{
+    const base_nasm_command = &[_][]const u8 { "nasm", "-felf64", src, "-o", out };
+    const nasm_command = builder.addSystemCommand(base_nasm_command);
+    executable.addObjectFile(out);
+    executable.step.dependOn(&nasm_command.step);
+}
+
 fn build_kernel(b: *Builder) *std.build.LibExeObjStep
 {
     const kernel = b.addExecutable(kernel_output_file, null);
+
     kernel.setTarget(CrossTarget
         {
-            .cpu_arch = Target.Cpu.Arch.x86_64,
-            .os_tag = Target.Os.Tag.freestanding,
-            .abi = Target.Abi.none,
+            .cpu_arch = .x86_64,
+            .os_tag = .freestanding,
+            .abi = .none,
         });
-    const kernel_x86_source_file = "src/kernel/x86.S";
-    kernel.addAssemblyFile(kernel_x86_source_file);
+    nasm_compile_elf_object(b, kernel, "src/kernel/x86.S", "zig-cache/kernel_x86.o");
     kernel.setLinkerScriptPath(FileSource.relative(kernel_linker_script_path));
     kernel.setOutputDir(build_cache_dir);
 
