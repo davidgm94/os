@@ -284,8 +284,93 @@ CPU0_setup:
     mov cr0, rax
     mov cr4, rbx
 
+    .detect_sse3_ssse3:
+    mov eax, 1
+    cpuid
+    test ecx, 1 << 0
+    jnz .has_sse3
+    mov rax, SIMD_SSE3_support
+    and byte [rax], 0
+
+    .has_sse3:
+    test ecx, 1 << 9
+    jnz .has_ssse3
+    mov rax, SIMD_SSSE3_support
+    and byte [rax], 0
+    
+    .has_ssse3:
+
+    .enable_syscall_extensions:
+    mov ecx, 0xC0000080
+    rdmsr
+    or eax, 1
+    wrmsr
+    add ecx, 1
+    rdmsr
+    mov edx, 0x005B0048
+    wrmsr
+    add ecx, 1
+    mov rdx, syscall_entry
+    mov rax, rdx
+    shr rdx, 32
+    wrmsr
+    add ecx, 2
+    rdmsr
+    mov eax, (1 << 10) | (1 << 9) ; clear direction and interrupt flag when entering ring 0
+    wrmsr
+
+    ; assign PAT2 to WC
+    mov ecx, 0x277
+    xor rax, rax
+    xor rdx, rdx
+    rdmsr
+    and eax, 0xFFF8FFFF
+    or eax, 0x00010000
+    wrmsr
+
+    .setup_cpu_local_storage:
     cli
     hlt
+
+syscall_entry:
+    mov rsp, [gs:8]
+    sti
+
+    mov ax, 0x50
+    mov ds, ax
+    mov es, ax
+
+    ; preserve RCX, R11, R12 and RBX
+    push rcx
+    push r11
+    push r12
+    mov rax, rsp
+    push rbx
+    push rax
+
+    ; arguments in rdi, rsi, rdx, r8, r9 (RCX return address, RAX return value)
+    [extern syscall]
+    mov rbx, rsp
+    and rsp, ~0xf
+    call syscall
+    mov rsp, rbx
+
+    ; disable maskable interrupts
+    cli
+
+    ; return to long mode
+    add rsp, 8
+    push rax
+    mov ax, 0x63
+    mov ds, ax
+    mov es, ax
+    pop rax
+    pop rbx
+    pop r12
+    pop r11
+    pop rcx
+    db 0x48
+    sysret
 
 install_interrupt_handler:
     mov word [rbx + 0], dx
