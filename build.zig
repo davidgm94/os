@@ -59,7 +59,7 @@ fn nasm_compile_elf_object(builder: *Builder, executable: *std.build.LibExeObjSt
 
 fn build_kernel(b: *Builder) *std.build.LibExeObjStep
 {
-    const kernel = b.addExecutable(kernel_output_file, null);
+    const kernel = b.addExecutable(kernel_output_file, kernel_source_file);
 
     kernel.setTarget(CrossTarget
         {
