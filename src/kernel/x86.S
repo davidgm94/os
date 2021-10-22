@@ -12,13 +12,54 @@ idt_data: resb idt_size
 cpu_local_storage: resb cpu_local_storage_size
 
 [section .data]
+
 idt:
     .limit: dw idt_size - 1
     .base:  dq idt_data
 
 cpu_local_storage_index: dq 0
 
-; (...)
+[global physical_memory_regions]
+physical_memory_regions: dq 0xFFFFFE0000060000
+
+[global physical_memory_region_count]
+physical_memory_region_count: dq 0
+
+[global physical_memory_region_page_count]
+physical_memory_region_page_count: dq 0
+
+[global physical_memory_original_page_count]
+physical_memory_original_page_count: dq 0
+
+[global physical_memory_region_index]
+physical_memory_region_index: dq 0
+
+[global physical_memory_highest]
+physical_memory_highest: dq 0
+
+[global paging_NXE_support]
+paging_NXE_support: dd 1
+
+[global paging_PCID_support]
+paging_PCID_support: dd 1
+
+[global paging_SMEP_support]
+paging_SMEP_support: dd 1
+
+[global paging_TCE_support]
+paging_TCE_support: dd 1
+
+[global SIMD_SSE3_support]
+SIMD_SSE3_support: dd 1
+
+[global SIMD_SSSE3_support]
+SIMD_SSSE3_support: dd 1
+
+[global bootloader_ID]
+bootloader_ID: dd 0
+
+[global bootloader_information_offset]
+bootloader_information_offset: dq 0
 
 align 0x10
 [global processor_GDTR]
@@ -51,7 +92,7 @@ _start:
     mov rax, cr3
     mov cr3, rax
 
-setup_com_1:
+COM_1_setup:
 
 IDT_install:
     .remap_PIC:
@@ -94,6 +135,155 @@ IDT_install:
     sgdt [rcx]
 
 memory_calculations:
+    mov rax, bootloader_information_offset
+    mov rax, [rax]
+    mov rbx, physical_memory_regions
+    add [rbx], rax
+    mov rdi, 0xFFFFFE0000060000 - 0x10
+    add rdi, rax
+    mov rsi, 0xFFFFFE0000060000
+    add rsi, rax
+    xor rax, rax
+    xor r8, r8
+
+    .loop:
+    add rdi, 0x10
+    mov r9, [rdi + 8]
+    shl r9, 12
+    add r9, [rdi]
+    cmp r9, r8
+    jb .lower
+    mov r8, r9
+
+    .lower:
+    add rax, [rdi + 8]
+    cmp qword [rdi], 0
+    jne .loop
+    mov rbx, [rdi + 8]
+    sub rax, rbx
+    sub rdi, rsi
+    shr rdi, 4
+    mov rsi, physical_memory_region_count
+    mov [rsi], rdi
+    mov rsi, physical_memory_region_page_count
+    mov [rsi], rax
+    mov rsi, physical_memory_original_page_count
+    mov [rsi], rbx
+    mov rsi, physical_memory_highest
+    mov [rsi], r8
+
+PIC_disable:
+    mov al, 0xff
+    out 0xa1, al
+    out 0x21, al
+
+kernel_start:
+    call CPU0_setup
+
+    and rsp, ~0xf
+    extern kernel_main
+    call kernel_main
+
+CPU0_setup:
+    .enable_cpu_features:
+    ; no execute support if available
+    mov eax, 0x80000001 
+    cpuid
+    and edx, 1 << 20
+    shr edx, 20
+    mov rax, paging_NXE_support
+    and [rax], edx
+    cmp edx, 0
+    je .no_paging_NXE_support
+    mov ecx, 0xC0000080
+    rdmsr
+    or eax, 1 << 11
+    wrmsr
+
+    .no_paging_NXE_support:
+
+    .initialize_x87_fpu:
+    fninit
+    mov rax, .cw
+    fldcw [rax]
+    jmp .cwa
+    .cw: dw 0x037a
+    .cwa:
+
+    .smep_support:
+    xor eax, eax
+    cpuid
+    cmp eax, 7
+    jb .no_smep_support
+    mov eax, 7
+    xor ecx, ecx
+    cpuid
+    and ebx, 1 << 7
+    shr ebx, 7
+    mov rax, paging_SMEP_support
+    mov [rax], ebx
+    cmp ebx, 0
+    je .no_smep_support
+    mov word [rax], 2
+    mov rax, cr4
+    or rax, 1 << 20
+    mov cr4, rax
+
+    .no_smep_support:
+
+    .PCID_support:
+    mov eax, 1
+    xor ecx, ecx
+    cpuid
+    and ecx, 1 << 17
+    shr ecx, 17
+    mov rax, paging_PCID_support
+    and [rax], ecx
+    cmp ecx, 0
+    je .no_pcid_support
+    mov rax, cr4
+    or rax, 1 << 17
+    mov cr4, rax
+
+    .no_pcid_support:
+
+    .enable_global_pages:
+    mov rax, cr4
+    or rax, 1 << 7
+    mov cr4, rax
+
+    ; @TODO: is this right?
+    .TCE_support:
+    mov eax, 0x80000001
+    xor ecx, ecx
+    cpuid
+    and ecx, 1 << 17
+    shr ecx, 17
+    mov rax, paging_TCE_support
+    and [rax], ecx
+    cmp ecx, 0
+    je .no_tce_support
+    mov eax, 0xC0000080
+    rdmsr
+    or eax, 1 << 15
+    wrmsr
+    
+    .no_tce_support:
+
+    .enable_write_protect:
+    mov rax, cr0
+    or rax, 1 << 16
+    mov cr0, rax
+
+    .enable_mmx_sse_sse2:
+    mov rax, cr0
+    mov rbx, cr4
+    and rax, ~4
+    or rax, 2
+    or rbx, 512 + 1024
+    mov cr0, rax
+    mov cr4, rbx
+
     cli
     hlt
 
@@ -215,7 +405,6 @@ interrupt_handler_%1:
     INTERRUPT_HANDLER_COMMON
 %endmacro
 
-
 INTERRUPT_HANDLER 0
 INTERRUPT_HANDLER 1
 INTERRUPT_HANDLER 2
@@ -255,5 +444,3 @@ INTERRUPT_HANDLER i
 %assign i i+1
 %endrep
 
-[global bootloader_information_offset]
-bootloader_information_offset: dq 0

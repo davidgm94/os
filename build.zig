@@ -92,7 +92,7 @@ fn build_bootloader(b: *Builder) !void
     const install_disk_image = b.addInstallBinFile(FileSource.relative(disk_image_output_path), disk_image_output_file);
     install_disk_image.step.dependOn(&disk_image.step);
 
-    const qemu_command_str = &[_][]const u8 { "qemu-system-x86_64", "-hda", final_disk_image, "-no-reboot", "-no-shutdown", "-D", "logging.txt", "-d", "guest_errors,int,cpu,cpu_reset,in_asm"};
+    const qemu_command_str = &[_][]const u8 { "qemu-system-x86_64", "-hda", final_disk_image, "-no-reboot", "-no-shutdown", "-D", "logging.txt", "-cpu", "Haswell", "-d", "guest_errors,int,cpu,cpu_reset,in_asm"};
     const run_command = b.addSystemCommand(qemu_command_str);
     run_command.step.dependOn(&install_disk_image.step);
 
