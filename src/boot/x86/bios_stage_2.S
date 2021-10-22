@@ -530,11 +530,231 @@ error_32:
 
 [bits 64]
 long_mode:
-stall:
-    cli
-    hlt
+    mov rax, 0x50
+    mov ds, rax
+    mov es, rax
+    mov ss, rax
 
+check_kernel_elf:
+    mov rbx, [kernel_buffer]
+    mov rsi, error_bad_kernel
+    cmp byte [rbx + 5], 1
+    jne error_64
+    cmp byte [rbx + 7], 0
+    jne error_64
+    cmp byte [rbx + 16], 2
+    jne error_64
+    cmp byte [rbx + 18], 0x3e
+    jne error_64
 
+find_program_headers:
+    mov rax, rbx
+    mov rbx, [rax + 32]
+    add rbx, rax
+    ; RAX = ELF header
+    ; RBX = program headers
+    
+    movzx rcx, word [rax + 56]
+    movzx rdx, word [rax + 54]
+    ; ECX = entries
+    ; EDX = size of entry
+
+    .loop_program_headers:
+    push rax
+    push rcx
+    push rdx
+    push rbx
+
+    ; if (!PT_LOAD) continue
+    mov eax, [rbx]
+    cmp eax, 1
+    jne .next_entry
+
+    ; physical_page_to_allocate_count
+    mov rcx, [rbx + 40]
+    shr rcx, 12
+    inc rcx
+
+    ; starting virtual address
+    mov rax, [rbx + 16]
+    shl rax, 16
+    shr rax, 16
+    mov [.target_page], rax
+
+    ; for(segment.frames) |frame|
+    .frame_loop:
+    xor rbx, rbx
+
+    ; for (memory_regions) |region|
+    .memory_region_loop:
+    
+    ; if (region_page_count == 0) continue;
+    mov rax, [rbx + memory_map + 8]
+    or rax, rax
+    jz .try_next_memory_region
+
+    ; remove one page from the region
+    mov rax, [rbx + memory_map + 0]
+    mov [.physical_page], rax
+    add rax, 0x1000
+    mov [rbx + memory_map + 0], rax
+    sub qword [rbx + memory_map + 8], 1
+
+    jmp .found_physical_page
+
+    .try_next_memory_region:
+    add rbx, 16
+    mov eax, [load_memory_map.pointer]
+    cmp ebx, eax
+    jne .memory_region_loop
+    mov si, error_no_memory
+    jmp error_64
+
+    ; map the page into virtual memory
+    .found_physical_page:
+    mov rax, [.target_page]
+    shr rax, 39
+    mov r8, 0xFFFFFF7FBFDFE000
+    mov rbx, [r8 + rax * 8]
+    cmp rbx, 0
+    jne .has_pdp
+    mov rbx, [page_table_allocation_offset]
+    add rbx, page_directory
+    or rbx, 7
+    mov [r8 + rax * 8], rbx
+    add qword [page_table_allocation_offset], 0x1000
+    mov rax, cr3
+    mov cr3, rax
+
+    .has_pdp:
+    mov rax, [.target_page]
+    shr rax, 30
+    mov r8, 0xFFFFFF7FBFC00000
+    mov rbx, [r8 + rax * 8]
+    cmp rbx, 0
+    jne .has_pd
+    mov rbx, [page_table_allocation_offset]
+    add rbx, page_directory
+    or rbx, 7
+    mov [r8 + rax * 8], rbx
+    add qword [page_table_allocation_offset], 0x1000
+    mov rax, cr3
+    mov cr3, rax
+
+    .has_pd:
+    mov rax, [.target_page]
+    shr rax, 21
+    mov r8, 0xFFFFFF7F80000000
+    mov rbx, [r8 + rax * 8]
+    cmp rbx, 0
+    jne .has_pt
+    mov rbx, [page_table_allocation_offset]
+    add rbx, page_directory
+    or rbx, 7
+    mov [r8 + rax * 8], rbx
+    add qword [page_table_allocation_offset], 0x1000
+    mov rax, cr3
+    mov cr3, rax
+
+    .has_pt:
+    mov rax, [.target_page]
+    shr rax, 12
+    mov rbx, [.physical_page]
+    or rbx, 0x103
+    shl rax, 3
+    xor r8, r8
+    mov r8, 0xFFFFFF00
+    shl r8, 32
+    add rax, r8
+    mov [rax], rbx
+    mov rbx, [.target_page]
+    ; map page
+    invlpg [rbx]
+
+    ; next frame
+    add qword [.target_page], 0x1000
+    dec rcx
+    or rcx, rcx
+    jnz .frame_loop
+
+    ; restore the pointer to the segment
+    pop rbx
+    push rbx
+
+    ; clear the memory
+    mov rcx, [rbx + 40]
+    xor rax, rax
+    mov rdi, [rbx + 16]
+    rep stosb
+
+    ; copy the memory
+    mov rcx, [rbx + 32]
+    mov rsi, [rbx + 8]
+    add rsi, [kernel_buffer]
+    mov rdi, [ebx + 16]
+    rep movsb
+
+    .next_entry:
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+
+    add rbx, rdx
+    dec rcx
+    or rcx, rcx
+    jnz .loop_program_headers
+
+    jmp load_kernel_executable
+
+    .target_page: dq 0
+    .physical_page: dq 0
+
+load_kernel_executable:
+    ; rcx = start address of the kernel
+    mov rbx, [kernel_buffer]
+    mov rcx, [rbx + 24]
+    
+    ; reuse memory used to store the kernel executable
+    xor eax, eax
+    mov ebx, [load_memory_map.pointer]
+    mov [memory_map + ebx + 4], eax
+    mov [memory_map + ebx + 12], eax
+    mov [memory_map + ebx + 16], eax
+    mov [memory_map + ebx + 20], eax
+    mov eax, [memory_map + ebx + 8]
+    mov [memory_map + ebx + 24], eax
+    mov eax, [memory_map + ebx + 12]
+    mov [memory_map + ebx + 28], eax
+    mov eax, [kernel_buffer]
+    mov [memory_map + ebx], eax
+    mov eax, [kernel_size]
+    shr eax, 12
+    mov [memory_map + ebx + 8], eax
+    
+    ; map the first mb at  0xFFFFFE0000000000 --> 0xFFFFFE0000100000
+    mov rdi, 0xFFFFFF7FBFDFE000
+    mov rax, [rdi]
+    mov rdi, 0xFFFFFF7FBFDFEFE0
+    mov [rdi], rax
+    mov rax, cr3
+    mov cr3, rax
+
+    ; use the new linear address of the GDT
+    mov rax, 0xFFFFFE0000000000
+    add qword [gdt_data.gdt2], rax
+    lgdt [gdt_data.gdt]
+
+    ; jump to kernel side
+    xor rdi, rdi
+    mov rsi, 1
+    jmp rcx
+
+error_64:
+    jmp far [.error_32_ind]
+    .error_32_ind:
+        dq error_32
+        dd 8
 
 read_structure:
     dw 0x10
@@ -634,5 +854,6 @@ error_cpu_not_64_bit: db "Error: not 64-bit CPU", 0
 error_cannot_read_disk: db "Error: cannot read disk", 0
 error_unexpected_file_problem: db "Error: unexpected file problem", 0
 error_kernel_too_large: db "Error: kernel too large", 0
-error_no_memory: db "Error: no memory", 0
 error_kernel_sector_count_too_big: db "Error: kernel sector count too large", 0
+error_bad_kernel: db "Error: kernel is malformed", 0
+error_no_memory: db "Error: no memory", 0

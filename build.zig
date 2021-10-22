@@ -51,13 +51,15 @@ const final_disk_image = build_output_dir ++ disk_image_output_file;
 
 fn build_kernel(b: *Builder) *std.build.LibExeObjStep
 {
-    const kernel = b.addExecutable(kernel_output_file, kernel_source_file);
+    const kernel = b.addExecutable(kernel_output_file, null);
     kernel.setTarget(CrossTarget
         {
             .cpu_arch = Target.Cpu.Arch.x86_64,
             .os_tag = Target.Os.Tag.freestanding,
             .abi = Target.Abi.none,
         });
+    const kernel_x86_source_file = "src/kernel/x86.S";
+    kernel.addAssemblyFile(kernel_x86_source_file);
     kernel.setLinkerScriptPath(FileSource.relative(kernel_linker_script_path));
     kernel.setOutputDir(build_cache_dir);
 
