@@ -300,18 +300,29 @@ load_kernel_into_memory:
 
     mov eax, kernel_sector
     call load_sectors
+
+switch_to_protected_mode:
+    cli
+    mov eax, cr0
+    or eax, 0x80000001
+    mov cr0, eax
+    jmp 0x8:.protected_mode
+
+    [bits 32]
+    .protected_mode:
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov ss, ax
+
 check_elf:
-    mov eax, [kernel_buffer]
-    shr eax, 4
-    mov fs, eax
-
-    ;mov ax, 0x8000 / 0x10
-    ;mov fs, ax
-
-    mov eax, dword [fs:0]
-    cmp eax, 0x464c457f
-    mov si, error_not_elf
-    jne error
+    mov ebx, [kernel_buffer]
+    mov esi, error_not_elf
+    cmp dword [ebx + 0], 0x464c457f
+    jne error_32
+    mov esi, error_not_64_bit
+    cmp byte [ebx + 4], 2
+    jne error_32
 
 stall:
     cli
@@ -560,6 +571,7 @@ error_cannot_enable_a20_line: db "Error: cannot enable A20 line", 0
 error_could_not_get_memory_map: db "Error: could not get memory map", 0
 
 error_not_elf: db "Error: not an ELF", 0
+error_not_64_bit: db "Error: not 64-bit kernel", 0
 error_cannot_read_disk: db "Error: cannot read disk", 0
 error_unexpected_file_problem: db "Error: unexpected file problem", 0
 error_kernel_too_large: db "Error: kernel too large", 0
