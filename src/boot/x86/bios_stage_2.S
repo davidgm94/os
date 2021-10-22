@@ -453,13 +453,60 @@ check_elf:
     mov esi, error_not_elf
     cmp dword [ebx + 0], 0x464c457f
     jne error_32
-    mov esi, error_not_64_bit
+    mov esi, error_kernel_not_64_bit
     cmp byte [ebx + 4], 2
     jne error_32
 
-stall:
-    cli
-    hlt
+check_64_bit_cpu:
+    mov ecx, 0x80000001
+    cpuid
+    mov esi, error_cpu_not_64_bit
+    test eax, 0x20000000
+    jnz error_32
+
+disable_paging:
+    mov eax, cr0
+    and eax, 0x7FFFFFFF
+    mov cr0, eax
+
+identity_map_first_4_mb:
+    mov dword [page_table_allocation_offset], 0x5000
+    mov ecx, page_directory_length
+    xor eax, eax
+    mov edi, page_directory
+    rep stosb
+    mov dword [page_directory + 0x1000 - 0x10], page_directory | 3
+    mov dword [page_directory], (page_directory + 0x1000) | 7
+    mov dword [page_directory + 0x1000], (page_directory + 0x2000) | 7
+    mov dword [page_directory + 0x2000], (page_directory + 0x3000) | 7
+    mov dword [page_directory + 0x2000 + 8], (page_directory + 0x4000) | 7
+    mov edi, page_directory + 0x3000
+    mov eax, 0x000003
+    mov ebx, 0x200003
+    mov ecx, 0x400
+
+    .identity_loop:
+    mov [edi], eax
+    add edi, 8
+    add eax, 0x1000
+    loop .identity_loop
+
+    mov eax, page_directory
+    mov cr3, eax
+
+enable_long_mode:
+    mov eax, cr4
+    or eax, 0x20
+    mov cr4, eax
+    mov ecx, 0xC0000080
+    rdmsr
+    or eax, 0x100
+    wrmsr
+    mov eax, cr0
+    or eax, 0x80000000
+    mov cr0, eax
+
+    jmp 0x48:long_mode
 
 error_32:
     mov eax, cr0
@@ -481,6 +528,13 @@ error_32:
     mov ss, ax
     jmp error
 
+[bits 64]
+long_mode:
+stall:
+    cli
+    hlt
+
+
 
 read_structure:
     dw 0x10
@@ -488,66 +542,67 @@ read_structure:
     dd temporary_load_buffer
     .lba: dq 0
 
+; @TODO: fix GDT offset comments
 gdt_data:
-    .null_entry dq 0
-    .code_entry:
-        dd 0xffff ; 0x08
+    .null_entry dq 0 ; 0x00
+    .code_entry: ; 0x08
+        dd 0xffff 
         db 0
         dw 0xcf9a
         db 0
-    .data_entry:
-        dd 0xffff ; 0x10
+    .data_entry: ; 0x10
+        dd 0xffff 
         db 0
         dw 0xcf92
         db 0
-    .code_entry_16:
-        dd 0xffff ; 0x18
+    .code_entry_16: ; 0x18
+        dd 0xffff 
         db 0
         dw 0x0f9a
         db 0
-    .data_entry_16:
-        dd 0xffff ; 0x20
+    .data_entry_16: ; 0x20
+        dd 0xffff 
         db 0
         dw 0x0f92
         db 0
-    .user_code:
-        dd 0xffff ; 0x28
+    .user_code: ; 0x28
+        dd 0xffff 
         db 0
         dw 0xcffa
         db 0
-    .user_data:
-        dd 0xffff ; 0x08
+    .user_data: ; 0x30
+        dd 0xffff 
         db 0
         dw 0xcff2
         db 0
-    .tss:
+    .tss:       ; 0x38
         dd 0x68
         db 0
         dw 0xe9
         db 0
         dq 0
-    .code_entry_64:
-        dd 0xffff ; 0x08
+    .code_entry_64: ; 0x48
+        dd 0xffff 
         db 0
         dw 0xaf9a
         db 0
-    .data_entry_64:
-        dd 0xffff ; 0x08
+    .data_entry_64: ; 0x50
+        dd 0xffff 
         db 0
         dw 0xaf92
         db 0
-    .user_code_64:
-        dd 0xffff ; 0x08
+    .user_code_64: ; 0x58
+        dd 0xffff 
         db 0
         dw 0xaffa
         db 0
-    .user_data_64:
-        dd 0xffff ; 0x08
+    .user_data_64: ; 0x08
+        dd 0xffff 
         db 0
         dw 0xaff2
         db 0
-    .user_code_64c:
-        dd 0xffff ; 0x08
+    .user_code_64c: ; 0x08
+        dd 0xffff 
         db 0
         dw 0xaffa
         db 0
@@ -565,6 +620,7 @@ kernel_buffer: dq 0
 kernel_size: dd 0
 
 kernel_data_stream_position: dw 0x850
+page_table_allocation_offset: dq 0 ; relative to page_directory
 
 error_no_pci: db "Error: could not find the PCI bus", 0
 error_no_cpuid: db "Error: could not find CPUID", 0
@@ -573,7 +629,8 @@ error_cannot_enable_a20_line: db "Error: cannot enable A20 line", 0
 error_could_not_get_memory_map: db "Error: could not get memory map", 0
 
 error_not_elf: db "Error: not an ELF", 0
-error_not_64_bit: db "Error: not 64-bit kernel", 0
+error_kernel_not_64_bit: db "Error: not 64-bit kernel", 0
+error_cpu_not_64_bit: db "Error: not 64-bit CPU", 0
 error_cannot_read_disk: db "Error: cannot read disk", 0
 error_unexpected_file_problem: db "Error: unexpected file problem", 0
 error_kernel_too_large: db "Error: kernel too large", 0
