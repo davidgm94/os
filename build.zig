@@ -51,7 +51,7 @@ const final_disk_image = build_output_dir ++ disk_image_output_file;
 
 fn nasm_compile_elf_object(builder: *Builder, executable: *std.build.LibExeObjStep, comptime src: []const u8, comptime out: []const u8) void
 {
-    const base_nasm_command = &[_][]const u8 { "nasm", "-felf64", src, "-o", out };
+    const base_nasm_command = &[_][]const u8 { "nasm", "-felf64", "-g", "-F", "dwarf", src, "-o", out };
     const nasm_command = builder.addSystemCommand(base_nasm_command);
     executable.addObjectFile(out);
     executable.step.dependOn(&nasm_command.step);
@@ -60,6 +60,8 @@ fn nasm_compile_elf_object(builder: *Builder, executable: *std.build.LibExeObjSt
 fn build_kernel(b: *Builder) *std.build.LibExeObjStep
 {
     const kernel = b.addExecutable(kernel_output_file, kernel_source_file);
+    kernel.red_zone = false;
+    kernel.force_pic = true;
 
     kernel.setTarget(CrossTarget
         {
@@ -93,11 +95,19 @@ fn build_bootloader(b: *Builder) !void
     install_disk_image.step.dependOn(&disk_image.step);
 
     const qemu_command_str = &[_][]const u8 { "qemu-system-x86_64", "-hda", final_disk_image, "-no-reboot", "-no-shutdown", "-D", "logging.txt", "-cpu", "Haswell", "-d", "guest_errors,int,cpu,cpu_reset,in_asm"};
+
     const run_command = b.addSystemCommand(qemu_command_str);
     run_command.step.dependOn(&install_disk_image.step);
-
     const run_step = b.step("run", "Run the bootloader");
     run_step.dependOn(&run_command.step);
+
+const qemu_debug_command = qemu_command_str ++ &[_][]const u8 { "-s" } ++
+&[_][]const u8 { "-S" };
+    const debug_command = b.addSystemCommand(qemu_debug_command);
+    debug_command.step.dependOn(&install_disk_image.step);
+
+    const debug_step = b.step("debug", "Debug the kernel");
+    debug_step.dependOn(&debug_command.step);
 }
 
 const a_megabyte = 1024 * 1024;

@@ -221,7 +221,7 @@ CPU0_setup:
     and ebx, 1 << 7
     shr ebx, 7
     mov rax, paging_SMEP_support
-    mov [rax], ebx
+    and [rax], ebx
     cmp ebx, 0
     je .no_smep_support
     mov word [rax], 2
@@ -353,7 +353,6 @@ CPU0_setup:
     or eax, 0x900
     wrmsr
 
-
     ; set spurious interrupt vector to 0xff
     mov rax, 0xFFFFFE00000000F0
     add rax, rdi
@@ -425,6 +424,7 @@ install_interrupt_handler:
 
 %macro INTERRUPT_HANDLER_COMMON 0
     cld
+
     push rax
     push rbx
     push rcx
@@ -569,3 +569,48 @@ INTERRUPT_HANDLER i
 %assign i i+1
 %endrep
 
+[global CPU_stop]
+CPU_stop:
+    cli
+    hlt
+
+[global CR3_read]
+CR3_read:
+    mov rax, cr3
+    ret
+
+[global thread_get_current]
+thread_get_current:
+    mov rax, [gs:16]
+    ret
+
+[global get_local_storage]
+get_local_storage:
+    mov rax, [gs:0]
+    ret
+
+[global are_interrupts_enabled]
+are_interrupts_enabled:
+    pushf
+
+    pop rax
+    and rax, 0x200
+    shr rax, 9
+
+    mov rdx, cr8
+    cmp rdx, 0
+    je .done
+    xor rax, rax
+    .done:
+    ret
+[global enable_interrupts]
+enable_interrupts:
+    xor rax, rax
+    mov cr8, rax
+    sti
+    ret
+[global disable_interrupts]
+disable_interrupts:
+    mov rax, 14
+    mov cr8, rax
+    ret
