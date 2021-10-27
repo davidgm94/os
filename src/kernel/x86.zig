@@ -22,15 +22,41 @@ pub const Page = struct
     pub const size = 0x1000;
     pub const bit_count = 12;
 
+    fn get_base_address(address: u64) u64
+    {
+        return address & ~@as(u64, Page.size - 1);
+    }
+
     const Table = struct
     {
-        const L4 = @intToPtr([*]volatile u64, 0xFFFFFF7FBFDFE000);
-        const L3 = @intToPtr([*]volatile u64, 0xFFFFFF7FBFC00000);
-        const L2 = @intToPtr([*]volatile u64, 0xFFFFFF7F80000000);
-        const L1 = @intToPtr([*]volatile u64, 0xFFFFFF0000000000);
+        const PointerType = [*]volatile u64;
+
+        const Level = enum(u8)
+        {
+            level_1 = 0,
+            level_2 = 1,
+            level_3 = 2,
+            level_4 = 3,
+        };
 
         const entry_count = 0x200;
         const entry_bit_count = 9;
+
+        // @INFO: this is a workaround for bad Zig codegen which causes a page fault
+        fn access(comptime level: Level, indices: [4]u64) *volatile u64
+        {
+            const page_table_level_base_address: u64 = switch (level)
+            {
+                .level_1 => 0xFFFFFF0000000000,
+                .level_2 => 0xFFFFFF7F80000000,
+                .level_3 => 0xFFFFFF7FBFC00000,
+                .level_4 => 0xFFFFFF7FBFDFE000,
+            };
+
+            const index = indices[@enumToInt(level)];
+            const element_pointer: u64 = page_table_level_base_address + (index * @sizeOf(u64));
+            return @intToPtr(*volatile u64, element_pointer);
+        }
     };
 
     pub const Fault = struct
@@ -75,13 +101,13 @@ pub const Page = struct
                 {
                     if (address >= low_memory_map_start and address < low_memory_map_start + 0x100000000 and for_supervisor)
                     {
-                        Page.map(&Kernel.kernel_memory_space, address - low_memory_map_start, address, @enumToInt(MapFlags.not_cacheable) | @enumToInt(MapFlags.commit_tables_now)) catch {};
+                        Page.map(&Kernel.kernel_memory_space, address - low_memory_map_start, address, 1 << @enumToInt(MapFlags.not_cacheable) | 1 << @enumToInt(MapFlags.commit_tables_now)) catch {};
                         break :blk null;
                     }
                     else if (address >= memory_map_core_region_start and address < memory_map_core_region_start + (memory_map_core_region_count * @sizeOf(Kernel.Memory.Region)) and for_supervisor)
                     {
                         const new_physical_address = Kernel.physical_memory_allocator.allocate_lockfree(@enumToInt(Kernel.Memory.Physical.Flags.zeroed), null, null, null);
-                        Page.map(&Kernel.kernel_memory_space, new_physical_address, address, @enumToInt(MapFlags.commit_tables_now)) catch {};
+                        Page.map(&Kernel.kernel_memory_space, new_physical_address, address, 1 << @enumToInt(MapFlags.commit_tables_now)) catch {};
                         break :blk null;
                     }
                     else if (address >= memory_map_core_space_start and address < memory_map_core_space_start + memory_map_core_space_size and for_supervisor)
@@ -135,6 +161,7 @@ pub const Page = struct
 
     pub const MapError = error
     {
+        failed,
     };
 
     pub const MapFlags = enum(u8)
@@ -151,59 +178,190 @@ pub const Page = struct
         ignore_if_mapped = 9,
     };
 
-    pub fn map(memory_space: *Kernel.Memory.Space, physical_address: u64, virtual_address: u64, flags: u32) MapError!void
+    fn map_page_level_manipulation(memory_space: *Kernel.Memory.Space, comptime level: Page.Table.Level, indices: [4]u64, flags: u32) void
     {
-        _ = memory_space; _ = physical_address; _ = virtual_address; _ = flags;
-        CPU_stop();
+        if (Page.Table.access(level, indices).* & 1 == 0)
+        {
+            if (flags & (1 << @enumToInt(MapFlags.no_new_tables)) != 0) CPU_stop();
+
+            Page.Table.access(level, indices).* = Kernel.physical_memory_allocator.allocate_lockfree(1 << @enumToInt(Kernel.Memory.Physical.Flags.lock_acquired), null, null, null) | 0b111;
+            const a_lower_level = comptime @intToEnum(Page.Table.Level, @enumToInt(level) - 1);
+            const page_to_invalidate_address = @ptrToInt(Page.Table.access(a_lower_level, indices));
+            invalidate_page(page_to_invalidate_address); // not strictly necessary
+            std.mem.set(u8, @intToPtr([*]u8, page_to_invalidate_address & ~@as(u64, Page.size - 1))[0..Page.size], 0); 
+            memory_space.virtual_address_space.active_page_table_count += 1;
+        }
+    }
+
+
+    pub fn map(memory_space: *Kernel.Memory.Space, asked_physical_address: u64, asked_virtual_address: u64, flags: u32) MapError!void
+    {
+        if (asked_physical_address & (Page.size - 1) != 0)
+        {
+            CPU_stop();
+        }
+
+        // @TODO: page frames
+        //
+        // @Spinlock
+
+        const cr3 = memory_space.virtual_address_space.cr3;
+
+        if (!address_is_in_kernel_space(asked_virtual_address) and CR3_read() != cr3)
+        {
+            CPU_stop();
+        }
+        else if (asked_physical_address == 0)
+        {
+            CPU_stop();
+        }
+        else if (asked_virtual_address == 0)
+        {
+            CPU_stop();
+        }
+        else if (@ptrToInt(memory_space) != @ptrToInt(&Kernel.core_memory_space) and @ptrToInt(memory_space) != @ptrToInt(&Kernel.kernel_memory_space))
+        {
+            CPU_stop();
+        }
+
+        const physical_address = asked_physical_address & 0xFFFFFFFFFFFFF000;
+        const virtual_address = asked_virtual_address & 0x0000FFFFFFFFF000;
+
+        const indices = compute_page_table_indices(virtual_address);
+
+        map_page_level_manipulation(memory_space, .level_4, indices, flags);
+        map_page_level_manipulation(memory_space, .level_3, indices, flags);
+        map_page_level_manipulation(memory_space, .level_2, indices, flags);
+
+        //const L4_address: u64 = 0xFFFFFF7FBFDFE000 + index_l4 * 8;
+        //if (Page.Table.access(.level_4, index_l4)* & 1 == 0)
+        //{
+            //if (flags & (1 << @enumToInt(MapFlags.no_new_tables)) != 0) CPU_stop();
+            //Page.Table.access(.level_4, index_l4).* = Kernel.physical_memory_allocator.allocate_lockfree(@enumToInt(Kernel.Memory.Physical.Flags.lock_acquired), null, null, null) | 0b111;
+            //const page_to_invalidate_address = @ptrToInt(&Page.Table.L3[index_l3]);
+            //invalidate_page(page_to_invalidate_address); // not strictly necessary
+            //std.mem.set(u8, @intToPtr([*]u8, page_to_invalidate_address & ~@as(u64, Page.size - 1))[0..Page.size], 0); 
+            //memory_space.virtual_address_space.active_page_table_count += 1;
+        //}
+
+        //if (Page.Table.L3[index_l3] & 1 == 0)
+        //{
+            //if (flags & (1 << @enumToInt(MapFlags.no_new_tables)) != 0) CPU_stop();
+            //Page.Table.L3[index_l3] = Kernel.physical_memory_allocator.allocate_lockfree(@enumToInt(Kernel.Memory.Physical.Flags.lock_acquired), null, null, null) | 0b111;
+            //const page_to_invalidate_address = @ptrToInt(&Page.Table.L2[index_l2]);
+            //invalidate_page(page_to_invalidate_address); // not strictly necessary
+            //std.mem.set(u8, @intToPtr([*]u8, page_to_invalidate_address & ~@as(u64, Page.size - 1))[0..Page.size], 0); 
+            //memory_space.virtual_address_space.active_page_table_count += 1;
+        //}
+
+        //if (Page.Table.L2[index_l2] & 1 == 0)
+        //{
+            //if (flags & (1 << @enumToInt(MapFlags.no_new_tables)) != 0) CPU_stop();
+            //Page.Table.L2[index_l2] = Kernel.physical_memory_allocator.allocate_lockfree(@enumToInt(Kernel.Memory.Physical.Flags.lock_acquired), null, null, null) | 0b111;
+            //const page_to_invalidate_address = @ptrToInt(&Page.Table.L1[index_l1]);
+            //invalidate_page(page_to_invalidate_address); // not strictly necessary
+            //std.mem.set(u8, @intToPtr([*]u8, page_to_invalidate_address & ~@as(u64, Page.size - 1))[0..Page.size], 0); 
+            //memory_space.virtual_address_space.active_page_table_count += 1;
+        //}
+
+        const old_value = Page.Table.access(.level_1, indices).*;
+        var value = physical_address | 0b11;
+
+        if (flags & (1 << @enumToInt(MapFlags.write_combining)) != 0) value |= 16;
+        if (flags & (1 << @enumToInt(MapFlags.not_cacheable)) != 0) value |= 24;
+        if (flags & (1 << @enumToInt(MapFlags.user)) != 0)
+        {
+            value |= 7;
+        }
+        else
+        {
+            value |= 1 << 8; //global
+        }
+        if (flags & (1 << @enumToInt(MapFlags.read_only)) != 0) value &= ~@as(u64, 2);
+        if (flags & (1 << @enumToInt(MapFlags.copied)) != 0) value |= 1 << 9;
+
+        value |= (1 << 5) | (1 << 6);
+
+        if (old_value & 1 != 0 and flags & (1 << @enumToInt(MapFlags.overwrite)) == 0)
+        {
+            CPU_stop();
+        }
+
+        Page.Table.access(.level_1, indices).* = value;
+
+        invalidate_page(asked_virtual_address);
     }
 };
+
+pub fn address_is_in_kernel_space(address: u64) bool
+{
+    return address >= 0xFFFF800000000000;
+}
 
 pub const VirtualAddressSpace = struct
 {
     cr3: u64,
     l1_commit: []u8,
 
+    commited_page_table_count: u64,
+    active_page_table_count: u64,
+
     pub fn init() void
     {
         var core_vas = &Kernel.core_memory_space.virtual_address_space; 
         core_vas.cr3 = CR3_read();
+        Kernel.kernel_memory_space.virtual_address_space.cr3 = core_vas.cr3;
         core_vas.l1_commit = &core_L1_commit;
 
-        var page_table_l4_i: u32 = 0x100;
-        while (page_table_l4_i < Page.Table.entry_count) : (page_table_l4_i += 1)
-        {
-            if (Page.Table.L4[page_table_l4_i] == 0)
-            {
-                Page.Table.L4[page_table_l4_i] = Kernel.physical_memory_allocator.allocate_lockfree(0, null, null, null) | 0b11;
-                var page_table_slice = @intToPtr([*]volatile u8, @ptrToInt(&Page.Table.L3[page_table_l4_i * 0x200]));
-                std.mem.set(u8, page_table_slice[0..Kernel.Arch.Page.size], 0);
-            }
-        }
+
+        CPU_stop();
+        //var page_table_l4_i: u32 = 0x100;
+        //while (page_table_l4_i < Page.Table.entry_count) : (page_table_l4_i += 1)
+        //{
+            //if (Page.Table.access(.level_4, page_table_l4_i).* == 0)
+            //{
+                //Page.Table.access(.level_4, page_table_l4_i).* = Kernel.physical_memory_allocator.allocate_lockfree(0, null, null, null) | 0b11;
+                //var page_table_slice = @intToPtr([*]volatile u8, @ptrToInt(&Page.Table.L3[page_table_l4_i * 0x200]));
+                //std.mem.set(u8, page_table_slice[0..Kernel.Arch.Page.size], 0);
+            //}
+        //}
     }
 
     const core_L1_commit_size = (0xFFFF800200000000 - 0xFFFF800100000000) >> (Page.Table.entry_bit_count + Page.bit_count + 3);
     var core_L1_commit: [core_L1_commit_size]u8 = undefined;
 };
 
-
-pub fn translate_address(virtual: u64, write_access: bool) u64
+fn compute_page_table_indices(virtual_address: u64) [4]u64
 {
-    const masked_virtual = virtual & 0x0000FFFFFFFFF000;
+    var indices: [4]u64 = undefined;
+    indices[@enumToInt(Page.Table.Level.level_4)] = virtual_address >> (Page.bit_count + Page.Table.entry_bit_count * 3);
+    indices[@enumToInt(Page.Table.Level.level_3)] = virtual_address >> (Page.bit_count + Page.Table.entry_bit_count * 2);
+    indices[@enumToInt(Page.Table.Level.level_2)] = virtual_address >> (Page.bit_count + Page.Table.entry_bit_count * 1);
+    indices[@enumToInt(Page.Table.Level.level_1)] = virtual_address >> (Page.bit_count + Page.Table.entry_bit_count * 0);
 
-    if ((Page.Table.L4[masked_virtual >> (Page.bit_count + Page.Table.entry_bit_count * 3)] & 1) == 0)
+    return indices;
+}
+
+pub fn translate_address(asked_virtual_address: u64, write_access: bool) u64
+{
+    const virtual_address = asked_virtual_address & 0x0000FFFFFFFFF000;
+
+    const indices = compute_page_table_indices(virtual_address);
+
+    if (Page.Table.access(.level_4, indices).* & 1 == 0)
     {
         return 0;
     }
-    if ((Page.Table.L3[masked_virtual >> (Page.bit_count + Page.Table.entry_bit_count * 2)] & 1) == 0)
+    if (Page.Table.access(.level_3, indices).* & 1 == 0)
     {
         return 0;
     }
-    if ((Page.Table.L2[masked_virtual >> (Page.bit_count + Page.Table.entry_bit_count * 1)] & 1) == 0)
+    if (Page.Table.access(.level_2, indices).* & 1 == 0)
     {
         return 0;
     }
 
-    const physical_address = Page.Table.L1[masked_virtual >> (Page.bit_count + Page.Table.entry_bit_count * 0)];
+    const physical_address = Page.Table.access(.level_1, indices).*;
 
     if (write_access and (physical_address & 2) == 0) return 0;
 
@@ -217,6 +375,38 @@ pub fn translate_address(virtual: u64, write_access: bool) u64
     }
 }
 
+pub fn early_allocate_page() u64
+{
+    var physical_memory_regions = physical_memory_regions_get();
+    const memory_region_count = physical_memory_regions.count;
+    const memory_region_base = @ptrToInt(physical_memory_regions.ptr);
+    const memory_region_index = physical_memory_regions.index;
+
+    var region: *Kernel.Memory.PhysicalRegion = undefined;
+    const region_index = blk:
+    {
+        const memory_region_slice = @intToPtr([*]Kernel.Memory.PhysicalRegion, memory_region_base + (memory_region_index * @sizeOf(Kernel.Memory.PhysicalRegion)))[0..memory_region_count];
+
+        for (memory_region_slice) |*r, region_i|
+        {
+            if (r.page_count != 0)
+            {
+                region = r;
+                break :blk memory_region_index + region_i;
+            }
+        }
+
+        CPU_stop();
+    };
+
+    const page_base_address = region.base_address;
+    region.base_address += Page.size;
+    region.page_count -= 1;
+    physical_memory_regions.count -= 1;
+    physical_memory_regions.index = region_index;
+
+    return page_base_address;
+}
 
 const InterruptContext = extern struct
 {
@@ -340,7 +530,7 @@ pub export fn interrupt_handler(context: *InterruptContext) callconv(.C) void
 
                     // @SpinLock condition kernel panic
                     const write_flag: u32 = 
-                        if ((context.error_code & @enumToInt(Page.Fault.ErrorCodeBit.write)) != 0)
+                        if (context.error_code & @enumToInt(Page.Fault.ErrorCodeBit.write) != 0)
                             1 << @as(u32, @enumToInt(Kernel.Memory.PageFault.Flags.write))
                         else 0;
 
@@ -392,3 +582,6 @@ pub extern fn get_local_storage() callconv(.C) *Kernel.LocalStorage;
 pub extern fn are_interrupts_enabled() callconv(.C) bool;
 pub extern fn enable_interrupts() callconv(.C) void;
 pub extern fn disable_interrupts() callconv(.C) void;
+
+pub extern fn invalidate_page(page: u64) callconv(.C) void;
+pub extern fn physical_memory_regions_get() callconv(.C) *Kernel.Memory.PhysicalRegions;

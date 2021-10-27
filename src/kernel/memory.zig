@@ -16,18 +16,23 @@ pub fn init() void
 
 const critical_available_page_count_threshold = 0x100000 / Kernel.Arch.Page.size;
 
-pub extern var physical_memory_regions: [*]PhysicalRegion;
-pub extern var physical_memory_region_count: u64;
-pub extern var physical_memory_region_page_count: u64;
-pub extern var physical_memory_original_page_count: u64;
-pub extern var physical_memory_region_index: u64;
-pub extern var physical_memory_highest: u64;
+pub extern var physical_memory_regions: PhysicalRegions;
 
-
+pub const PhysicalRegions = extern struct
+{
+    ptr: [*]PhysicalRegion,
+    count: u64,
+    page_count: u64,
+    original_page_count: u64,
+    index: u64,
+    highest: u64,
+};
 
 pub var core_regions = @intToPtr([*]Memory.Region, Kernel.Arch.memory_map_core_region_start);
 pub var core_region_count: u64 = 0;
 pub var core_region_array_commit: u64 = 0;
+
+var early_zero_buffer align(Kernel.Arch.Page.size) = [_]u8 { undefined } ** Kernel.Arch.Page.size;
 
 pub const Region = struct
 {
@@ -58,12 +63,28 @@ pub const Region = struct
 
 pub const PhysicalRegion = struct
 {
-    base: u64,
+    base_address: u64,
     page_count: u64,
 };
 
 pub const Physical = struct
 {
+    pub const Page = struct
+    {
+        state: State,
+        flags: u8,
+        cache_reference: u64,
+
+        const State = enum(u8)
+        {
+            unusable,
+            bad,
+            zeroed,
+            free,
+            standby,
+            active,
+        };
+    };
 
     pub const Flags = enum(u8)
     {
@@ -88,6 +109,8 @@ pub const Physical = struct
         zeroed_page_count: u64,
         free_page_count: u64,
         standby_page_count: u64,
+
+        page_frame_db_initialized: bool,
 
         pub const CommitError = error
         {
@@ -118,22 +141,26 @@ pub const Physical = struct
 
             const simple = count == 1 and alignment == 1 and below == 0;
 
-            if (physical_memory_region_page_count > 0)
+            if (!Kernel.physical_memory_allocator.page_frame_db_initialized)
             {
                 if (!simple)
                 {
                     Kernel.Arch.CPU_stop();
                 }
 
-                var index = physical_memory_region_index;
-                var found = false;
-                while (index < physical_memory_region_count) : (index += 1)
+                const page = Kernel.Arch.early_allocate_page();
+
+                if (flags & (1 << @enumToInt(Flags.zeroed)) != 0)
                 {
-                    found = physical_memory_regions[index].page_count > 0;
-                    if (found) break;
+                    // @TODO: hack
+                    Kernel.Arch.Page.map(&Kernel.core_memory_space, page, @ptrToInt(&early_zero_buffer), 1 << @enumToInt(Kernel.Arch.Page.MapFlags.overwrite) | 1 << @enumToInt(Kernel.Arch.Page.MapFlags.no_new_tables) | 1 << @enumToInt(Kernel.Arch.Page.MapFlags.frame_lock_acquired)) catch
+                    {
+                        // ignore the error for now
+                    };
+                    std.mem.set(u8, early_zero_buffer[0..], 0);
                 }
 
-                if (!found) Kernel.Arch.CPU_stop();
+                return page;
             }
             else if (!simple)
             {

@@ -19,23 +19,13 @@ idt:
 
 cpu_local_storage_index: dq 0
 
-[global physical_memory_regions]
-physical_memory_regions: dq 0xFFFFFE0000060000
-
-[global physical_memory_region_count]
-physical_memory_region_count: dq 0
-
-[global physical_memory_region_page_count]
-physical_memory_region_page_count: dq 0
-
-[global physical_memory_original_page_count]
-physical_memory_original_page_count: dq 0
-
-[global physical_memory_region_index]
-physical_memory_region_index: dq 0
-
-[global physical_memory_highest]
-physical_memory_highest: dq 0
+physical_memory_regions: 
+    .ptr: dq 0xFFFFFE0000060000
+    .count: dq 0
+    .page_count: dq 0
+    .original_page_count: dq 0
+    .index: dq 0
+    .highest: dq 0
 
 [global paging_NXE_support]
 paging_NXE_support: dd 1
@@ -163,13 +153,13 @@ memory_calculations:
     sub rax, rbx
     sub rdi, rsi
     shr rdi, 4
-    mov rsi, physical_memory_region_count
+    mov rsi, physical_memory_regions.count
     mov [rsi], rdi
-    mov rsi, physical_memory_region_page_count
+    mov rsi, physical_memory_regions.page_count
     mov [rsi], rax
-    mov rsi, physical_memory_original_page_count
+    mov rsi, physical_memory_regions.original_page_count
     mov [rsi], rbx
-    mov rsi, physical_memory_highest
+    mov rsi, physical_memory_regions.highest
     mov [rsi], r8
 
 PIC_disable:
@@ -346,12 +336,10 @@ CPU0_setup:
     .APIC_enable:
     mov ecx, 0x1b
     rdmsr
+    or eax, 0x800
+    wrmsr
     and eax, ~0xfff
     mov edi, eax
-    test eax, 1 << 8
-    jne $
-    or eax, 0x900
-    wrmsr
 
     ; set spurious interrupt vector to 0xff
     mov rax, 0xFFFFFE00000000F0
@@ -613,4 +601,14 @@ enable_interrupts:
 disable_interrupts:
     mov rax, 14
     mov cr8, rax
+    ret
+
+[global invalidate_page]
+invalidate_page:
+    invlpg [rdi]
+    ret
+
+[global physical_memory_regions_get]
+physical_memory_regions_get:
+    mov rax, physical_memory_regions
     ret

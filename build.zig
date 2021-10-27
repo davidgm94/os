@@ -61,7 +61,7 @@ fn build_kernel(b: *Builder) *std.build.LibExeObjStep
 {
     const kernel = b.addExecutable(kernel_output_file, kernel_source_file);
     kernel.red_zone = false;
-    kernel.force_pic = true;
+    kernel.code_model = .kernel;
 
     kernel.setTarget(CrossTarget
         {
