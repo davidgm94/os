@@ -14,6 +14,8 @@ pub var kernel_memory_space: Memory.Space = undefined;
 pub var core_memory_space: Memory.Space = undefined;
 pub var physical_memory_allocator: Memory.Physical.Allocator = undefined;
 
+pub var core_heap: Memory.Heap = undefined;
+
 pub const LocalStorage = extern struct
 {
     foo: u32,

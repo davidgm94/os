@@ -1,2 +1,3 @@
+set disassembly-flavor intel
 symbol-file zig-cache/kernel.elf
 target remote localhost:1234

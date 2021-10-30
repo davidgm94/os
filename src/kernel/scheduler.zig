@@ -40,7 +40,7 @@ pub const Thread = struct
 
 pub fn init(self: *Self) void
 {
-    self.lock.acquire();
+    // @Spinlock
     self.kernel_process = Process
     {
         .id = self.next_process_id,

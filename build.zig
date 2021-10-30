@@ -62,12 +62,31 @@ fn build_kernel(b: *Builder) *std.build.LibExeObjStep
     const kernel = b.addExecutable(kernel_output_file, kernel_source_file);
     kernel.red_zone = false;
     kernel.code_model = .kernel;
+    kernel.disable_stack_probing = true;
+
+    var disabled_features = std.Target.Cpu.Feature.Set.empty;
+    var enabled_features = std.Target.Cpu.Feature.Set.empty;
+
+    const features = std.Target.x86.Feature;
+    disabled_features.addFeature(@enumToInt(features.mmx));
+    disabled_features.addFeature(@enumToInt(features.sse));
+    disabled_features.addFeature(@enumToInt(features.sse2));
+    disabled_features.addFeature(@enumToInt(features.sse3));
+    disabled_features.addFeature(@enumToInt(features.ssse3));
+    disabled_features.addFeature(@enumToInt(features.sse4a));
+    disabled_features.addFeature(@enumToInt(features.sse4_1));
+    disabled_features.addFeature(@enumToInt(features.sse4_2));
+    disabled_features.addFeature(@enumToInt(features.avx));
+    disabled_features.addFeature(@enumToInt(features.avx2));
+    enabled_features.addFeature(@enumToInt(features.soft_float));
 
     kernel.setTarget(CrossTarget
         {
             .cpu_arch = .x86_64,
             .os_tag = .freestanding,
             .abi = .none,
+            .cpu_features_sub = disabled_features,
+            .cpu_features_add = enabled_features,
         });
     nasm_compile_elf_object(b, kernel, "src/kernel/x86.S", "zig-cache/kernel_x86.o");
     kernel.setLinkerScriptPath(FileSource.relative(kernel_linker_script_path));
@@ -94,7 +113,12 @@ fn build_bootloader(b: *Builder) !void
     const install_disk_image = b.addInstallBinFile(FileSource.relative(disk_image_output_path), disk_image_output_file);
     install_disk_image.step.dependOn(&disk_image.step);
 
-    const qemu_command_str = &[_][]const u8 { "qemu-system-x86_64", "-hda", final_disk_image, "-no-reboot", "-no-shutdown", "-D", "logging.txt", "-cpu", "Haswell", "-d", "guest_errors,int,cpu,cpu_reset,in_asm"};
+    const qemu_command_str = &[_][]const u8
+    {
+        "qemu-system-x86_64", "-hda", final_disk_image, "-no-reboot", "-no-shutdown", "-cpu", "Haswell",
+        //"-D", "logging.txt",
+        //"-d", "guest_errors,int,cpu,cpu_reset,in_asm"
+    };
 
     const run_command = b.addSystemCommand(qemu_command_str);
     run_command.step.dependOn(&install_disk_image.step);

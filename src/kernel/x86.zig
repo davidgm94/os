@@ -1,21 +1,62 @@
 const std = @import("std");
 const Kernel = @import("kernel.zig");
 
-pub const low_memory_map_start = 0xFFFFFE0000000000;
+pub const Memory = struct
+{
+    pub const core_region_start = 0xFFFF8001F0000000;
+    pub const core_region_count = (0xFFFF800200000000 - core_region_start) / @sizeOf(Kernel.Memory.Region);
 
-pub const memory_map_core_space_start  = 0xFFFF800100000000;
-pub const memory_map_core_space_size   = 0xFFFF800100000000 - 0xFFFF800100000000;
-pub const memory_map_core_region_start = 0xFFFF8001F0000000;
-pub const memory_map_core_region_count = (0xFFFF800200000000 - memory_map_core_region_start) / @sizeOf(Kernel.Memory.Region);
+    pub const kernel_space_start = 0xFFFF900000000000;
+    pub const kernel_space_size = 0xFFFFF00000000000 - kernel_space_start;
 
-pub const memory_map_kernel_space_start = 0xFFFF900000000000;
-pub const memory_map_kernel_space_size  = 0xFFFFF00000000000 - memory_map_kernel_space_start;
+    pub const modules_start = 0xFFFFFFFF90000000;
+    pub const modules_size = 0xFFFFFFFFC0000000 - modules_start;
 
-pub const memory_map_modules_start = 0xFFFFFFFF90000000;
-pub const memory_map_modules_size  = 0xFFFFFFFFC0000000 - memory_map_modules_start;
+    pub const core_space_start = 0xFFFF800100000000;
+    pub const core_space_size = 0xFFFF8001F0000000 - core_space_start;
 
-pub const user_space_start = 0x100000000000;
-pub const user_space_size = 0xF00000000000 - user_space_start;
+    pub const user_space_start = 0x100000000000;
+    pub const user_space_size = 0xF00000000000 - user_space_start;
+
+    pub const low_memory_start = 0xFFFFFE0000000000;
+    pub const low_memory_limit = 0x100000000; // 4GB
+
+    pub fn init() void
+    {
+        const cr3 = CR3_read();
+        Kernel.core_memory_space.virtual_address_space.cr3 = cr3;
+        Kernel.kernel_memory_space.virtual_address_space.cr3 = cr3;
+        Kernel.core_memory_space.virtual_address_space.l1_commit = core_L1_commit[0..];
+
+        Kernel.Memory.core_regions[0].base_address = core_space_start;
+        Kernel.Memory.core_regions[0].page_count = core_space_size / Page.size;
+
+        var page_table_l4_i: u32 = 0x100;
+        while (page_table_l4_i < Page.Table.entry_count) : (page_table_l4_i += 1)
+        {
+            if (Page.Table.access_by_index(.level_4, page_table_l4_i).* == 0)
+            {
+                Page.Table.access_by_index(.level_4, page_table_l4_i).* = Kernel.physical_memory_allocator.allocate_lockfree(0, null, null, null) | 0b11;
+                var page_table_slice = @intToPtr([*]u8, Page.Table.get_level_address(.level_3) + (page_table_l4_i * 0x200 * @sizeOf(u64)));
+                std.mem.set(u8, page_table_slice[0..Kernel.Arch.Page.size], 0);
+            }
+        }
+
+        // @Spinlock
+        if (Kernel.Memory.reserve(&Kernel.core_memory_space, VirtualAddressSpace.l1_commit_size, 1 << @enumToInt(Kernel.Memory.Region.Flags.normal) | 1 << @enumToInt(Kernel.Memory.Region.Flags.no_commit_tracking) | 1 << @enumToInt(Kernel.Memory.Region.Flags.fixed), null, null)) |kernel_l1_commit|
+        {
+            Kernel.kernel_memory_space.virtual_address_space.l1_commit = @intToPtr([*]u8, kernel_l1_commit.base_address)[0..VirtualAddressSpace.l1_commit_size];
+        }
+        else
+        {
+            CPU_stop();
+        }
+        // @Spinlock
+    }
+
+    const core_L1_commit_size = (0xFFFF800200000000 - 0xFFFF800100000000) >> (Page.Table.entry_bit_count + Page.bit_count + 3);
+    var core_L1_commit: [core_L1_commit_size]u8 = undefined;
+};
 
 pub const Page = struct
 {
@@ -42,8 +83,7 @@ pub const Page = struct
         const entry_count = 0x200;
         const entry_bit_count = 9;
 
-        // @INFO: this is a workaround for bad Zig codegen which causes a page fault
-        fn access(comptime level: Level, indices: [4]u64) *volatile u64
+        fn get_level_address(comptime level: Level) u64
         {
             const page_table_level_base_address: u64 = switch (level)
             {
@@ -53,7 +93,22 @@ pub const Page = struct
                 .level_4 => 0xFFFFFF7FBFDFE000,
             };
 
+            return page_table_level_base_address;
+        }
+        // @INFO: this is a workaround for bad Zig codegen which causes a page fault
+        fn access(comptime level: Level, indices: [4]u64) *volatile u64
+        {
+            const page_table_level_base_address = get_level_address(level);
+
             const index = indices[@enumToInt(level)];
+            const element_pointer: u64 = page_table_level_base_address + (index * @sizeOf(u64));
+            return @intToPtr(*volatile u64, element_pointer);
+        }
+
+        fn access_by_index(comptime level: Level, index: u64) *volatile u64
+        {
+            const page_table_level_base_address: u64 = get_level_address(level);
+
             const element_pointer: u64 = page_table_level_base_address + (index * @sizeOf(u64));
             return @intToPtr(*volatile u64, element_pointer);
         }
@@ -99,18 +154,18 @@ pub const Page = struct
             {
                 if (address >= Page.size)
                 {
-                    if (address >= low_memory_map_start and address < low_memory_map_start + 0x100000000 and for_supervisor)
+                    if (address >= Memory.low_memory_start and address < Memory.low_memory_start + Memory.low_memory_limit and for_supervisor)
                     {
-                        Page.map(&Kernel.kernel_memory_space, address - low_memory_map_start, address, 1 << @enumToInt(MapFlags.not_cacheable) | 1 << @enumToInt(MapFlags.commit_tables_now)) catch {};
+                        Page.map(&Kernel.kernel_memory_space, address - Memory.low_memory_start, address, 1 << @enumToInt(MapFlags.not_cacheable) | 1 << @enumToInt(MapFlags.commit_tables_now)) catch {};
                         break :blk null;
                     }
-                    else if (address >= memory_map_core_region_start and address < memory_map_core_region_start + (memory_map_core_region_count * @sizeOf(Kernel.Memory.Region)) and for_supervisor)
+                    else if (address >= Memory.core_region_start and address < Memory.core_region_start + (Memory.core_region_count * @sizeOf(Kernel.Memory.Region)) and for_supervisor)
                     {
                         const new_physical_address = Kernel.physical_memory_allocator.allocate_lockfree(@enumToInt(Kernel.Memory.Physical.Flags.zeroed), null, null, null);
                         Page.map(&Kernel.kernel_memory_space, new_physical_address, address, 1 << @enumToInt(MapFlags.commit_tables_now)) catch {};
                         break :blk null;
                     }
-                    else if (address >= memory_map_core_space_start and address < memory_map_core_space_start + memory_map_core_space_size and for_supervisor)
+                    else if (address >= Memory.core_space_start and address < Memory.core_space_start + Memory.core_space_size and for_supervisor)
                     {
                         Kernel.Memory.PageFault.handle(&Kernel.core_memory_space, address, flags) catch
                         {
@@ -119,7 +174,7 @@ pub const Page = struct
 
                         break :blk null;
                     }
-                    else if (address >= memory_map_kernel_space_start and address < memory_map_kernel_space_start + memory_map_kernel_space_size and for_supervisor)
+                    else if (address >= Memory.kernel_space_start and address < Memory.kernel_space_start + Memory.kernel_space_size and for_supervisor)
                     {
                         Kernel.Memory.PageFault.handle(&Kernel.kernel_memory_space, address, flags) catch
                         {
@@ -128,7 +183,7 @@ pub const Page = struct
 
                         break :blk null;
                     }
-                    else if (address >= memory_map_modules_start and address < memory_map_modules_start + memory_map_modules_size and for_supervisor)
+                    else if (address >= Memory.modules_start and address < Memory.modules_start + Memory.modules_size and for_supervisor)
                     {
                         Kernel.Memory.PageFault.handle(&Kernel.kernel_memory_space, address, flags) catch
                         {
@@ -139,8 +194,16 @@ pub const Page = struct
                     }
                     else
                     {
-                        const thread = thread_get_current();
-                        var space = if (thread.temporary_address_space) |temporary_space| @ptrCast(*Kernel.Memory.Space, temporary_space) else thread.process.virtual_memory_space;
+                        // @TODO: clean this up
+                        var space = space_blk:
+                        {
+                            const maybe_current_thread = (thread_get_current());
+                            const thread_address = @ptrCast(*const u64, &maybe_current_thread).*;
+                            const current_thread = @intToPtr(*Kernel.Scheduler.Thread, thread_address);
+
+                            break :space_blk if (current_thread.temporary_address_space) |temporary_space| @ptrCast(*Kernel.Memory.Space, temporary_space) else current_thread.process.virtual_memory_space;
+                        };
+
                         Kernel.Memory.PageFault.handle(space, address, flags) catch
                         {
                             break :blk HandleError.UnknownError;
@@ -301,34 +364,18 @@ pub fn address_is_in_kernel_space(address: u64) bool
 pub const VirtualAddressSpace = struct
 {
     cr3: u64,
-    l1_commit: []u8,
-
     commited_page_table_count: u64,
     active_page_table_count: u64,
+    l1_commit: []u8,
 
-    pub fn init() void
-    {
-        var core_vas = &Kernel.core_memory_space.virtual_address_space; 
-        core_vas.cr3 = CR3_read();
-        Kernel.kernel_memory_space.virtual_address_space.cr3 = core_vas.cr3;
-        core_vas.l1_commit = &core_L1_commit;
+    l1_commit_commit: [l1_commit_commit_size]u8,
+    l2_commit: [l2_commit_size]u8,
+    l3_commit: [l3_commit_size]u8,
 
-
-        CPU_stop();
-        //var page_table_l4_i: u32 = 0x100;
-        //while (page_table_l4_i < Page.Table.entry_count) : (page_table_l4_i += 1)
-        //{
-            //if (Page.Table.access(.level_4, page_table_l4_i).* == 0)
-            //{
-                //Page.Table.access(.level_4, page_table_l4_i).* = Kernel.physical_memory_allocator.allocate_lockfree(0, null, null, null) | 0b11;
-                //var page_table_slice = @intToPtr([*]volatile u8, @ptrToInt(&Page.Table.L3[page_table_l4_i * 0x200]));
-                //std.mem.set(u8, page_table_slice[0..Kernel.Arch.Page.size], 0);
-            //}
-        //}
-    }
-
-    const core_L1_commit_size = (0xFFFF800200000000 - 0xFFFF800100000000) >> (Page.Table.entry_bit_count + Page.bit_count + 3);
-    var core_L1_commit: [core_L1_commit_size]u8 = undefined;
+    const l1_commit_size = 1 << 23;
+    const l1_commit_commit_size = 1 << 8;
+    const l2_commit_size = 1 << 14;
+    const l3_commit_size = 1 << 5;
 };
 
 fn compute_page_table_indices(virtual_address: u64) [4]u64
@@ -402,7 +449,7 @@ pub fn early_allocate_page() u64
     const page_base_address = region.base_address;
     region.base_address += Page.size;
     region.page_count -= 1;
-    physical_memory_regions.count -= 1;
+    physical_memory_regions.page_count -= 1;
     physical_memory_regions.index = region_index;
 
     return page_base_address;
@@ -500,10 +547,12 @@ pub export fn interrupt_handler(context: *InterruptContext) callconv(.C) void
                     Kernel.panic_lf(.interrupt_handler, "Unexpected value of CS: 0x{x}\n", .{context.cs});
                 }
 
-                const current_thread = thread_get_current();
-                if (current_thread.is_kernel_thread)
+                if (thread_get_current()) |current_thread|
                 {
-                    Kernel.panic_lf(.interrupt_handler, "Kernel thread executing user code\n", .{});
+                    if (current_thread.is_kernel_thread)
+                    {
+                        Kernel.panic_lf(.interrupt_handler, "Kernel thread executing user code\n", .{});
+                    }
                 }
 
                 CPU_stop();
@@ -576,7 +625,7 @@ pub export fn syscall() callconv(.C) noreturn
 pub extern fn CPU_stop() callconv(.C) noreturn;
 pub extern fn CR3_read() callconv(.C) u64;
 
-pub extern fn thread_get_current() callconv(.C) *Kernel.Scheduler.Thread;
+pub extern fn thread_get_current() callconv(.C) ?*Kernel.Scheduler.Thread;
 pub extern fn get_local_storage() callconv(.C) *Kernel.LocalStorage;
 
 pub extern fn are_interrupts_enabled() callconv(.C) bool;
