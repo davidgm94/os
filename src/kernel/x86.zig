@@ -436,36 +436,71 @@ pub fn commit_page_tables(memory_space: *Kernel.Memory.Space, region: *Kernel.Me
     const end = base + (region.page_count << Page.bit_count);
     var needed: u64 = 0;
 
+    const l4_shifter = comptime (Page.bit_count + Page.Table.entry_bit_count * 3);
+    const l3_shifter = comptime (Page.bit_count + Page.Table.entry_bit_count * 2);
+    const l2_shifter = comptime (Page.bit_count + Page.Table.entry_bit_count);
+
     var i: u64 = base;
-    while (i < end) : (i += 1 << (Page.bit_count + Page.Table.entry_bit_count * 3))
+    while (i < end) : (i += 1 << l4_shifter)
     {
-        const index_l4 = comptime (i >> (Page.bit_count + Page.Table.entry_bit_count * 3));
-        needed += @boolToInt(vas.l3_commit[index_l4 >> 3] & (@as(u6, 1) << @truncate(u3, index_l4)) == 0);
-        i = index_l4 << (Page.bit_count + Page.Table.entry_bit_count * 3);
+        const index_l4 = i >> l4_shifter;
+        const commit_index = index_l4 >> 3;
+        const commit = vas.l3_commit[commit_index];
+        const shifter = @as(u6, 1) << @truncate(u3, index_l4);
+
+        if (commit & shifter == 0)
+        {
+            needed += 1;
+        }
+
+        i = index_l4 << l4_shifter;
     }
 
     i = base;
-    while (i < end) : (i += 1 << (Page.bit_count + Page.Table.entry_bit_count * 2))
+    while (i < end) : (i += 1 << l3_shifter)
     {
-        const index_l3 = i >> (Page.bit_count + Page.Table.entry_bit_count * 2);
-        needed += @boolToInt(vas.l2_commit[index_l3 >> 3] & (@as(u6, 1) << @truncate(u3, index_l3)) == 0);
-        i = index_l3 << (Page.bit_count + Page.Table.entry_bit_count * 2);
+        const index_l3 = i >> l3_shifter;
+        const commit_index = index_l3 >> 3;
+        const commit = vas.l2_commit[commit_index];
+        const shifter = @as(u6, 1) << @truncate(u3, index_l3);
+
+        if (commit & shifter == 0)
+        {
+            needed += 1;
+        }
+
+        i = index_l3 << l3_shifter;
     }
 
     var previous_index_l2i: u64 = std.math.maxInt(u64); 
     i = base;
 
-    while (i < end) : (i += 1 << (Page.bit_count + Page.Table.entry_bit_count * 1))
+    while (i < end) : (i += 1 << l2_shifter)
     {
-        const index_l2 = i >> (Page.bit_count + Page.Table.entry_bit_count * 1);
+        const index_l2 = i >> l2_shifter;
         const index_l2i = index_l2 >> 15;
-        if (vas.l1_commit_commit[index_l2i >> 3] & (@as(u6, 1) << @truncate(u3, index_l2i)) == 0)
+        const l1_commit_commit_index = index_l2i >> 3;
+        const l1_commit_commit = vas.l1_commit_commit[l1_commit_commit_index];
+        const l1_commit_commit_shifter = @as(u6, 1) << @truncate(u3, index_l2i);
+
+        if (l1_commit_commit & l1_commit_commit_shifter == 0)
         {
-            needed += 1 + @boolToInt(previous_index_l2i != index_l2i);
+            needed += @as(u64, if (previous_index_l2i != index_l2i) 2 else 1);
         }
-        else if (vas.l1_commit[index_l2 >> 3] & (@as(u6, 1) << @truncate(u3, index_l2)) == 0) needed += 1;
+        else
+        {
+            const l1_commit_index = index_l2 >> 3;
+            const l1_commit = vas.l1_commit[l1_commit_index];
+            const l1_commit_shifter = @as(u6, 1) << @truncate(u3, index_l2);
+
+            if (l1_commit & l1_commit_shifter == 0)
+            {
+                needed += 1;
+            }
+        }
+
         previous_index_l2i = index_l2i;
-        i = index_l2 << (Page.bit_count + Page.Table.entry_bit_count * 1);
+        i = index_l2 << l2_shifter;
     }
 
     if (needed > 0)
@@ -479,29 +514,29 @@ pub fn commit_page_tables(memory_space: *Kernel.Memory.Space, region: *Kernel.Me
     }
 
     i = base;
-    while (i < end) : (i += 1 << (Page.bit_count + Page.Table.entry_bit_count * 3))
+    while (i < end) : (i += 1 << l4_shifter)
     {
-        const index_l4 = i >> (Page.bit_count + Page.Table.entry_bit_count * 3);
+        const index_l4 = i >> l4_shifter;
         vas.l3_commit[index_l4 >> 3] |= @as(u6, 1) << @truncate(u3, index_l4);
-        i = index_l4 << (Page.bit_count + Page.Table.entry_bit_count * 3);
+        i = index_l4 << l4_shifter;
     }
 
     i = base;
-    while (i < end) : (i += 1 << (Page.bit_count + Page.Table.entry_bit_count * 2))
+    while (i < end) : (i += 1 << l3_shifter)
     {
-        const index_l3 = i >> (Page.bit_count + Page.Table.entry_bit_count * 2);
+        const index_l3 = i >> l3_shifter;
         vas.l2_commit[index_l3 >> 3] |= @as(u6, 1) << @truncate(u3, index_l3);
-        i = index_l3 << (Page.bit_count + Page.Table.entry_bit_count * 2);
+        i = index_l3 << l3_shifter;
     }
 
     i = base;
-    while (i < end) : (i += 1 << (Page.bit_count + Page.Table.entry_bit_count * 2))
+    while (i < end) : (i += 1 << l2_shifter)
     {
-        const index_l2 = i >> (Page.bit_count + Page.Table.entry_bit_count * 1);
+        const index_l2 = i >> l2_shifter;
         const index_l2i = index_l2 >> 15;
         vas.l1_commit_commit[index_l2i >> 3] |= @as(u6, 1) << @truncate(u3, index_l2i);
         vas.l1_commit[index_l2 >> 3] |= @as(u6, 1) << @truncate(u3, index_l2);
-        i = index_l2 << (Page.bit_count + Page.Table.entry_bit_count * 1);
+        i = index_l2 << l2_shifter;
     }
 }
 
