@@ -1,5 +1,7 @@
 const std = @import("std");
 const Kernel = @import("kernel.zig");
+const Array = @import("array.zig").Array;
+const AVLTree = @import("avl_tree.zig").Short;
 
 const Memory = @This();
 
@@ -12,13 +14,22 @@ pub fn init() void
     const region = @intToPtr(*Region, Kernel.core_heap.allocate(@sizeOf(Region), true) catch unreachable);
     region.base_address = Kernel.Arch.Memory.kernel_space_start;
     region.page_count = Kernel.Arch.Memory.kernel_space_size / Kernel.Arch.Page.size;
+
+    Kernel.kernel_memory_space.free_regions_base.insert(&region.more.non_core.item_base, region, region.base_address, .panic) catch unreachable;
+    Kernel.kernel_memory_space.free_regions_size.insert(&region.more.non_core.item.size, region, region.page_count, .allow) catch unreachable;
     Kernel.Arch.CPU_stop();
 }
 
 pub const Space = struct
 {
     virtual_address_space: Kernel.Arch.VirtualAddressSpace,
+
+    free_regions_base: AVLTree(Region),
+    free_regions_size: AVLTree(Region),
+    used_regions: AVLTree(Region),
+
     commit: u64,
+    reserve: u64,
     user: bool,
 };
 
@@ -77,6 +88,16 @@ pub const Region = struct
         {
             used: bool,
         },
+        non_core: struct
+        {
+            item_base: AVLTree(Region).Item,
+
+            item: extern union
+            {
+                size: AVLTree(Region).Item,
+                // @TODO: add itemnonguard
+            },
+        },
     };
 
     const Data = extern union
@@ -111,35 +132,6 @@ pub const Region = struct
     // TODO: (...)
 };
 
-fn Array(comptime T: type) type
-{
-    return struct
-    {
-        const Self = @This();
-        
-        items: []T,
-        heap: *Heap,
-
-        fn zero_init() Array(T)
-        {
-            return .{ .items = &[_]T{}, .heap = undefined, };
-        }
-
-        fn insert(self: *Self, item: T, position: u64) ?*T
-        {
-            _ = position;
-            _ = item;
-            _ = self;
-            Kernel.Arch.CPU_stop();
-        }
-
-        fn delete_many(self: *Self, position: u64, count: u64) void
-        {
-            _ = self; _ = position; _ = count;
-            Kernel.Arch.CPU_stop();
-        }
-    };
-}
 
 const Range = struct
 {
