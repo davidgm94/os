@@ -5,19 +5,36 @@ const AVLTree = @import("avl_tree.zig").Short;
 
 const Memory = @This();
 
+const guard_pages = false;
+
 pub fn init() void
 {
-    core_regions[0].more.core.used = false;
-    core_region_count = 1;
-    Kernel.Arch.Memory.init();
+    // initialize core and kernel memory space
+    {
+        core_regions[0].more.core.used = false;
+        core_region_count = 1;
+        Kernel.Arch.Memory.init();
 
-    const region = @intToPtr(*Region, Kernel.core_heap.allocate(@sizeOf(Region), true) catch unreachable);
-    region.base_address = Kernel.Arch.Memory.kernel_space_start;
-    region.page_count = Kernel.Arch.Memory.kernel_space_size / Kernel.Arch.Page.size;
+        const region = @intToPtr(*Region, Kernel.core_heap.allocate(@sizeOf(Region), true) catch unreachable);
+        region.base_address = Kernel.Arch.Memory.kernel_space_start;
+        region.page_count = Kernel.Arch.Memory.kernel_space_size / Kernel.Arch.Page.size;
 
-    Kernel.kernel_memory_space.free_regions_base.insert(&region.more.non_core.item_base, region, region.base_address, .panic) catch unreachable;
-    Kernel.kernel_memory_space.free_regions_size.insert(&region.more.non_core.item.size, region, region.page_count, .allow) catch unreachable;
-    Kernel.Arch.CPU_stop();
+        Kernel.kernel_memory_space.free_regions_base.insert(&region.more.non_core.item_base, region, region.base_address, .panic) catch unreachable;
+        Kernel.kernel_memory_space.free_regions_size.insert(&region.more.non_core.item.size, region, region.page_count, .allow) catch unreachable;
+    }
+
+    // initialize physical memory management
+    {
+        // @Spinlock
+        const manipulation_region = reserve(&Kernel.kernel_memory_space, Physical.manipulation_region_page_count * Kernel.Arch.Page.size, 0, null, null) orelse
+        {
+            Kernel.Arch.CPU_stop();
+        };
+        Kernel.physical_memory_allocator.manipulation_region = manipulation_region.base_address;
+        // @Spinlock
+        
+        Kernel.Arch.CPU_stop();
+    }
 }
 
 pub const Space = struct
@@ -276,6 +293,8 @@ pub const PhysicalRegion = struct
 
 pub const Physical = struct
 {
+    pub const manipulation_region_page_count = 0x10;
+
     pub const Page = struct
     {
         state: State,
@@ -318,6 +337,8 @@ pub const Physical = struct
         standby_page_count: u64,
 
         next_region_to_balance: ?*Region,
+
+        manipulation_region: u64,
 
         page_frame_db_initialized: bool,
 
@@ -682,65 +703,116 @@ pub fn reserve(memory_space: *Memory.Space, byte_count: u64, flags: u32, maybe_f
 
     // @Spinlock
    
-    if (@ptrToInt(memory_space) == @ptrToInt(&Kernel.core_memory_space))
+    const output_region = blk:
     {
-        if (core_region_count == Kernel.Arch.Memory.core_region_count)
+        if (@ptrToInt(memory_space) == @ptrToInt(&Kernel.core_memory_space))
         {
+            if (core_region_count == Kernel.Arch.Memory.core_region_count)
+            {
+                return null;
+            }
+
+            if (forced_address != 0)
+            {
+                Kernel.Arch.CPU_stop();
+            }
+
+            {
+                const new_region_count = core_region_count + 1;
+                const needed_page_to_commit_count = new_region_count * @sizeOf(Memory.Region) / Kernel.Arch.Page.size + 1;
+
+                while (core_region_array_commit < needed_page_to_commit_count)
+                    : (core_region_array_commit += 1)
+                {
+                    Kernel.physical_memory_allocator.commit_lockfree(Kernel.Arch.Page.size, true) catch
+                    {
+                        return null;
+                    };
+                }
+            }
+
+            for (core_regions[0..core_region_count]) |*core_region|
+            {
+                if (!core_region.more.core.used and core_region.page_count >= needed_page_count)
+                {
+                    if (core_region.page_count > needed_page_count)
+                    {
+
+                        var splitted_region  = &core_regions[core_region_count];
+                        core_region_count += 1;
+                        splitted_region.* = core_region.*;
+                        splitted_region.base_address += needed_page_count * Kernel.Arch.Page.size;
+                        splitted_region.page_count -= needed_page_count;
+                    }
+
+                    core_region.more.core.used = true;
+                    core_region.page_count = needed_page_count;
+                    core_region.flags = flags;
+                    core_region.data = Region.Data.zero_init();
+
+                    break :blk core_region;
+                }
+            }
+
             return null;
         }
-
-        if (forced_address != 0)
+        else if (forced_address != 0)
         {
             Kernel.Arch.CPU_stop();
         }
-
+        else
         {
-            const new_region_count = core_region_count + 1;
-            const needed_page_to_commit_count = new_region_count * @sizeOf(Memory.Region) / Kernel.Arch.Page.size + 1;
+            // @TODO: implement guard pages
+            const guard_pages_needed = 0;
+            const total_needed_page_count = needed_page_count + guard_pages_needed;
 
-            while (core_region_array_commit < needed_page_to_commit_count)
-                : (core_region_array_commit += 1)
+            if (memory_space.free_regions_size.find(total_needed_page_count, .smallest_above_or_equal)) |item|
             {
-                Kernel.physical_memory_allocator.commit_lockfree(Kernel.Arch.Page.size, true) catch
-                {
-                    return null;
-                };
-            }
-        }
+                const region = item.value.?;
+                memory_space.free_regions_base.remove(&region.more.non_core.item_base);
+                memory_space.free_regions_size.remove(&region.more.non_core.item.size);
 
-        for (core_regions[0..core_region_count]) |*core_region|
-        {
-            if (!core_region.more.core.used and core_region.page_count >= needed_page_count)
-            {
-                if (core_region.page_count > needed_page_count)
+                if (region.page_count > total_needed_page_count)
                 {
-                    
-                    var splitted_region  = &core_regions[core_region_count];
-                    core_region_count += 1;
-                    splitted_region.* = core_region.*;
-                    splitted_region.base_address += needed_page_count * Kernel.Arch.Page.size;
-                    splitted_region.page_count -= needed_page_count;
+                    const split = @intToPtr(*Region, Kernel.core_heap.allocate(@sizeOf(Region), true) catch unreachable);
+                    split.* = region.*;
+                    split.base_address += total_needed_page_count * Kernel.Arch.Page.size;
+                    split.page_count -= total_needed_page_count;
+
+                    memory_space.free_regions_base.insert(&split.more.non_core.item_base, split, split.base_address, .panic) catch unreachable;
+                    memory_space.free_regions_size.insert(&split.more.non_core.item.size, split, split.page_count, .allow) catch unreachable;
                 }
 
-                core_region.more.core.used = true;
-                core_region.page_count = needed_page_count;
-                core_region.flags = flags;
-                core_region.data = Region.Data.zero_init();
+                region.data = Region.Data.zero_init();
 
-                return core_region;
+                region.page_count = needed_page_count;
+                region.flags = flags;
+
+                if (guard_pages_needed > 0)
+                {
+                }
+
+                memory_space.used_regions.insert(&region.more.non_core.item_base, region, region.base_address, .panic) catch unreachable;
+
+                break :blk region;
             }
-        }
 
+            Kernel.Arch.CPU_stop();
+        }
+    };
+
+    Kernel.Arch.commit_page_tables(memory_space, output_region) catch
+    {
+        unreserve(memory_space, output_region, false, null);
         return null;
-    }
-    else if (forced_address != 0)
+    };
+
+    if (memory_space != &Kernel.core_memory_space)
     {
         Kernel.Arch.CPU_stop();
     }
-    else
-    {
-        Kernel.Arch.CPU_stop();
-    }
+
+    return output_region;
 }
 
 fn unreserve(memory_space: *Memory.Space, region_to_remove: *Memory.Region, unmap_pages: bool, maybe_guard_region: ?bool) void

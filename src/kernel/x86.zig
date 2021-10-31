@@ -422,6 +422,89 @@ pub fn translate_address(asked_virtual_address: u64, write_access: bool) u64
     }
 }
 
+const CommitPageTablesError = error
+{
+    commit_failed,
+};
+
+pub fn commit_page_tables(memory_space: *Kernel.Memory.Space, region: *Kernel.Memory.Region) CommitPageTablesError!void
+{
+    // @Spinlock
+
+    const vas = &memory_space.virtual_address_space;
+    const base: u64 = (region.base_address - @as(u64, if (memory_space == &Kernel.core_memory_space) Memory.core_space_start else 0)) & 0x7FFFFFFFF000;
+    const end = base + (region.page_count << Page.bit_count);
+    var needed: u64 = 0;
+
+    var i: u64 = base;
+    while (i < end) : (i += 1 << (Page.bit_count + Page.Table.entry_bit_count * 3))
+    {
+        const index_l4 = comptime (i >> (Page.bit_count + Page.Table.entry_bit_count * 3));
+        needed += @boolToInt(vas.l3_commit[index_l4 >> 3] & (@as(u6, 1) << @truncate(u3, index_l4)) == 0);
+        i = index_l4 << (Page.bit_count + Page.Table.entry_bit_count * 3);
+    }
+
+    i = base;
+    while (i < end) : (i += 1 << (Page.bit_count + Page.Table.entry_bit_count * 2))
+    {
+        const index_l3 = i >> (Page.bit_count + Page.Table.entry_bit_count * 2);
+        needed += @boolToInt(vas.l2_commit[index_l3 >> 3] & (@as(u6, 1) << @truncate(u3, index_l3)) == 0);
+        i = index_l3 << (Page.bit_count + Page.Table.entry_bit_count * 2);
+    }
+
+    var previous_index_l2i: u64 = std.math.maxInt(u64); 
+    i = base;
+
+    while (i < end) : (i += 1 << (Page.bit_count + Page.Table.entry_bit_count * 1))
+    {
+        const index_l2 = i >> (Page.bit_count + Page.Table.entry_bit_count * 1);
+        const index_l2i = index_l2 >> 15;
+        if (vas.l1_commit_commit[index_l2i >> 3] & (@as(u6, 1) << @truncate(u3, index_l2i)) == 0)
+        {
+            needed += 1 + @boolToInt(previous_index_l2i != index_l2i);
+        }
+        else if (vas.l1_commit[index_l2 >> 3] & (@as(u6, 1) << @truncate(u3, index_l2)) == 0) needed += 1;
+        previous_index_l2i = index_l2i;
+        i = index_l2 << (Page.bit_count + Page.Table.entry_bit_count * 1);
+    }
+
+    if (needed > 0)
+    {
+        Kernel.physical_memory_allocator.commit_lockfree(needed * Kernel.Arch.Page.size, true) catch
+        {
+            return CommitPageTablesError.commit_failed;
+        };
+
+        vas.commited_page_table_count += needed;
+    }
+
+    i = base;
+    while (i < end) : (i += 1 << (Page.bit_count + Page.Table.entry_bit_count * 3))
+    {
+        const index_l4 = i >> (Page.bit_count + Page.Table.entry_bit_count * 3);
+        vas.l3_commit[index_l4 >> 3] |= @as(u6, 1) << @truncate(u3, index_l4);
+        i = index_l4 << (Page.bit_count + Page.Table.entry_bit_count * 3);
+    }
+
+    i = base;
+    while (i < end) : (i += 1 << (Page.bit_count + Page.Table.entry_bit_count * 2))
+    {
+        const index_l3 = i >> (Page.bit_count + Page.Table.entry_bit_count * 2);
+        vas.l2_commit[index_l3 >> 3] |= @as(u6, 1) << @truncate(u3, index_l3);
+        i = index_l3 << (Page.bit_count + Page.Table.entry_bit_count * 2);
+    }
+
+    i = base;
+    while (i < end) : (i += 1 << (Page.bit_count + Page.Table.entry_bit_count * 2))
+    {
+        const index_l2 = i >> (Page.bit_count + Page.Table.entry_bit_count * 1);
+        const index_l2i = index_l2 >> 15;
+        vas.l1_commit_commit[index_l2i >> 3] |= @as(u6, 1) << @truncate(u3, index_l2i);
+        vas.l1_commit[index_l2 >> 3] |= @as(u6, 1) << @truncate(u3, index_l2);
+        i = index_l2 << (Page.bit_count + Page.Table.entry_bit_count * 1);
+    }
+}
+
 pub fn early_allocate_page() u64
 {
     var physical_memory_regions = physical_memory_regions_get();
