@@ -5,7 +5,10 @@ const AVLTree = @import("avl_tree.zig").Short;
 
 const Memory = @This();
 
+// @Guard
 const guard_pages = false;
+
+const zero_page_threshold = 16;
 
 pub fn init() void
 {
@@ -33,9 +36,102 @@ pub fn init() void
         Kernel.physical_memory_allocator.manipulation_region = manipulation_region.base_address;
         // @Spinlock
         
+        const page_frame_db_count = (Kernel.Arch.physical_memory_highest_get() + (Kernel.Arch.Page.size << 3)) >> Kernel.Arch.Page.bit_count;
+        const page_frames = standard_allocate(&Kernel.kernel_memory_space, page_frame_db_count * @sizeOf(PageFrame), 1 << @enumToInt(Region.Flags.fixed), null, null) catch unreachable;
+        Kernel.physical_memory_allocator.page_frames = @intToPtr([*]volatile PageFrame, @ptrToInt(page_frames.ptr))[0..page_frame_db_count];
+        Kernel.physical_memory_allocator.free_or_zeroed_page_bitset.initialize(page_frame_db_count, true);
+
+        Physical.insert_free_pages_start();
+        const commit_limit = populate_pageframe_database();
+        Physical.insert_free_pages_end();
+        Kernel.physical_memory_allocator.commit_fixed_limit = commit_limit;
+        Kernel.physical_memory_allocator.commit_limit = commit_limit;
+
+        Kernel.physical_memory_allocator.page_frame_db_initialized = true;
+
+        // @TODO: file cache
+        //
+
         Kernel.Arch.CPU_stop();
     }
 }
+
+fn populate_pageframe_database() u64
+{
+    var commit_limit: u64 = 0;
+
+    const physical_memory_regions = Kernel.Arch.physical_memory_regions_get();
+    for (physical_memory_regions.ptr[0..physical_memory_regions.count]) |region|
+    {
+        const base = region.base_address >> Kernel.Arch.Page.bit_count;
+        const count = region.page_count;
+        commit_limit += count;
+
+        var page_i: u64 = 0;
+        while (page_i < count) : (page_i += 1)
+        {
+            const page = base + page_i;
+            Kernel.physical_memory_allocator.insert_free_pages_next(page);
+        }
+    }
+
+    physical_memory_regions.page_count = 0;
+    return commit_limit;
+}
+
+const Bitset = struct
+{
+    const Self = @This();
+    const bitset_group_size = 0x1000;
+
+    single_usage: [*]u32,
+    group_usage: [*]u16,
+    single_count: u64,
+    group_count: u64,
+
+    fn initialize(self: *Self, count: u64, map_all: bool) void
+    {
+        self.single_count = (count + 31) & ~@as(@TypeOf(count), 31);
+        self.group_count = self.single_count / bitset_group_size + 1;
+
+        const allocation_result = standard_allocate(&Kernel.kernel_memory_space, (self.single_count >> 3) + (self.group_count * 2), if (map_all) 1 << @enumToInt(Region.Flags.fixed) else 0, null, null) catch unreachable;
+        self.single_usage = @intToPtr([*]u32, @ptrToInt(allocation_result.ptr));
+        self.group_usage = @intToPtr([*]u16, @ptrToInt(self.single_usage) + (@sizeOf(u16) * (self.single_count >> 4)));
+    }
+
+    fn put(self: *Self, index: u64) void
+    {
+        self.single_usage[index >> 5] |= @as(u32, 1) << @truncate(u5, index);
+        self.group_usage[index / bitset_group_size] += 1;
+    }
+};
+
+const PageFrame = struct
+{
+    state: enum(u8)
+    {
+        unusable,
+        bad,
+        zeroed,
+        free,
+        standby,
+        active,
+    },
+    flags: u8,
+    cache_reference: *u64,
+    value: extern union
+    {
+        list: struct
+        {
+            next: u64,
+            previous: *volatile u64,
+        },
+        active: struct
+        {
+            references: u64,
+        },
+    },
+};
 
 pub const Space = struct
 {
@@ -50,10 +146,7 @@ pub const Space = struct
     user: bool,
 };
 
-
 const critical_available_page_count_threshold = 0x100000 / Kernel.Arch.Page.size;
-
-pub extern var physical_memory_regions: PhysicalRegions;
 
 pub const PhysicalRegions = extern struct
 {
@@ -62,7 +155,6 @@ pub const PhysicalRegions = extern struct
     page_count: u64,
     original_page_count: u64,
     index: u64,
-    highest: u64,
 };
 
 pub var core_regions = @intToPtr([*]Memory.Region, Kernel.Arch.Memory.core_region_start);
@@ -295,23 +387,6 @@ pub const Physical = struct
 {
     pub const manipulation_region_page_count = 0x10;
 
-    pub const Page = struct
-    {
-        state: State,
-        flags: u8,
-        cache_reference: u64,
-
-        const State = enum(u8)
-        {
-            unusable,
-            bad,
-            zeroed,
-            free,
-            standby,
-            active,
-        };
-    };
-
     pub const Flags = enum(u8)
     {
         can_fail = 0,
@@ -327,14 +402,23 @@ pub const Physical = struct
 
     pub const Allocator = struct
     {
-        commit_fixed: u64,
-        commit_pageable: u64,
-        commit_fixed_limit: u64,
-        commit_limit: u64,
+        page_frames: []volatile PageFrame,
+
+        first_free_page: u64,
+        first_zeroed_page: u64,
+        first_standby_page: u64,
+        last_standby_page: u64,
+        free_or_zeroed_page_bitset: Bitset, // for large pages
 
         zeroed_page_count: u64,
         free_page_count: u64,
         standby_page_count: u64,
+        active_page_count: u64,
+
+        commit_fixed: u64,
+        commit_pageable: u64,
+        commit_fixed_limit: u64,
+        commit_limit: u64,
 
         next_region_to_balance: ?*Region,
 
@@ -537,7 +621,40 @@ pub const Physical = struct
         {
             return self.commit_limit - self.commit_pageable - self.commit_fixed;
         }
+
+        pub fn insert_free_pages_next(self: *Allocator, page: u64) void
+        {
+            const frame = &self.page_frames[page];
+            frame.state = .free;
+
+            {
+                frame.value.list.next = self.first_free_page;
+                frame.value.list.previous = &self.first_free_page;
+                if (self.first_free_page != 0)
+                {
+                    self.page_frames[self.first_free_page].value.list.previous = &frame.value.list.next;
+                }
+                self.first_free_page = page;
+            }
+
+            self.free_or_zeroed_page_bitset.put(page);
+            self.free_page_count += 1;
+        }
     };
+
+    fn insert_free_pages_start() void
+    {
+    }
+
+    fn insert_free_pages_end() void
+    {
+        if (Kernel.physical_memory_allocator.free_page_count > zero_page_threshold)
+        {
+            // ...
+        }
+
+        // ...
+    }
 };
 
 pub const PageFault = struct
@@ -669,9 +786,7 @@ pub const PageFault = struct
 
 pub fn find_region(memory_space: *Memory.Space, address: u64) ?*Region
 {
-    _ = address;
     // @Spinlock
-    //
 
     if (@ptrToInt(memory_space) == @ptrToInt(&Kernel.core_memory_space))
     {
@@ -685,7 +800,17 @@ pub fn find_region(memory_space: *Memory.Space, address: u64) ?*Region
     }
     else
     {
-        Kernel.Arch.CPU_stop();
+        if (memory_space.used_regions.find(address, .largest_below_or_equal)) |item|
+        {
+            const region = item.value.?;
+            if (region.base_address > address) Kernel.Arch.CPU_stop();
+            if (region.base_address + region.page_count * Kernel.Arch.Page.size <= address) return null;
+            return region;
+        }
+        else
+        {
+            return null;
+        }
     }
 
     return null;
@@ -762,6 +887,7 @@ pub fn reserve(memory_space: *Memory.Space, byte_count: u64, flags: u32, maybe_f
         }
         else
         {
+            // @Guard
             // @TODO: implement guard pages
             const guard_pages_needed = 0;
             const total_needed_page_count = needed_page_count + guard_pages_needed;
@@ -809,7 +935,12 @@ pub fn reserve(memory_space: *Memory.Space, byte_count: u64, flags: u32, maybe_f
 
     if (memory_space != &Kernel.core_memory_space)
     {
-        Kernel.Arch.CPU_stop();
+        //@Guard
+        //EsMemoryZero(&outputRegion->itemNonGuard, sizeof(outputRegion->itemNonGuard));
+        //outputRegion->itemNonGuard.thisItem = outputRegion;
+        //space->usedRegionsNonGuard.InsertEnd(&outputRegion->itemNonGuard); 
+
+        //Kernel.Arch.CPU_stop();
     }
 
     return output_region;
@@ -870,7 +1001,7 @@ const HeapRegion = extern struct
         region_list_next: ?*HeapRegion,
     },
 
-    region_list: **HeapRegion,
+    region_list: ?*?*HeapRegion,
 
     const used_header_size = @sizeOf(HeapRegion) - @sizeOf([*]*HeapRegion);
     const free_header_size = @sizeOf(HeapRegion);
@@ -909,8 +1040,6 @@ pub const Heap = struct
     pub fn allocate(self: *Self, asked_size: u64, zero_memory: bool) AllocateError!u64
     {
         if (asked_size == 0) return AllocateError.size_is_zero;
-        _ = zero_memory;
-        _ = self;
 
         var size = asked_size;
         size += HeapRegion.used_header_size;
@@ -935,7 +1064,7 @@ pub const Heap = struct
                 const heap_region = self.regions[i].?;
                 if (heap_region.union1.size < size) continue;
 
-                if (true) Kernel.Arch.CPU_stop();
+                remove_free_region(heap_region);
                 break :blk heap_region;
             }
 
@@ -1018,16 +1147,25 @@ pub const Heap = struct
         region.union2.region_list_next = heap_region;
         if (region.union2.region_list_next) |region_list_next|
         {
-            region_list_next.region_list = &region.union2.region_list_next.?;
+            region_list_next.region_list = &region.union2.region_list_next;
         }
         self.regions[index] = region;
-        region.region_list = &self.regions[index].?;
+        region.region_list = &self.regions[index];
     }
 
-    fn remove_free_region(self: *Self, region: *Region) void
+    fn remove_free_region(region: *HeapRegion) void
     {
-        _ = self; _ = region;
-        Kernel.Arch.CPU_stop();
+        if (region.region_list == null or region.used != 0)
+        {
+            Kernel.Arch.CPU_stop();
+        }
+
+        region.region_list.?.* = region.union2.region_list_next;
+
+        if (region.union2.region_list_next) |region_list_next|
+            region_list_next.region_list = region.region_list;
+
+        region.region_list = null;
     }
 
     fn calculate_index(size: u64) u64

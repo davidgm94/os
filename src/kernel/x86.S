@@ -25,7 +25,9 @@ physical_memory_regions:
     .page_count: dq 0
     .original_page_count: dq 0
     .index: dq 0
-    .highest: dq 0
+
+[global physical_memory_highest]
+physical_memory_highest: dq 0
 
 [global paging_NXE_support]
 paging_NXE_support: dd 1
@@ -159,7 +161,7 @@ memory_calculations:
     mov [rsi], rax
     mov rsi, physical_memory_regions.original_page_count
     mov [rsi], rbx
-    mov rsi, physical_memory_regions.highest
+    mov rsi, physical_memory_highest
     mov [rsi], r8
 
 PIC_disable:
@@ -611,4 +613,9 @@ invalidate_page:
 [global physical_memory_regions_get]
 physical_memory_regions_get:
     mov rax, physical_memory_regions
+    ret
+
+[global physical_memory_highest_get]
+physical_memory_highest_get:
+    mov rax, [physical_memory_highest]
     ret

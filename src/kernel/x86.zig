@@ -752,3 +752,4 @@ pub extern fn disable_interrupts() callconv(.C) void;
 
 pub extern fn invalidate_page(page: u64) callconv(.C) void;
 pub extern fn physical_memory_regions_get() callconv(.C) *Kernel.Memory.PhysicalRegions;
+pub extern fn physical_memory_highest_get() callconv(.C) u64;
