@@ -52,7 +52,8 @@ pub fn init() void
         // @TODO: file cache
         //
 
-        Kernel.Arch.CPU_stop();
+        //Kernel.physical_memory_allocator.commit_lockfree(Physical.manipulation_region_page_count * Kernel.Arch.Page.size, true) catch unreachable;
+        // @TODO: several paging threads
     }
 }
 
@@ -103,6 +104,13 @@ const Bitset = struct
     {
         self.single_usage[index >> 5] |= @as(u32, 1) << @truncate(u5, index);
         self.group_usage[index / bitset_group_size] += 1;
+    }
+
+    fn take(self: *Self, index: u64) void
+    {
+        const group = index / bitset_group_size;
+        self.group_usage[group] -= 1;
+        self.single_usage[index >> 5] &= ~(@as(u32, 1) << @truncate(u5, index & 31));
     }
 };
 
@@ -218,6 +226,10 @@ pub const Region = struct
             guard_before: ?*Region,
             guard_after: ?*Region,
         },
+        physical: struct
+        {
+            offset: u64,
+        },
 
         fn zero_init() Data
         {
@@ -323,7 +335,6 @@ const Range = struct
                 {
                     delete_count += 1;
                     delete_total += range.to - range.from;
-
                 }
                 else
                 {
@@ -373,6 +384,12 @@ const Range = struct
             return null;
         }
 
+        fn contains(self: *Self, offset: u64) bool
+        {
+            if (self.ranges.items.len != 0) return self.find(offset, false) != null
+            else return offset < self.contiguous;
+        }
+
         const Self = @This();
     };
 };
@@ -382,6 +399,8 @@ pub const PhysicalRegion = struct
     base_address: u64,
     page_count: u64,
 };
+
+const shared_entry_presence = 1;
 
 pub const Physical = struct
 {
@@ -482,10 +501,73 @@ pub const Physical = struct
             }
             else
             {
+                var not_zeroed = false;
+                var page = Kernel.physical_memory_allocator.first_zeroed_page;
+                if (page == 0)
+                {
+                    page = Kernel.physical_memory_allocator.first_free_page;
+                    not_zeroed = true;
+                }
+                if (page == 0)
+                {
+                    page = Kernel.physical_memory_allocator.last_standby_page;
+                    not_zeroed = true;
+                }
+
+                if (page != 0)
+                {
+                    var frame = &Kernel.physical_memory_allocator.page_frames[page];
+
+                    if (frame.state == .active) Kernel.Arch.CPU_stop();
+
+                    if (frame.state == .standby)
+                    {
+                        if (frame.cache_reference.* != (page << Kernel.Arch.Page.bit_count | shared_entry_presence)) Kernel.Arch.CPU_stop();
+
+                        frame.cache_reference.* = 0;
+                    }
+                    else
+                    {
+                        Kernel.physical_memory_allocator.free_or_zeroed_page_bitset.take(page);
+                    }
+
+                    self.activate_pages(page, 1, flags);
+
+                    var address = page << Kernel.Arch.Page.bit_count;
+                    if (not_zeroed and (flags & (1 << @enumToInt(Physical.Flags.zeroed)) != 0)) pm_zero(@intToPtr([*]u64, address), 1, false);
+                    return address;
+                }
+
                 Kernel.Arch.CPU_stop();
             }
 
-            Kernel.Arch.CPU_stop();
+            // Failure:
+            if (flags & (1 << @enumToInt(Flags.can_fail)) == 0)
+            {
+                Kernel.Arch.CPU_stop();
+            }
+
+            self.decommit(commit_now, true);
+            return 0;
+        }
+
+        fn decommit(self: *Allocator, byte_count: u64, fixed: bool) void
+        {
+            if (byte_count & (Kernel.Arch.Page.size - 1) != 0) Kernel.Arch.CPU_stop();
+
+            const needed_page_count = byte_count / Kernel.Arch.Page.size;
+
+            // @Spinlock
+            if (fixed)
+            {
+                if (self.commit_fixed < needed_page_count) Kernel.Arch.CPU_stop();
+                self.commit_fixed -= needed_page_count;
+            }
+            else
+            {
+                if (self.commit_pageable < needed_page_count) Kernel.Arch.CPU_stop();
+                self.commit_pageable -= needed_page_count;
+            }
         }
 
         const CommitRangeError = error
@@ -509,8 +591,6 @@ pub const Physical = struct
             {
                 Kernel.Arch.CPU_stop();
             }
-
-            _ = memory_space;
 
             var delta: i64 = 0;
             memory_region.data.normal.commit.set(page_offset, page_offset + page_count, &delta, false) catch unreachable;
@@ -640,6 +720,51 @@ pub const Physical = struct
             self.free_or_zeroed_page_bitset.put(page);
             self.free_page_count += 1;
         }
+
+
+        fn activate_pages(self: *Allocator, pages: u64, count: u64, flags: u32) void
+        {
+            _ = flags;
+
+            // @Spinlock
+            //
+
+            for (self.page_frames[pages..pages + count]) |*frame, frame_i|
+            {
+                switch (frame.state)
+                {
+                    .free => self.free_page_count -= 1,
+                    .zeroed => self.zeroed_page_count -= 1,
+                    .standby =>
+                    {
+                        self.standby_page_count -= 1;
+
+                        if (self.last_standby_page == pages + frame_i)
+                        {
+                            if (frame.value.list.previous == &self.first_standby_page)
+                            {
+                                self.last_standby_page = 0;
+                            }
+                            else
+                            {
+                                self.last_standby_page = (@ptrToInt(frame.value.list.previous) - @ptrToInt(self.page_frames.ptr)) / @sizeOf(PageFrame);
+                            }
+                        }
+                    },
+                    else => Kernel.Arch.CPU_stop(),
+                }
+
+                frame.value.list.previous.* = frame.value.list.next;
+                if (frame.value.list.next != 0) self.page_frames[frame.value.list.next].value.list.previous = frame.value.list.previous;
+
+                std.mem.set(u8, std.mem.asBytes(frame), 0);
+                frame.state = .active;
+            }
+
+            self.active_page_count += 1;
+
+            // @TODO: update avaialable page count
+        }
     };
 
     fn insert_free_pages_start() void
@@ -655,6 +780,7 @@ pub const Physical = struct
 
         // ...
     }
+
 };
 
 pub const PageFault = struct
@@ -670,6 +796,7 @@ pub const PageFault = struct
     {
         region_not_found,
         read_only_page_fault,
+        outside_commit_range,
     };
 
     pub fn handle(memory_space: *Space, fault_address: u64, fault_flags: u32) PageFault.Error!void
@@ -741,13 +868,9 @@ pub const PageFault = struct
             @as(u32, @boolToInt((region.flags & (1 << @enumToInt(Memory.Region.Flags.write_combining))) != 0)) << @enumToInt(Kernel.Arch.Page.MapFlags.write_combining) |
             @as(u32, @boolToInt(!mark_modified and region.flags & (1 << @enumToInt(Memory.Region.Flags.fixed)) == 0 and region.flags & (1 << @enumToInt(Memory.Region.Flags.file)) != 0)) << @enumToInt(Kernel.Arch.Page.MapFlags.read_only);
 
-        _ = flags;
-        _ = zero_page;
-        _ = region_offset;
-
         if (region.flags & (1 << @enumToInt(Memory.Region.Flags.physical)) != 0)
         {
-            Kernel.Arch.CPU_stop();
+            Kernel.Arch.Page.map(memory_space, region.data.physical.offset + address - region.base_address, address, flags) catch unreachable;
         }
         else if (region.flags & (1 << @enumToInt(Memory.Region.Flags.shared)) != 0)
         {
@@ -762,10 +885,13 @@ pub const PageFault = struct
             if (region.flags & (1 << @enumToInt(Memory.Region.Flags.no_commit_tracking)) == 0)
             {
                 // @TODO: further check
-                // if (region.data.normal.commit.contains(
+                 if (!region.data.normal.commit.contains(region_offset >> Kernel.Arch.Page.bit_count))
+                 {
+                     return Error.outside_commit_range;
+                 }
             }
 
-            Kernel.Arch.Page.map(memory_space, Kernel.physical_memory_allocator.allocate_lockfree(need_zero_pages, null, null, null), address, Kernel.Arch.Page.size) catch unreachable;
+            Kernel.Arch.Page.map(memory_space, Kernel.physical_memory_allocator.allocate_lockfree(need_zero_pages, null, null, null), address, flags) catch unreachable;
             if (zero_page)
             {
                 std.mem.set(u8, @intToPtr([*]u8, address)[0..Kernel.Arch.Page.size], 0);
@@ -779,10 +905,27 @@ pub const PageFault = struct
         {
             Kernel.Arch.CPU_stop();
         }
-
-        return;
     }
 };
+
+pub fn map_physical(memory_space: *Memory.Space, asked_offset: u64, asked_byte_count: u64, caching: u32) ?u64
+{
+    const offset2 = asked_offset & (Kernel.Arch.Page.size - 1);
+    const offset = asked_offset - offset2;
+    const byte_count = asked_byte_count + @as(u64, @boolToInt(offset2 != 0)) * Kernel.Arch.Page.size;
+    //@Spinlock
+    const region = reserve(memory_space, byte_count, 1 << @enumToInt(Region.Flags.physical) | 1 << @enumToInt(Region.Flags.fixed) | caching, null, null) orelse return null;
+
+    region.data.physical.offset = offset;
+
+    var page_i: u64 = 0;
+    while (page_i < region.page_count) : (page_i += 1)
+    {
+        PageFault.handle(memory_space, region.base_address + page_i * Kernel.Arch.Page.size, 0) catch unreachable;
+    }
+
+    return region.base_address + offset2;
+}
 
 pub fn find_region(memory_space: *Memory.Space, address: u64) ?*Region
 {
@@ -821,7 +964,6 @@ pub fn reserve(memory_space: *Memory.Space, byte_count: u64, flags: u32, maybe_f
     const forced_address = maybe_forced_address orelse 0;
     const generate_guard_pages = maybe_generate_guard_pages orelse false;
     _ = generate_guard_pages;
-    _ = flags;
 
     const needed_page_count = ((byte_count + Kernel.Arch.Page.size - 1) & ~@as(u64, Kernel.Arch.Page.size - 1)) / Kernel.Arch.Page.size;
     if (needed_page_count == 0) return null;
@@ -949,7 +1091,6 @@ pub fn reserve(memory_space: *Memory.Space, byte_count: u64, flags: u32, maybe_f
 fn unreserve(memory_space: *Memory.Space, region_to_remove: *Memory.Region, unmap_pages: bool, maybe_guard_region: ?bool) void
 {
     _ = memory_space;
-
     const guard_region = maybe_guard_region orelse false;
 
     // @Spinlock
@@ -1218,4 +1359,50 @@ fn standard_allocate(memory_space: *Memory.Space, byte_count: u64, flags: u32, m
     }
 
     return @intToPtr([*]u8, region.base_address)[0..region.page_count * Kernel.Arch.Page.size];
+}
+
+fn pm_zero(asked_pages: [*]u64, asked_page_count: u64, contiguous: bool) void
+{
+    // @Spinlock
+
+    var page_count = asked_page_count;
+    var pages = asked_pages;
+
+    while (true)
+    {
+        const do_count = if (page_count > Physical.manipulation_region_page_count) Physical.manipulation_region_page_count else page_count;
+        page_count -= do_count;
+
+        var address_space = &Kernel.core_memory_space;
+        const region = Kernel.physical_memory_allocator.manipulation_region;
+
+        var it: u64 = 0;
+        while (it < do_count) : (it += 1)
+        {
+            Kernel.Arch.Page.map(address_space, if (contiguous) pages[0] + (it << Kernel.Arch.Page.bit_count) else pages[it], region + Kernel.Arch.Page.size * it, 1 << @enumToInt(Kernel.Arch.Page.MapFlags.overwrite) | 1 << @enumToInt(Kernel.Arch.Page.MapFlags.no_new_tables)) catch unreachable;
+        }
+
+        // @Spinlock
+        //
+
+        it = 0;
+        while (it < do_count) : (it += 1)
+        {
+            Kernel.Arch.invalidate_page(region + it * Kernel.Arch.Page.size);
+        }
+
+        std.mem.set(u8, @intToPtr([*]u8, region)[0..do_count * Kernel.Arch.Page.size], 0);
+        // @Spinlock
+
+        if (page_count != 0)
+        {
+            if (!contiguous) pages = @intToPtr([*]u64, @ptrToInt(pages) + (Physical.manipulation_region_page_count * @sizeOf(u64)));
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    // @Spinlock
 }

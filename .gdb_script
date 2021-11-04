@@ -1,3 +1,5 @@
 set disassembly-flavor intel
 symbol-file zig-cache/kernel.elf
+b CPU_stop
+b panic
 target remote localhost:1234

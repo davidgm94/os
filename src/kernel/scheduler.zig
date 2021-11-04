@@ -50,7 +50,6 @@ pub fn init(self: *Self) void
         .permissions = Process.Permissions.all,
     };
 
-    Kernel.Memory.init();
 
     self.next_process_id += 1;
 }

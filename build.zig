@@ -89,6 +89,7 @@ fn build_kernel(b: *Builder) *std.build.LibExeObjStep
             .cpu_features_add = enabled_features,
         });
     nasm_compile_elf_object(b, kernel, "src/kernel/x86.S", "zig-cache/kernel_x86.o");
+    kernel.setMainPkgPath("src");
     kernel.setLinkerScriptPath(FileSource.relative(kernel_linker_script_path));
     kernel.setOutputDir(build_cache_dir);
 
@@ -115,7 +116,7 @@ fn build_bootloader(b: *Builder) !void
 
     const qemu_command_str = &[_][]const u8
     {
-        "qemu-system-x86_64", "-hda", final_disk_image, "-no-reboot", "-no-shutdown", "-cpu", "Haswell",
+        "qemu-system-x86_64", "-hda", final_disk_image, "-no-reboot", "-no-shutdown", "-M", "q35", "-cpu", "Haswell",
         //"-D", "logging.txt",
         //"-d", "guest_errors,int,cpu,cpu_reset,in_asm"
     };

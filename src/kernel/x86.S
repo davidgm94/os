@@ -619,3 +619,8 @@ physical_memory_regions_get:
 physical_memory_highest_get:
     mov rax, [physical_memory_highest]
     ret
+
+[global bootloader_information_offset_get]
+bootloader_information_offset_get:
+    mov rax, [bootloader_information_offset]
+    ret

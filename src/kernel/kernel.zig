@@ -1,4 +1,5 @@
 pub const Arch = @import("arch.zig");
+pub const Drivers = @import("../drivers.zig");
 pub const Logger = @import("logger.zig");
 pub const Memory = @import("memory.zig");
 pub const Scheduler = @import("scheduler.zig");
@@ -23,5 +24,6 @@ pub const LocalStorage = extern struct
 
 pub fn init() void
 {
-    scheduler.init();
+    Memory.init();
+    Arch.init();
 }

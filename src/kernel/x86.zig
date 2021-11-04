@@ -1,5 +1,11 @@
 const std = @import("std");
 const Kernel = @import("kernel.zig");
+const ACPI = Kernel.Drivers.ACPI;
+
+pub fn init() void
+{
+    ACPI.parse_tables();
+}
 
 pub const Memory = struct
 {
@@ -573,6 +579,80 @@ pub fn early_allocate_page() u64
     return page_base_address;
 }
 
+fn sum_bytes(bytes: []const u8) u64
+{
+    var sum: u64 = 0;
+    for (bytes) |byte|
+    {
+        sum += byte;
+    }
+
+    return sum;
+}
+
+pub fn RSDP_find() u64
+{
+    const RSDP = Kernel.Drivers.ACPI.RootSystemDescriptorPointer;
+
+    const uefi_RSDP = @intToPtr(*u64, Memory.low_memory_start + bootloader_information_offset_get() + 0x7fe8).*;
+    if (uefi_RSDP != 0) return uefi_RSDP;
+
+    const low_memory_start: u64 = Memory.low_memory_start;
+    const first_region_operand = @as(u64, @intToPtr([*]u16, Memory.low_memory_start)[0x40e]) << 4;
+    const second_region_operand: u64 = 0xe0000;
+    var search_regions = [2]Kernel.Memory.PhysicalRegion
+    {
+        .{ .base_address = low_memory_start + first_region_operand, .page_count = 0x400 },
+        .{ .base_address = low_memory_start + second_region_operand, .page_count = 0x20000 },
+    };
+
+    for (search_regions) |search_region|
+    {
+        var address = search_region.base_address;
+        // @TODO: is the condition wrong?
+        while (address < search_region.base_address + search_region.page_count * Page.size) : (address += 0x10)
+        {
+            const rsdp = @intToPtr(*RSDP, address);
+            if (rsdp.signature != RSDP.signature)
+            {
+                continue;
+            }
+
+            if (rsdp.revision == 0)
+            {
+                if (@truncate(u8, sum_bytes(@intToPtr([*]u8, address)[0..20])) != 0) continue;
+
+                return address - Memory.low_memory_start;
+            }
+            else if (rsdp.revision == 2)
+            {
+                if (@truncate(u8, sum_bytes(@intToPtr([*]u8, address)[0..@sizeOf(RSDP)])) != 0) continue;
+
+                return address - Memory.low_memory_start;
+            }
+        }
+    }
+
+    Kernel.Arch.CPU_stop();
+
+    //for (search_regions) |search_region|
+    //{
+        //var address = search_region.base_address;
+        //// @TODO: is the condition wrong?
+        //while (address < search_region.base_address + search_region.page_count * Page.size) : (address += 0x10)
+        //{
+            //const rsdp = @intToPtr(*RSDP, address);
+            //if (rsdp.signature != RSDP.signature)
+            //{
+                //continue;
+            //}
+
+        //}
+    //}
+
+    //return 0;
+}
+
 const InterruptContext = extern struct
 {
     cr2: u64,
@@ -753,3 +833,4 @@ pub extern fn disable_interrupts() callconv(.C) void;
 pub extern fn invalidate_page(page: u64) callconv(.C) void;
 pub extern fn physical_memory_regions_get() callconv(.C) *Kernel.Memory.PhysicalRegions;
 pub extern fn physical_memory_highest_get() callconv(.C) u64;
+pub extern fn bootloader_information_offset_get() callconv(.C) u64;
