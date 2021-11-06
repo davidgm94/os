@@ -579,7 +579,7 @@ pub fn early_allocate_page() u64
     return page_base_address;
 }
 
-fn sum_bytes(bytes: []const u8) u64
+pub fn sum_bytes(bytes: []const u8) u64
 {
     var sum: u64 = 0;
     for (bytes) |byte|

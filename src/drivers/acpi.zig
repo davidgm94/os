@@ -1,3 +1,4 @@
+const std = @import("std");
 const Kernel = @import("../kernel/kernel.zig");
 
 var acpi: ACPI = undefined;
@@ -8,6 +9,13 @@ pub const ACPI = extern struct
     IO_APIC_count: u64,
     interrupt_override_count: u64,
     LAPIC_NMI_count: u64,
+
+    processors: [256]CPU,
+    IO_APICs: [16]IOAPIC,
+    interrupt_overrides: [256]InterruptOverride,
+    LAPIC_NMIs: [32]LAPIC_NMI,
+
+    LAPIC_address: *volatile u32,
 
     rsdp: *RootSystemDescriptorPointer,
 
@@ -43,13 +51,123 @@ pub const ACPI = extern struct
 
             const header_address = Kernel.Memory.map_physical(&Kernel.kernel_memory_space, table_address, @sizeOf(DescriptorTable), 0) orelse unreachable;
             const header = @intToPtr(*align(1) DescriptorTable, header_address);
-            _ = header;
-            var a: u32 = 1;
-            a += 1;
+
+            switch (header.signature)
+            {
+                MADT_signature =>
+                {
+                    header.check();
+                    const madt = @intToPtr(*align(1) MADT, header_address + DescriptorTable.header_length);
+                    var length = header.length - DescriptorTable.header_length - @sizeOf(MADT);
+                    const start_length = length;
+                    var data = @intToPtr([*]u8, @ptrToInt(madt) + @sizeOf(MADT));
+
+                    acpi.LAPIC_address = @intToPtr(*volatile u32, ACPI.map_physical_memory(madt.LAPIC_address, 0x10000));
+
+                    var entry_type: MADT.EntryType = undefined;
+                    var entry_length: u8 = undefined;
+                    while (length != 0 and length <= start_length) : 
+                    ({
+                        length -= entry_length;
+                        data = @intToPtr([*]u8, @ptrToInt(data) + entry_length);
+                    })
+                    {
+                        entry_type = @intToEnum(MADT.EntryType, data[0]);
+                        entry_length = data[1];
+
+                        switch (entry_type)
+                        {
+                            .LAPIC =>
+                            {
+                                if ((data[4] & 1) == 0) continue;
+
+                                var processor = &acpi.processors[acpi.processor_count];
+
+                                processor.processor_ID = data[2];
+                                processor.APIC_ID = data[3];
+
+                                acpi.processor_count += 1;
+                            },
+                            .IO_APIC =>
+                            {
+                                var io_apic = &acpi.IO_APICs[acpi.IO_APIC_count];
+
+                                io_apic.id = data[2];
+                                io_apic.address = @intToPtr([*] volatile u32, ACPI.map_physical_memory(@ptrCast([*]align(1) u32, data)[1], 0x10000));
+                                _ = io_apic.read(0); // make sure it's mapped
+                                io_apic.GSI_base = @ptrCast([*]align(1) u32, data)[2];
+
+                                acpi.IO_APIC_count += 1;
+                            },
+                            .IO_APIC_ISO =>
+                            {
+                                var iso = &acpi.interrupt_overrides[acpi.interrupt_override_count];
+                                iso.source_IRQ = data[3];
+                                iso.GSI_number = @ptrCast([*] align(1) u32, data)[1];
+                                iso.active_low = data[8] & 2 != 0;
+                                iso.level_triggered = data[8] & 8 != 0;
+
+                                acpi.interrupt_override_count += 1;
+                            },
+                            .LAPIC_NMI =>
+                            {
+                                var nmi = &acpi.LAPIC_NMIs[acpi.LAPIC_NMI_count];
+
+                                nmi.processor = data[2];
+                                nmi.lint_index = data[5];
+                                nmi.active_low = data[3] & 2 != 0;
+                                nmi.level_triggered = data[3] & 8 != 0;
+                                
+                                acpi.LAPIC_NMI_count += 1;
+                            },
+                            else => unreachable,
+                        }
+                    }
+                },
+                FADT_signature =>
+                {
+                    const fadt = map_physical_memory(
+                },
+                HPET_signature =>
+                {
+                },
+                else => {}
+            }
+        }
+
+        if (acpi.processor_count > 256 or apci.IO_APIC_count > 16 or acpi.interrupt_override_count > 256 or acpi.LAPIC_NMI_count > 32)
+        {
+            Kernel.Arch.CPU_stop();
         }
 
         Kernel.Arch.CPU_stop();
     }
+
+    fn map_physical_memory(physical_address: u64, length: u64) u64
+    {
+        return Kernel.Memory.map_physical(&Kernel.kernel_memory_space, physical_address, length, 1 << @enumToInt(Kernel.Memory.Region.Flags.not_cacheable)) orelse unreachable;
+    }
+
+    pub const MADT = extern struct
+    {
+        LAPIC_address: u32,
+        flags: u32,
+
+        const EntryType = enum(u8)
+        {
+            LAPIC = 0,
+            IO_APIC = 1,
+            IO_APIC_ISO = 2,
+            IO_APIC_NMI_source = 3,
+            LAPIC_NMI = 4,
+            LAPIC_address_override = 5,
+            local_x2APIC = 9,
+        };
+    };
+
+    const MADT_signature = 0x43495041;
+    const FADT_signature = 0x50434146;
+    const HPET_signature = 0x54455048;
 
     pub const RootSystemDescriptorPointer = extern struct
     {
@@ -80,5 +198,55 @@ pub const ACPI = extern struct
         creator_revision: u32,
 
         const header_length = 36;
+
+        fn check(self: *align(1) DescriptorTable) void
+        {
+            if (@truncate(u8, Kernel.Arch.sum_bytes(@ptrCast([*]u8, self)[0..self.length])) != 0)
+                Kernel.Arch.CPU_stop();
+        }
+    };
+
+    pub const CPU = extern struct
+    {
+        processor_ID: u8,
+        kernel_processor_ID: u8,
+        APIC_ID: u8,
+        boot_processor: bool,
+        // @TODO: add more components
+    };
+
+    pub const IOAPIC = extern struct
+    {
+        address: [*] volatile u32,
+        GSI_base: u32,
+        id: u8,
+
+        fn read(self: *IOAPIC, register: u32) u32
+        {
+            self.address[0] = register;
+            return self.address[4];
+        }
+
+        fn write(self: *IOAPIC, register: u32, value: u32) void
+        {
+            self.address[0] = register;
+            self.address[4] = value;
+        }
+    };
+
+    pub const InterruptOverride = extern struct
+    {
+        source_IRQ: u8,
+        GSI_number: u32,
+        active_low: bool,
+        level_triggered: bool,
+    };
+
+    pub const LAPIC_NMI = extern struct
+    {
+        processor: u8,
+        lint_index: u8,
+        active_low: bool,
+        level_triggered: bool
     };
 };
