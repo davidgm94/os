@@ -19,6 +19,10 @@ pub const ACPI = extern struct
 
     rsdp: *RootSystemDescriptorPointer,
 
+    PS2_controller_unavailable: bool,
+    VGA_controller_unavailable: bool,
+    century_register_index: u8,
+
     pub fn parse_tables() void
     {
         const rsdp_address = Kernel.Arch.RSDP_find();
@@ -126,7 +130,17 @@ pub const ACPI = extern struct
                 },
                 FADT_signature =>
                 {
-                    const fadt = map_physical_memory(
+                    const fadt = @intToPtr(*DescriptorTable, Kernel.Memory.map_physical(&Kernel.kernel_memory_space, header_address, header.length, 0) orelse unreachable);
+                    fadt.check();
+
+                    if (header.length > 109)
+                    {
+                        const fadt_bytes = @ptrCast([*]u8, fadt);
+                        acpi.century_register_index = fadt_bytes[108];
+                        const boot_architecture_flags = fadt_bytes[109];
+                        acpi.PS2_controller_unavailable = (~boot_architecture_flags & (1 << 1)) != 0;
+                        acpi.VGA_controller_unavailable = (boot_architecture_flags & (1 << 2)) != 0;
+                    }
                 },
                 HPET_signature =>
                 {
@@ -135,7 +149,7 @@ pub const ACPI = extern struct
             }
         }
 
-        if (acpi.processor_count > 256 or apci.IO_APIC_count > 16 or acpi.interrupt_override_count > 256 or acpi.LAPIC_NMI_count > 32)
+        if (acpi.processor_count > 256 or acpi.IO_APIC_count > 16 or acpi.interrupt_override_count > 256 or acpi.LAPIC_NMI_count > 32)
         {
             Kernel.Arch.CPU_stop();
         }

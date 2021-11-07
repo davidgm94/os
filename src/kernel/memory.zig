@@ -1406,3 +1406,66 @@ fn pm_zero(asked_pages: [*]u64, asked_page_count: u64, contiguous: bool) void
 
     // @Spinlock
 }
+
+const FreeError = error
+{
+    region_not_found,
+    attempt_to_free_non_user_region,
+};
+
+pub fn free(memory_space: *Memory.Space, address: u64, expected_size: u64, user_only: bool) FreeError!void
+{
+    // @Spinlock
+
+    const region = find_region(memory_space, address) orelse return FreeError.region_not_found;
+
+    if (user_only and (~region.flags & (1 << Region.Flags.user) != 0))
+    {
+        return FreeError.attempt_to_free_non_user_region;
+    }
+
+    // @Spinlock check
+    
+    var unmap_pages = true;
+
+    if (region.base_address != address and (~region.flags & (1 << Region.Flags.physical) != 0))
+    {
+        return FreeError.incorrect_base_address;
+    }
+
+    if (expected_size > 0 and (expected_size + Kernel.Arch.Page.size - 1) / Kernel.Arch.Page.size != region.page_count)
+    {
+        return FreeError.incorrect_free_size;
+    }
+
+    if (region.flags & (1 << Region.Flags.normal) != 0)
+    {
+        Kernel.Arch.CPU_stop();
+    }
+    else if (region.flags & (1 << Region.Flags.normal) != 0)
+    {
+        Kernel.Arch.CPU_stop();
+    }
+    else if (region.flags & (1 << Region.Flags.file) != 0)
+    {
+        Kernel.Arch.CPU_stop();
+    }
+    else if (region.flags & (1 << Region.Flags.guard) != 0)
+    {
+        Kernel.Arch.CPU_stop();
+    }
+    else if (region.flags & (1 << Region.Flags.physical) != 0)
+    { 
+        // do nothing
+    }
+    else
+    {
+        Kernel.Arch.CPU_stop();
+    }
+
+    unreserve(memory_space, region, unmap_pages, null);
+
+    // sharedregiontofree
+    // nodetofree and filehandleflags
+    Kernel.Arch.CPU_stop();
+}
