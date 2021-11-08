@@ -360,6 +360,88 @@ pub const Page = struct
 
         invalidate_page(asked_virtual_address);
     }
+
+    pub const UnmapFlags = enum(u8)
+    {
+        free,
+        free_copied,
+        balance_file,
+    };
+
+    pub fn unmap(memory_space: *Kernel.Memory.Space, virtual_address_start: u64, page_count: u64, flags: u32, maybe_unmap_maximum: ?u64, resume_position: ?*u64) void
+    {
+        const unmap_maximum = maybe_unmap_maximum orelse 0;
+        _ = memory_space;
+        _ = unmap_maximum;
+
+        //@Spinlock x2
+
+        const table_base = virtual_address_start & 0x0000FFFFFFFFF000;
+        const start = if (resume_position != null) resume_position.?.* else 0;
+
+        var page_i: u64 = start;
+        while (page_i < page_count) : (page_i += 1)
+        {
+            const virtual_address = (page_i << Page.bit_count) + table_base;
+            const indices = compute_page_table_indices(virtual_address);
+
+            if (Page.Table.access(.level_4, indices).* & 1 == 0)
+            {
+                page_i -= (virtual_address >> Page.bit_count) % (1 << Page.Table.entry_bit_count * 3);
+                page_i += 1 << (Page.Table.entry_bit_count * 3);
+                continue;
+            }
+
+            if (Page.Table.access(.level_3, indices).* & 1 == 0)
+            {
+                page_i -= (virtual_address >> Page.bit_count) % (1 << Page.Table.entry_bit_count * 2);
+                page_i += 1 << (Page.Table.entry_bit_count * 2);
+                continue;
+            }
+
+            if (Page.Table.access(.level_2, indices).* & 1 == 0)
+            {
+                page_i -= (virtual_address >> Page.bit_count) % (1 << Page.Table.entry_bit_count * 1);
+                page_i += 1 << (Page.Table.entry_bit_count * 1);
+                continue;
+            }
+
+            const translation = Page.Table.access(.level_1, indices).*;
+
+            if (translation & 1 == 0) continue;
+
+            const copy = translation & (1 << 9) != 0;
+
+            if (copy and (flags & (1 << @enumToInt(UnmapFlags.balance_file)) != 0) and (~flags & (1 << @enumToInt(UnmapFlags.free_copied)) != 0))
+            {
+                continue;
+            }
+
+            if ((~translation & (1 << 5) != 0) or (~translation & (1 << 6) != 0))
+            {
+                Kernel.Arch.CPU_stop();
+            }
+
+            Page.Table.access(.level_1, indices).* = 0;
+
+            const physical_address = translation & 0x0000FFFFFFFFF000;
+
+            if ((flags & (1 << @enumToInt(UnmapFlags.free)) != 0) or (flags & (1 << @enumToInt(UnmapFlags.free_copied)) != 0 and copy))
+            {
+                Kernel.Memory.free_physical(physical_address, true, null);
+            }
+            else if (flags & (1 << @enumToInt(UnmapFlags.balance_file)) != 0)
+            {
+                // It's safe to do this before page invalidation,
+                // because the page fault handler is synchronised with the same mutexes acquired above.
+                Kernel.Arch.CPU_stop();
+            }
+        }
+
+        // @WARNING
+        // this function should be called on all processors
+        invalidate_all_pages();
+    }
 };
 
 pub fn address_is_in_kernel_space(address: u64) bool
@@ -831,6 +913,7 @@ pub extern fn enable_interrupts() callconv(.C) void;
 pub extern fn disable_interrupts() callconv(.C) void;
 
 pub extern fn invalidate_page(page: u64) callconv(.C) void;
+pub extern fn invalidate_all_pages() callconv(.C) void;
 pub extern fn physical_memory_regions_get() callconv(.C) *Kernel.Memory.PhysicalRegions;
 pub extern fn physical_memory_highest_get() callconv(.C) u64;
 pub extern fn bootloader_information_offset_get() callconv(.C) u64;

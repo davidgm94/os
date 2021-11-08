@@ -51,17 +51,17 @@ pub const ACPI = extern struct
         while (table_i < table_count) : (table_i += 1)
         {
             // XSDT
-            const table_address = @intToPtr([*]align(1) u32, table_list_address)[table_i];
+            const physical_header_address = @intToPtr([*]align(1) u32, table_list_address)[table_i];
 
-            const header_address = Kernel.Memory.map_physical(&Kernel.kernel_memory_space, table_address, @sizeOf(DescriptorTable), 0) orelse unreachable;
-            const header = @intToPtr(*align(1) DescriptorTable, header_address);
+            const virtual_header_address = Kernel.Memory.map_physical(&Kernel.kernel_memory_space, physical_header_address, @sizeOf(DescriptorTable), 0) orelse unreachable;
+            const header = @intToPtr(*align(1) DescriptorTable, virtual_header_address);
 
             switch (header.signature)
             {
                 MADT_signature =>
                 {
                     header.check();
-                    const madt = @intToPtr(*align(1) MADT, header_address + DescriptorTable.header_length);
+                    const madt = @intToPtr(*align(1) MADT, virtual_header_address + DescriptorTable.header_length);
                     var length = header.length - DescriptorTable.header_length - @sizeOf(MADT);
                     const start_length = length;
                     var data = @intToPtr([*]u8, @ptrToInt(madt) + @sizeOf(MADT));
@@ -130,7 +130,7 @@ pub const ACPI = extern struct
                 },
                 FADT_signature =>
                 {
-                    const fadt = @intToPtr(*DescriptorTable, Kernel.Memory.map_physical(&Kernel.kernel_memory_space, header_address, header.length, 0) orelse unreachable);
+                    const fadt = @intToPtr(*align(1) DescriptorTable, Kernel.Memory.map_physical(&Kernel.kernel_memory_space, physical_header_address, header.length, 0) orelse unreachable);
                     fadt.check();
 
                     if (header.length > 109)
@@ -141,12 +141,27 @@ pub const ACPI = extern struct
                         acpi.PS2_controller_unavailable = (~boot_architecture_flags & (1 << 1)) != 0;
                         acpi.VGA_controller_unavailable = (boot_architecture_flags & (1 << 2)) != 0;
                     }
+
+                    Kernel.Memory.free(&Kernel.kernel_memory_space, @ptrToInt(fadt), null, null) catch unreachable;
                 },
                 HPET_signature =>
                 {
+                    const hpet = @intToPtr(*align(1) DescriptorTable, Kernel.Memory.map_physical(&Kernel.kernel_memory_space, physical_header_address, header.length, 0) orelse unreachable);
+                    hpet.check();
+
+                    if (header.length == 52 and @ptrCast([*]u8, hpet)[52] == 0)
+                    {
+                        const header_bytes = @ptrCast([*]u8, header);
+                        const base_address = @ptrCast([*]align(1) u64, &header_bytes[44])[0];
+                        _ = base_address;
+                    }
+
+                    Kernel.Memory.free(&Kernel.kernel_memory_space, @ptrToInt(hpet), null, null) catch unreachable;
                 },
                 else => {}
             }
+
+            Kernel.Memory.free(&Kernel.kernel_memory_space, virtual_header_address, null, null) catch unreachable;
         }
 
         if (acpi.processor_count > 256 or acpi.IO_APIC_count > 16 or acpi.interrupt_override_count > 256 or acpi.LAPIC_NMI_count > 32)

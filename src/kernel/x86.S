@@ -610,6 +610,15 @@ invalidate_page:
     invlpg [rdi]
     ret
 
+[global invalidate_all_pages]
+invalidate_all_pages:
+    mov rax, cr4
+    and rax, ~(1 << 7)
+    mov cr4, rax
+    or rax, 1 << 7
+    mov cr4, rax
+    ret
+
 [global physical_memory_regions_get]
 physical_memory_regions_get:
     mov rax, physical_memory_regions

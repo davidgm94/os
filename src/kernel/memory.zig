@@ -927,6 +927,34 @@ pub fn map_physical(memory_space: *Memory.Space, asked_offset: u64, asked_byte_c
     return region.base_address + offset2;
 }
 
+pub fn free_physical(asked_page: u64, maybe_mutex_already_acquired: ?bool, maybe_page_count: ?u64) void
+{
+    const mutex_already_acquired = maybe_mutex_already_acquired orelse false;
+    _ = mutex_already_acquired;
+    const page_count = maybe_page_count orelse 1;
+
+    if (asked_page == 0) Kernel.Arch.CPU_stop();
+    // @Spinlock
+    //
+    if (!Kernel.physical_memory_allocator.page_frame_db_initialized) Kernel.Arch.CPU_stop();
+    const page = asked_page >> Kernel.Arch.Page.bit_count;
+
+    Physical.insert_free_pages_start();
+
+    for (Kernel.physical_memory_allocator.page_frames[page..page_count + page]) |*frame|
+    {
+        if (frame.state == .free) Kernel.Arch.CPU_stop();
+
+        if (Kernel.physical_memory_allocator.commit_fixed_limit != 0) Kernel.physical_memory_allocator.active_page_count -= 1;
+
+        Kernel.physical_memory_allocator.insert_free_pages_next(page);
+    }
+
+    Physical.insert_free_pages_end();
+
+    // @Spinlock
+}
+
 pub fn find_region(memory_space: *Memory.Space, address: u64) ?*Region
 {
     // @Spinlock
@@ -1117,11 +1145,48 @@ fn unreserve(memory_space: *Memory.Space, region_to_remove: *Memory.Region, unma
 
     if (unmap_pages)
     {
-        Kernel.Arch.CPU_stop();
-        //Kernel.Arch.unmap_pages();
+        Kernel.Arch.Page.unmap(memory_space, region_to_remove.base_address, region_to_remove.page_count, 0, null, null);
     }
 
-    Kernel.Arch.CPU_stop();
+    memory_space.reserve += region_to_remove.page_count;
+
+    if (memory_space == &Kernel.core_memory_space)
+    {
+        Kernel.Arch.CPU_stop();
+    }
+    else
+    {
+        memory_space.used_regions.remove(&region_to_remove.more.non_core.item_base);
+
+        const address = region_to_remove.base_address;
+
+        if (memory_space.free_regions_base.find(address, .largest_below_or_equal)) |before|
+        {
+            const before_region = before.value.?;
+            if (before_region.base_address + before_region.page_count * Kernel.Arch.Page.size == region_to_remove.base_address)
+            {
+                region_to_remove.base_address = before_region.base_address;
+                region_to_remove.page_count = before_region.page_count;
+                memory_space.free_regions_base.remove(before);
+                memory_space.free_regions_size.remove(&before_region.more.non_core.item.size);
+                Kernel.core_heap.free(@ptrToInt(before_region), @sizeOf(Region));
+            }
+        }
+        if (memory_space.free_regions_base.find(address, .smallest_above_or_equal)) |after|
+        {
+            const after_region = after.value.?;
+            if (region_to_remove.base_address + region_to_remove.page_count * Kernel.Arch.Page.size == after_region.base_address)
+            {
+                region_to_remove.page_count += after_region.page_count;
+                memory_space.free_regions_base.remove(after);
+                memory_space.free_regions_size.remove(&after_region.more.non_core.item.size);
+                Kernel.core_heap.free(@ptrToInt(after_region), @sizeOf(Region)); 
+            }
+        }
+
+        memory_space.free_regions_base.insert(&region_to_remove.more.non_core.item_base, region_to_remove, region_to_remove.base_address, .panic) catch unreachable;
+        memory_space.free_regions_size.insert(&region_to_remove.more.non_core.item.size, region_to_remove, region_to_remove.page_count, .allow) catch unreachable;
+    }
 }
 
 const HeapRegion = extern struct
@@ -1157,6 +1222,21 @@ const HeapRegion = extern struct
     fn data(self: *HeapRegion) u64
     {
         return @ptrToInt(self) + used_header_size;
+    }
+
+    fn header(address: u64) *HeapRegion
+    {
+        return @intToPtr(*HeapRegion, address - used_header_size);
+    }
+
+    fn get_previous(self: *HeapRegion) ?*HeapRegion
+    {
+        if (self.previous != 0)
+        {
+            const previous_region = @intToPtr(*HeapRegion, @ptrToInt(self) - self.previous);
+            return previous_region;
+        }
+        else return null;
     }
 };
 
@@ -1239,7 +1319,7 @@ pub const Heap = struct
         self.allocation_count += 1;
 
         // @TODO: think of a better atomic order
-        _ = @atomicRmw(@TypeOf(self.size), &self.size, .Add, size, .SeqCst);
+        self.increase_size(size);
 
         if (region.union1.size == size)
         {
@@ -1277,6 +1357,102 @@ pub const Heap = struct
 
         // memory leak detector
         return address;
+    }
+
+    pub fn free(self: *Self, address: u64, maybe_expected_size: ?u64) void
+    {
+        _ = self;
+        const expected_size = maybe_expected_size orelse 0;
+        if (address == 0)
+        {
+            if (expected_size != 0) Kernel.Arch.CPU_stop();
+            return;
+        }
+
+        // memory leak detector remove
+        
+     
+        var region = HeapRegion.header(address);
+        if (region.used != HeapRegion.used_magic) Kernel.Arch.CPU_stop();
+        if (expected_size != 0 and region.union2.allocation_size != expected_size) Kernel.Arch.CPU_stop();
+
+        if (region.union1.size == 0)
+        {
+            // the region was allocated by itself
+            // figure out better atomic model
+            self.decrease_size(region.union2.allocation_size);
+            // this can be buggy
+            Kernel.Memory.free(&Kernel.kernel_memory_space, @ptrToInt(region), null, null) catch unreachable;
+            return;
+        }
+
+        // @TODO: debug build
+
+        const heap_address = @intToPtr(**Heap, @intToPtr(*HeapRegion, @ptrToInt(region) - region.offset + 0x10000 - 0x20).data()).*;
+        if (heap_address != self)
+        {
+            Kernel.Arch.CPU_stop();
+        }
+
+        // @Spinlock
+        self.validate();
+
+        region.used = 0;
+
+        if (region.offset < region.previous) Kernel.Arch.CPU_stop();
+
+        self.allocation_count -= 1;
+        self.decrease_size(region.union2.allocation_size);
+
+        // Attempt to merge with the next region
+        const next_region = region.next();
+        if (next_region.used == 0)
+        {
+            remove_free_region(next_region);
+
+            region.union1.size += next_region.union1.size;
+            next_region.next().previous = region.union1.size;
+        }
+
+        // Attempt to merge with the previous region
+        if (region.get_previous()) |previous_region|
+        {
+            if (previous_region.used == 0)
+            {
+                remove_free_region(previous_region);
+                previous_region.union1.size += region.union1.size;
+                region.next().previous = previous_region.union1.size;
+                region = previous_region;
+            }
+        }
+
+        if (region.union1.size == 0x10000 - 0x20)
+        {
+            if (region.offset != 0) Kernel.Arch.CPU_stop();
+            self.block_count -= 1;
+
+            // @TODO: validation
+
+            // @TODO: @WARNING: this is broken for userspace
+            Kernel.Memory.free(&Kernel.kernel_memory_space, @ptrToInt(region), null, null) catch unreachable;
+            // @Spinlock
+        }
+        else
+        {
+            self.add_free_region(region);
+            self.validate();
+            // @Spinlock
+        }
+    }
+
+    fn increase_size(self: *Heap, size: u64) callconv(.Inline) void
+    {
+        _ = @atomicRmw(@TypeOf(self.size), &self.size, .Add, size, .SeqCst);
+    }
+
+    fn decrease_size(self: *Heap, size: u64) callconv(.Inline) void
+    {
+        _ = @atomicRmw(@TypeOf(self.size), &self.size, .Sub, size, .SeqCst);
     }
 
     fn add_free_region(self: *Self, region: *HeapRegion) void
@@ -1411,15 +1587,19 @@ const FreeError = error
 {
     region_not_found,
     attempt_to_free_non_user_region,
+    incorrect_base_address,
+    incorrect_free_size,
 };
 
-pub fn free(memory_space: *Memory.Space, address: u64, expected_size: u64, user_only: bool) FreeError!void
+pub fn free(memory_space: *Memory.Space, address: u64, maybe_expected_size: ?u64, maybe_user_only: ?bool) FreeError!void
 {
+    const expected_size = maybe_expected_size orelse 0;
+    const user_only = maybe_user_only orelse false;
     // @Spinlock
 
     const region = find_region(memory_space, address) orelse return FreeError.region_not_found;
 
-    if (user_only and (~region.flags & (1 << Region.Flags.user) != 0))
+    if (user_only and (~region.flags & (1 << @enumToInt(Region.Flags.user)) != 0))
     {
         return FreeError.attempt_to_free_non_user_region;
     }
@@ -1428,7 +1608,7 @@ pub fn free(memory_space: *Memory.Space, address: u64, expected_size: u64, user_
     
     var unmap_pages = true;
 
-    if (region.base_address != address and (~region.flags & (1 << Region.Flags.physical) != 0))
+    if (region.base_address != address and (~region.flags & (1 << @enumToInt(Region.Flags.physical)) != 0))
     {
         return FreeError.incorrect_base_address;
     }
@@ -1438,23 +1618,23 @@ pub fn free(memory_space: *Memory.Space, address: u64, expected_size: u64, user_
         return FreeError.incorrect_free_size;
     }
 
-    if (region.flags & (1 << Region.Flags.normal) != 0)
+    if (region.flags & (1 << @enumToInt(Region.Flags.normal)) != 0)
     {
         Kernel.Arch.CPU_stop();
     }
-    else if (region.flags & (1 << Region.Flags.normal) != 0)
+    else if (region.flags & (1 << @enumToInt(Region.Flags.normal)) != 0)
     {
         Kernel.Arch.CPU_stop();
     }
-    else if (region.flags & (1 << Region.Flags.file) != 0)
+    else if (region.flags & (1 << @enumToInt(Region.Flags.file)) != 0)
     {
         Kernel.Arch.CPU_stop();
     }
-    else if (region.flags & (1 << Region.Flags.guard) != 0)
+    else if (region.flags & (1 << @enumToInt(Region.Flags.guard)) != 0)
     {
         Kernel.Arch.CPU_stop();
     }
-    else if (region.flags & (1 << Region.Flags.physical) != 0)
+    else if (region.flags & (1 << @enumToInt(Region.Flags.physical)) != 0)
     { 
         // do nothing
     }
@@ -1465,7 +1645,6 @@ pub fn free(memory_space: *Memory.Space, address: u64, expected_size: u64, user_
 
     unreserve(memory_space, region, unmap_pages, null);
 
-    // sharedregiontofree
-    // nodetofree and filehandleflags
-    Kernel.Arch.CPU_stop();
+    // @TODO: sharedregiontofree
+    // @TODO: nodetofree and filehandleflags
 }
