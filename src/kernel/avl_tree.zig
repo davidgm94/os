@@ -60,6 +60,41 @@ pub fn Short(comptime T: type) type
                 self.height = 1 + if (balance > 0) left_height else right_height;
             }
 
+            fn validate_item(self: *Item, before: bool, tree: *Self, parent: ?*Item, maybe_depth: ?i32) i32
+            {
+                const depth = maybe_depth orelse 0;
+                if (self.parent != parent) Kernel.Arch.CPU_stop();
+                
+                const left_height = blk:
+                {
+                    if (self.children[0]) |left|
+                    {
+                        if (compare(left.key, self.key) > 0) Kernel.Arch.CPU_stop();
+                        break :blk left.validate_item(before, tree, self, depth + 1);
+                    }
+                    else
+                    {
+                        break :blk 0;
+                    }
+                };
+
+                const right_height = blk: 
+                {
+                    if (self.children[1]) |right|
+                    {
+                        if (compare(right.key, self.key) < 0) Kernel.Arch.CPU_stop();
+                        break :blk right.validate_item(before, tree, self, depth + 1);
+                    }
+                    else
+                    {
+                        break :blk 0;
+                    }
+                };
+
+                const height = 1 + (if (left_height > right_height) left_height else right_height);
+                if (height != self.height) Kernel.Arch.CPU_stop();
+                return height;
+            }
         };
 
         pub const DuplicateKeyPolicy = enum
@@ -78,6 +113,8 @@ pub fn Short(comptime T: type) type
 
         pub fn insert(self: *Self, item: *Item, value: *T, key: Key, duplicate_key_policy: DuplicateKeyPolicy) InsertError!void
         {
+            self.validate(true);
+
             item.key = key;
             item.children[0] = null;
             item.children[1] = null;
@@ -181,6 +218,8 @@ pub fn Short(comptime T: type) type
 
             self.root = fake_root.children[0];
             self.root.?.parent = null;
+
+            self.validate(false);
         }
 
         pub const SearchMode = enum
@@ -192,6 +231,7 @@ pub fn Short(comptime T: type) type
 
         pub fn find(self: *Self, key: Key, search_mode: SearchMode) ?*Item
         {
+            self.validate(true);
             return self.find_recursive(self.root, key, search_mode);
         }
 
@@ -243,6 +283,8 @@ pub fn Short(comptime T: type) type
 
         pub fn remove(self: *Self, item: *Item) void
         {
+            self.validate(true);
+
             var fake_root = std.mem.zeroes(Item);
             self.root.?.parent = &fake_root;
             fake_root.children[0] = self.root;
@@ -254,19 +296,20 @@ pub fn Short(comptime T: type) type
                 swap_items(item_to_swap, item);
             }
             var item_iterator = item;
-            var link = @intToPtr(*?*Item, @ptrToInt(&item_iterator.parent.?.children) + (@as(u64, @boolToInt(item_iterator.parent.?.children[1] == item_iterator)) * @sizeOf(@TypeOf(&item_iterator.parent.?.children))));
+            const link_index = @boolToInt(item_iterator.parent.?.children[1] == item_iterator);
+            var link = &item_iterator.parent.?.children[link_index];
             link.* = if (item_iterator.children[0] != null) item_iterator.children[0] else item_iterator.children[1];
-            if (link.* != null)
+            if (link.*) |link_unwrapped|
             {
-                link.*.?.parent = item_iterator.parent;
-                item_iterator = link.*.?;
+                link_unwrapped.parent = item_iterator.parent;
+                item_iterator = link_unwrapped;
             }
             else
             {
                 item_iterator = item_iterator.parent.?;
             }
 
-            while (@ptrToInt(item_iterator) != @ptrToInt(&fake_root))
+            while (item_iterator != &fake_root)
             {
                 const left_height = if (item_iterator.children[0] != null) item_iterator.children[0].?.height else 0;
                 const right_height = if (item_iterator.children[1] != null) item_iterator.children[1].?.height else 0;
@@ -323,6 +366,8 @@ pub fn Short(comptime T: type) type
                 if (self.root.?.parent != &fake_root) Kernel.Arch.CPU_stop();
                 self.root.?.parent = null;
             }
+
+            self.validate(false);
         }
 
         fn get_balance(maybe_item: ?*Item) i32
@@ -365,6 +410,14 @@ pub fn Short(comptime T: type) type
             if (key_1 < key_2) return -1;
             if (key_1 > key_2) return 1;
             return 0;
+        }
+
+        fn validate(self: *Self, before: bool) void
+        {
+            if (self.root) |root|
+            {
+                _ = root.validate_item(before, self, null, null);
+            }
         }
     };
 }

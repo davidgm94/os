@@ -52,7 +52,6 @@ pub const ACPI = extern struct
         {
             // XSDT
             const physical_header_address = @intToPtr([*]align(1) u32, table_list_address)[table_i];
-
             const virtual_header_address = Kernel.Memory.map_physical(&Kernel.kernel_memory_space, physical_header_address, @sizeOf(DescriptorTable), 0) orelse unreachable;
             const header = @intToPtr(*align(1) DescriptorTable, virtual_header_address);
 
@@ -60,16 +59,18 @@ pub const ACPI = extern struct
             {
                 MADT_signature =>
                 {
-                    header.check();
-                    const madt = @intToPtr(*align(1) MADT, virtual_header_address + DescriptorTable.header_length);
-                    var length = header.length - DescriptorTable.header_length - @sizeOf(MADT);
-                    const start_length = length;
+                    const madt_header = @intToPtr(*align(1) DescriptorTable, Kernel.Memory.map_physical(&Kernel.kernel_memory_space, physical_header_address, header.length, 0) orelse unreachable);
+                    madt_header.check();
+                    const madt = @intToPtr(*align(1) MADT, @ptrToInt(madt_header) + DescriptorTable.header_length);
                     var data = @intToPtr([*]u8, @ptrToInt(madt) + @sizeOf(MADT));
 
                     acpi.LAPIC_address = @intToPtr(*volatile u32, ACPI.map_physical_memory(madt.LAPIC_address, 0x10000));
 
                     var entry_type: MADT.EntryType = undefined;
                     var entry_length: u8 = undefined;
+                    var length = header.length - DescriptorTable.header_length - @sizeOf(MADT);
+                    const start_length = length;
+
                     while (length != 0 and length <= start_length) : 
                     ({
                         length -= entry_length;
