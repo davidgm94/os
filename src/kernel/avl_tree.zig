@@ -20,16 +20,16 @@ pub fn Short(comptime T: type) type
 
             fn rotate_left(self: *Item) *Item
             {
-                // self = x
-                const y = self.children[1].?;
-                const t = self.children[0];
-                y.children[0] = self;
-                self.children[1] = t;
+                const x = self;
+                const y = x.children[1].?;
+                const t = y.children[0];
+                y.children[0] = x;
+                x.children[1] = t;
 
-                self.parent = y;
-                if (t) |t_unwrapped| t_unwrapped.parent = self;
+                x.parent = y;
+                if (t) |t_unwrapped| t_unwrapped.parent = x;
 
-                self.compute_height();
+                x.compute_height();
                 y.compute_height();
 
                 return y;
@@ -37,16 +37,16 @@ pub fn Short(comptime T: type) type
 
             fn rotate_right(self: *Item) *Item
             {
-                // self = y
-                const x = self.children[0].?;
-                x.children[1] = self;
-                const t = self.children[1];
-                self.children[0] = t;
+                const y = self;
+                const x = y.children[0].?;
+                const t = x.children[1].?;
+                x.children[1] = y;
+                y.children[0] = t;
 
-                self.parent = x;
-                if (t) |t_unwrapped| t_unwrapped.parent = self;
+                y.parent = x;
+                t.parent = y;
 
-                self.compute_height();
+                y.compute_height();
                 x.compute_height();
 
                 return x;
@@ -57,7 +57,7 @@ pub fn Short(comptime T: type) type
                 const left_height = if (self.children[0]) |child0| child0.height else 0;
                 const right_height = if (self.children[1]) |child1| child1.height else 0;
                 const balance = left_height - right_height;
-                self.height = 1 + if (balance > 0) left_height else right_height;
+                self.height = 1 + (if (balance > 0) left_height else right_height);
             }
 
             fn validate_item(self: *Item, before: bool, tree: *Self, parent: ?*Item, maybe_depth: ?i32) i32
@@ -126,11 +126,9 @@ pub fn Short(comptime T: type) type
 
             while (true)
             {
-                const maybe_node = link.*;
-
-                if (maybe_node) |node|
+                if (link.*) |link_node|
                 {
-                    const compare_result = compare(item.key, node.key);
+                    const compare_result = compare(item.key, link_node.key);
                     if (compare_result == 0)
                     {
                         if (duplicate_key_policy == .panic)
@@ -143,8 +141,9 @@ pub fn Short(comptime T: type) type
                         }
                     }
 
-                    link = @intToPtr(*?*Item, @ptrToInt(&node.children) + @as(u64, @boolToInt(compare_result > 0)) * @sizeOf(u64));
-                    parent = node;
+                    const link_index = @boolToInt(compare_result > 0);
+                    link = &link_node.children[link_index];
+                    parent = link_node;
                 }
                 else
                 {
@@ -160,7 +159,7 @@ pub fn Short(comptime T: type) type
 
             var item_iterator: *Item = item.parent.?;
 
-            while (@ptrToInt(item_iterator) != @ptrToInt(&fake_root))
+            while (item_iterator != &fake_root)
             {
                 const left_height = if (item_iterator.children[0]) |child0| child0.height else 0;
                 const right_height = if (item_iterator.children[1]) |child1| child1.height else 0;
@@ -168,18 +167,19 @@ pub fn Short(comptime T: type) type
 
                 item_iterator.height = (if (balance > 0) left_height else right_height) + 1;
                 var new_root: ?*Item = null;
-                var old_parent: ?*Item = item_iterator.parent;
+                var old_parent: *Item = item_iterator.parent.?;
 
                 if (balance > 1)
                 {
-                    const left_compare = compare(key, item_iterator.children[0].?.key);
+                    const left_key = item_iterator.children[0].?.key;
+                    const left_compare = compare(key, left_key);
 
                     if (left_compare <= 0)
                     {
                         const right_rotation = item_iterator.rotate_right();
                         new_root = right_rotation;
-                        const old_parent_child_index = @boolToInt(old_parent.?.children[1] == item_iterator);
-                        old_parent.?.children[old_parent_child_index] = right_rotation;
+                        const old_parent_child_index = @boolToInt(old_parent.children[1] == item_iterator);
+                        old_parent.children[old_parent_child_index] = right_rotation;
                     }
                     else if (item_iterator.children[0].?.children[1] != null)
                     {
@@ -187,19 +187,21 @@ pub fn Short(comptime T: type) type
                         item_iterator.children[0].?.parent = item_iterator;
                         const right_rotation = item_iterator.rotate_right();
                         new_root = right_rotation;
-                        const old_parent_child_index = @boolToInt(old_parent.?.children[1] == item_iterator);
-                        old_parent.?.children[old_parent_child_index] = right_rotation;
+                        const old_parent_child_index = @boolToInt(old_parent.children[1] == item_iterator);
+                        old_parent.children[old_parent_child_index] = right_rotation;
                     }
                 }
                 else if (balance < -1)
                 {
-                    const right_compare = compare(key, item_iterator.children[1].?.key);
+                    const right_key = item_iterator.children[1].?.key;
+                    const right_compare = compare(key, right_key);
+
                     if (right_compare > 0)
                     {
                         const left_rotation = item_iterator.rotate_left();
                         new_root = left_rotation;
-                        const old_parent_child_index = @boolToInt(old_parent.?.children[1] == item_iterator);
-                        old_parent.?.children[old_parent_child_index] = left_rotation;
+                        const old_parent_child_index = @boolToInt(old_parent.children[1] == item_iterator);
+                        old_parent.children[old_parent_child_index] = left_rotation;
                     }
                     else if (item_iterator.children[1].?.children[0] != null)
                     {
@@ -207,13 +209,13 @@ pub fn Short(comptime T: type) type
                         item_iterator.children[1].?.parent = item_iterator;
                         const left_rotation = item_iterator.rotate_left();
                         new_root = left_rotation;
-                        const old_parent_child_index = @boolToInt(old_parent.?.children[1] == item_iterator);
-                        old_parent.?.children[old_parent_child_index] = left_rotation;
+                        const old_parent_child_index = @boolToInt(old_parent.children[1] == item_iterator);
+                        old_parent.children[old_parent_child_index] = left_rotation;
                     }
                 }
 
                 if (new_root) |new_root_unwrapped| new_root_unwrapped.parent = old_parent;
-                item_iterator = old_parent.?;
+                item_iterator = old_parent;
             }
 
             self.root = fake_root.children[0];
