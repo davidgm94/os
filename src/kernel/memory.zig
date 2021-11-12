@@ -534,7 +534,7 @@ pub const Physical = struct
                     self.activate_pages(page, 1, flags);
 
                     var address = page << Kernel.Arch.Page.bit_count;
-                    if (not_zeroed and (flags & (1 << @enumToInt(Physical.Flags.zeroed)) != 0)) pm_zero(@intToPtr([*]u64, address), 1, false);
+                    if (not_zeroed and (flags & (1 << @enumToInt(Physical.Flags.zeroed)) != 0)) pm_zero(@ptrCast([*]u64, &address), 1, false);
                     return address;
                 }
 
@@ -1597,12 +1597,12 @@ fn pm_zero(asked_pages: [*]u64, asked_page_count: u64, contiguous: bool) void
         }
 
         // @Spinlock
-        //
 
         it = 0;
         while (it < do_count) : (it += 1)
         {
-            Kernel.Arch.invalidate_page(region + it * Kernel.Arch.Page.size);
+            const page = region + it * Kernel.Arch.Page.size;
+            Kernel.Arch.invalidate_page(page);
         }
 
         std.mem.set(u8, @intToPtr([*]u8, region)[0..do_count * Kernel.Arch.Page.size], 0);

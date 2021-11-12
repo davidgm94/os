@@ -335,14 +335,21 @@ pub const Page = struct
                     }
                     else
                     {
-                        // @TODO: clean this up
                         var space = space_blk:
                         {
-                            const maybe_current_thread = (thread_get_current());
-                            const thread_address = @ptrCast(*const u64, &maybe_current_thread).*;
-                            const current_thread = @intToPtr(*Kernel.Scheduler.Thread, thread_address);
-
-                            break :space_blk if (current_thread.temporary_address_space) |temporary_space| @ptrCast(*Kernel.Memory.Space, temporary_space) else current_thread.process.virtual_memory_space;
+                            if (thread_get_current()) |current_thread|
+                            {
+                                break :space_blk
+                                    if (current_thread.temporary_address_space) |temporary_space|
+                                        @ptrCast(*Kernel.Memory.Space, temporary_space)
+                                    else 
+                                        current_thread.process.virtual_memory_space;
+                            }
+                            else
+                            {
+                                // @TODO: this is a hack; clean it up
+                                break :space_blk &Kernel.kernel_memory_space;
+                            }
                         };
 
                         Kernel.Memory.PageFault.handle(space, address, flags) catch
