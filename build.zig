@@ -60,6 +60,8 @@ fn nasm_compile_elf_object(builder: *Builder, executable: *std.build.LibExeObjSt
 fn build_kernel(b: *Builder) *std.build.LibExeObjStep
 {
     const kernel = b.addExecutable(kernel_output_file, kernel_source_file);
+    const c_flags = &[_][:0]const u8{ "-g", };
+    kernel.addCSourceFile("src/kernel/extern.c", c_flags);
     kernel.red_zone = false;
     kernel.code_model = .kernel;
     kernel.disable_stack_probing = true;

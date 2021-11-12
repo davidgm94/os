@@ -1,3 +1,4 @@
+const Kernel = @This();
 pub const Arch = @import("arch.zig");
 pub const Drivers = @import("../drivers.zig");
 pub const Logger = @import("logger.zig");
@@ -16,10 +17,12 @@ pub var core_memory_space: Memory.Space = undefined;
 pub var physical_memory_allocator: Memory.Physical.Allocator = undefined;
 
 pub var core_heap: Memory.Heap = undefined;
+pub var fixed_heap: Memory.Heap = undefined;
 
-pub const LocalStorage = extern struct
+pub const CPULocalStorage = extern struct
 {
-    foo: u32,
+    cpu: *Kernel.Arch.CPU,
+    processor_ID: u32, // Scheduler ID
 };
 
 pub fn init() void

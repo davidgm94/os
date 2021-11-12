@@ -619,6 +619,25 @@ invalidate_all_pages:
     mov cr4, rax
     ret
 
+[global read_timestamp]
+read_timestamp:
+    rdtsc
+    ret
+
+[global in8]
+in8:
+    mov rdx, rdi
+    xor rax, rax
+    in al, dx
+    ret
+
+[global out8]
+out8:
+    mov rdx, rdi
+    mov rax, rdi
+    out dx, al
+    ret
+
 [global physical_memory_regions_get]
 physical_memory_regions_get:
     mov rax, physical_memory_regions

@@ -639,7 +639,7 @@ pub const Physical = struct
             {
                 if (fixed)
                 {
-                    if (page_count > self.commit_fixed_limit - self.commit_limit)
+                    if (page_count > self.commit_fixed_limit - self.commit_fixed)
                     {
                         // fail
                         return CommitError.FixedCommitError;
@@ -1133,7 +1133,8 @@ fn unreserve(memory_space: *Memory.Space, region_to_remove: *Memory.Region, unma
 
     if (region_to_remove.flags & (1 << @enumToInt(Region.Flags.normal)) != 0)
     {
-        Kernel.Arch.CPU_stop();
+        if (region_to_remove.data.normal.guard_before) |guard_before| unreserve(memory_space, guard_before, false, true);
+        if (region_to_remove.data.normal.guard_after) |guard_after| unreserve(memory_space, guard_after, false, true);
     }
     else if (region_to_remove.flags & (1 << @enumToInt(Region.Flags.guard)) != 0 and !guard_region)
     {
@@ -1152,7 +1153,44 @@ fn unreserve(memory_space: *Memory.Space, region_to_remove: *Memory.Region, unma
 
     if (memory_space == &Kernel.core_memory_space)
     {
-        Kernel.Arch.CPU_stop();
+        region_to_remove.more.core.used = false;
+
+        var remove1: u64 = std.math.maxInt(u64);
+        var remove2: u64 = std.math.maxInt(u64);
+
+        for (core_regions[0..core_region_count]) |*region, region_i|
+        {
+            // @TODO: Remove2 != 1 might be a bug
+            if (!(remove1 != std.math.maxInt(u64) or remove2 != 1)) break;
+
+            if (region.more.core.used) continue;
+            if (region == region_to_remove) continue;
+
+            if (region.base_address == region_to_remove.base_address + (region_to_remove.page_count << Kernel.Arch.Page.bit_count))
+            {
+                region_to_remove.page_count += region.page_count;
+                remove1 = region_i;
+            }
+            else if (region_to_remove.base_address == region.base_address + (region.page_count << Kernel.Arch.Page.bit_count))
+            {
+                region_to_remove.page_count += region.page_count;
+                region_to_remove.base_address = region.base_address;
+                remove2 = region_i;
+            }
+        }
+
+        if (remove1 != std.math.maxInt(u64))
+        {
+            core_region_count -= 1;
+            core_regions[remove1] = core_regions[core_region_count];
+            if (remove2 == core_region_count) remove2 = remove1;
+        }
+
+        if (remove2 != std.math.maxInt(u64))
+        {
+            core_region_count -= 1;
+            core_regions[remove2] = core_regions[core_region_count];
+        }
     }
     else
     {

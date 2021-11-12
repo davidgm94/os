@@ -1,27 +1,29 @@
 const std = @import("std");
 const Kernel = @import("../kernel/kernel.zig");
 
-var acpi: ACPI = undefined;
-
 pub const ACPI = extern struct
 {
+    pub var acpi: ACPI = undefined;
+    
     processor_count: u64,
     IO_APIC_count: u64,
     interrupt_override_count: u64,
     LAPIC_NMI_count: u64,
 
-    processors: [256]CPU,
+    processors: [256]Kernel.Arch.CPU,
     IO_APICs: [16]IOAPIC,
     interrupt_overrides: [256]InterruptOverride,
     LAPIC_NMIs: [32]LAPIC_NMI,
 
-    LAPIC_address: *volatile u32,
+    LAPIC_address: [*]volatile u32,
+    LAPIC_ticks_per_ms: u32,
 
     rsdp: *RootSystemDescriptorPointer,
 
     PS2_controller_unavailable: bool,
     VGA_controller_unavailable: bool,
     century_register_index: u8,
+
 
     pub fn parse_tables() void
     {
@@ -64,7 +66,7 @@ pub const ACPI = extern struct
                     const madt = @intToPtr(*align(1) MADT, @ptrToInt(madt_header) + DescriptorTable.header_length);
                     var data = @intToPtr([*]u8, @ptrToInt(madt) + @sizeOf(MADT));
 
-                    acpi.LAPIC_address = @intToPtr(*volatile u32, ACPI.map_physical_memory(madt.LAPIC_address, 0x10000));
+                    acpi.LAPIC_address = @intToPtr([*]volatile u32, ACPI.map_physical_memory(madt.LAPIC_address, 0x10000));
 
                     var entry_type: MADT.EntryType = undefined;
                     var entry_length: u8 = undefined;
@@ -165,12 +167,13 @@ pub const ACPI = extern struct
             Kernel.Memory.free(&Kernel.kernel_memory_space, virtual_header_address, null, null) catch unreachable;
         }
 
+        const processor_count = acpi.processor_count;
+        if (processor_count == 0) Kernel.Arch.CPU_stop();
+
         if (acpi.processor_count > 256 or acpi.IO_APIC_count > 16 or acpi.interrupt_override_count > 256 or acpi.LAPIC_NMI_count > 32)
         {
             Kernel.Arch.CPU_stop();
         }
-
-        Kernel.Arch.CPU_stop();
     }
 
     fn map_physical_memory(physical_address: u64, length: u64) u64
@@ -236,14 +239,6 @@ pub const ACPI = extern struct
         }
     };
 
-    pub const CPU = extern struct
-    {
-        processor_ID: u8,
-        kernel_processor_ID: u8,
-        APIC_ID: u8,
-        boot_processor: bool,
-        // @TODO: add more components
-    };
 
     pub const IOAPIC = extern struct
     {
