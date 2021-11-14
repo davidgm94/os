@@ -41,9 +41,8 @@ pub fn init() void
     timestamp_ticks_per_ms = (end - start) >> 3;
     enable_interrupts();
 
-    _ = current_cpu;
     // @TODO @WARNING @ERROR: this is causing previous code to crash when it shouldn't
-    var new_processor_storage = ProcessorStorage.allocate(current_cpu);
+    var new_processor_storage = ProcessorStorage.allocate(current_cpu, false);
     end_processor_setup(&new_processor_storage);
 }
 
@@ -52,11 +51,11 @@ const ProcessorStorage = struct
     local: *Kernel.CPULocalStorage,
     gdt: *u32,
 
-    fn allocate(cpu: *Kernel.Arch.CPU) ProcessorStorage
+    fn allocate(cpu: *Kernel.Arch.CPU, comptime lock: bool) ProcessorStorage
     {
-        const local_storage = @intToPtr(*Kernel.CPULocalStorage, Kernel.fixed_heap.allocate(@sizeOf(Kernel.CPULocalStorage), true) catch unreachable);
-        const gdt_physical_address = Kernel.physical_memory_allocator.allocate(1 << @enumToInt(Kernel.Memory.Physical.Flags.commit_now), null, null, null);
-        const gdt = @intToPtr(*u32, Kernel.memory_space.map_physical(gdt_physical_address, Page.size, 0) orelse unreachable);
+        const local_storage = @intToPtr(*Kernel.CPULocalStorage, Kernel.fixed_heap.allocate(@sizeOf(Kernel.CPULocalStorage), true, lock) catch unreachable);
+        const gdt_physical_address = Kernel.physical_memory_allocator.allocate(Kernel.Memory.Physical.Flags.commit_now, null, null, null);
+        const gdt = @intToPtr(*u32, Kernel.memory_space.map_physical(gdt_physical_address, Page.size, 0, lock) orelse unreachable);
         cpu.local_storage = local_storage;
         local_storage.cpu = cpu;
         var cpu_storage = ProcessorStorage
@@ -213,14 +212,8 @@ pub const Memory = struct
         Kernel.core_memory_space.virtual_address_space.l1_commit = core_L1_commit[0..];
 
         // @Spinlock
-        if (Kernel.core_memory_space.reserve(VirtualAddressSpace.l1_commit_size, 1 << @enumToInt(Kernel.Memory.Region.Flags.normal) | 1 << @enumToInt(Kernel.Memory.Region.Flags.no_commit_tracking) | 1 << @enumToInt(Kernel.Memory.Region.Flags.fixed), null, null)) |kernel_l1_commit|
-        {
-            Kernel.memory_space.virtual_address_space.l1_commit = @intToPtr([*]u8, kernel_l1_commit.base_address)[0..VirtualAddressSpace.l1_commit_size];
-        }
-        else
-        {
-            CPU_stop();
-        }
+        const kernel_l1_commit_address = (Kernel.core_memory_space.reserve(VirtualAddressSpace.l1_commit_size, Kernel.Memory.Region.Flags.normal | Kernel.Memory.Region.Flags.no_commit_tracking | Kernel.Memory.Region.Flags.fixed, null, null, false) orelse unreachable).base_address;
+        Kernel.memory_space.virtual_address_space.l1_commit = @intToPtr([*]u8, kernel_l1_commit_address)[0..VirtualAddressSpace.l1_commit_size];
         // @Spinlock
     }
 
@@ -313,7 +306,7 @@ pub const Page = struct
         pub fn handle(fault_address: u64, flags: u32) HandleError!void
         {
             const address = fault_address & ~@as(u64, Page.size - 1);
-            const for_supervisor = (flags & (1 << @enumToInt(Kernel.Memory.Space.HandlePageFaultFlags.for_supervisor))) != 0;
+            const for_supervisor = flags & Kernel.Memory.Space.HandlePageFaultFlags.for_supervisor != 0;
 
             if (!are_interrupts_enabled())
             {
@@ -326,13 +319,13 @@ pub const Page = struct
                 {
                     if (address >= Memory.low_memory_start and address < Memory.low_memory_start + Memory.low_memory_limit and for_supervisor)
                     {
-                        Page.map(&Kernel.memory_space, address - Memory.low_memory_start, address, 1 << @enumToInt(MapFlags.not_cacheable) | 1 << @enumToInt(MapFlags.commit_tables_now)) catch {};
+                        Page.map(&Kernel.memory_space, address - Memory.low_memory_start, address, MapFlags.not_cacheable | MapFlags.commit_tables_now) catch {};
                         break :blk null;
                     }
                     else if (address >= Memory.core_region_start and address < Memory.core_region_start + (Memory.core_region_count * @sizeOf(Kernel.Memory.Region)) and for_supervisor)
                     {
-                        const new_physical_address = Kernel.physical_memory_allocator.allocate(@enumToInt(Kernel.Memory.Physical.Flags.zeroed), null, null, null);
-                        Page.map(&Kernel.memory_space, new_physical_address, address, 1 << @enumToInt(MapFlags.commit_tables_now)) catch {};
+                        const new_physical_address = Kernel.physical_memory_allocator.allocate(Kernel.Memory.Physical.Flags.zeroed, null, null, null);
+                        Page.map(&Kernel.memory_space, new_physical_address, address, MapFlags.commit_tables_now) catch {};
                         break :blk null;
                     }
                     else if (address >= Memory.core_space_start and address < Memory.core_space_start + Memory.core_space_size and for_supervisor)
@@ -404,27 +397,29 @@ pub const Page = struct
         failed,
     };
 
-    pub const MapFlags = enum(u8)
+    pub const MapFlags = struct
     {
-        not_cacheable = 0,
-        user = 1,
-        overwrite = 2,
-        commit_tables_now = 3,
-        read_only = 4,
-        copied = 5,
-        no_new_tables = 6,
-        frame_lock_acquired = 7,
-        write_combining = 8,
-        ignore_if_mapped = 9,
+        pub const Type = u32;
+
+        pub const not_cacheable: Type = 1 << 0;
+        pub const user: Type = 1 << 1;
+        pub const overwrite: Type = 1 << 2;
+        pub const commit_tables_now: Type = 1 << 3;
+        pub const read_only: Type = 1 << 4;
+        pub const copied: Type = 1 << 5;
+        pub const no_new_tables: Type = 1 << 6;
+        pub const frame_lock_acquired: Type = 1 << 7;
+        pub const write_combining: Type = 1 << 8;
+        pub const ignore_if_mapped: Type = 1 << 9;
     };
 
-    fn map_page_level_manipulation(memory_space: *Kernel.Memory.Space, comptime level: Page.Table.Level, indices: [4]u64, flags: u32) void
+    fn map_page_level_manipulation(memory_space: *Kernel.Memory.Space, comptime level: Page.Table.Level, indices: [4]u64, flags: MapFlags.Type) void
     {
         if (Page.Table.access(level, indices).* & 1 == 0)
         {
-            if (flags & (1 << @enumToInt(MapFlags.no_new_tables)) != 0) CPU_stop();
+            if (flags & MapFlags.no_new_tables != 0) CPU_stop();
 
-            Page.Table.access(level, indices).* = Kernel.physical_memory_allocator.allocate(1 << @enumToInt(Kernel.Memory.Physical.Flags.lock_acquired), null, null, null) | 0b111;
+            Page.Table.access(level, indices).* = Kernel.physical_memory_allocator.allocate(Kernel.Memory.Physical.Flags.lock_acquired, null, null, null) | 0b111;
             const a_lower_level = comptime @intToEnum(Page.Table.Level, @enumToInt(level) - 1);
             const page_to_invalidate_address = @ptrToInt(Page.Table.access(a_lower_level, indices));
             invalidate_page(page_to_invalidate_address); // not strictly necessary
@@ -432,7 +427,6 @@ pub const Page = struct
             memory_space.virtual_address_space.active_page_table_count += 1;
         }
     }
-
 
     pub fn map(memory_space: *Kernel.Memory.Space, asked_physical_address: u64, asked_virtual_address: u64, flags: u32) MapError!void
     {
@@ -473,56 +467,20 @@ pub const Page = struct
         map_page_level_manipulation(memory_space, .level_3, indices, flags);
         map_page_level_manipulation(memory_space, .level_2, indices, flags);
 
-        //const L4_address: u64 = 0xFFFFFF7FBFDFE000 + index_l4 * 8;
-        //if (Page.Table.access(.level_4, index_l4)* & 1 == 0)
-        //{
-            //if (flags & (1 << @enumToInt(MapFlags.no_new_tables)) != 0) CPU_stop();
-            //Page.Table.access(.level_4, index_l4).* = Kernel.physical_memory_allocator.allocate(@enumToInt(Kernel.Memory.Physical.Flags.lock_acquired), null, null, null) | 0b111;
-            //const page_to_invalidate_address = @ptrToInt(&Page.Table.L3[index_l3]);
-            //invalidate_page(page_to_invalidate_address); // not strictly necessary
-            //std.mem.set(u8, @intToPtr([*]u8, page_to_invalidate_address & ~@as(u64, Page.size - 1))[0..Page.size], 0); 
-            //memory_space.virtual_address_space.active_page_table_count += 1;
-        //}
-
-        //if (Page.Table.L3[index_l3] & 1 == 0)
-        //{
-            //if (flags & (1 << @enumToInt(MapFlags.no_new_tables)) != 0) CPU_stop();
-            //Page.Table.L3[index_l3] = Kernel.physical_memory_allocator.allocate(@enumToInt(Kernel.Memory.Physical.Flags.lock_acquired), null, null, null) | 0b111;
-            //const page_to_invalidate_address = @ptrToInt(&Page.Table.L2[index_l2]);
-            //invalidate_page(page_to_invalidate_address); // not strictly necessary
-            //std.mem.set(u8, @intToPtr([*]u8, page_to_invalidate_address & ~@as(u64, Page.size - 1))[0..Page.size], 0); 
-            //memory_space.virtual_address_space.active_page_table_count += 1;
-        //}
-
-        //if (Page.Table.L2[index_l2] & 1 == 0)
-        //{
-            //if (flags & (1 << @enumToInt(MapFlags.no_new_tables)) != 0) CPU_stop();
-            //Page.Table.L2[index_l2] = Kernel.physical_memory_allocator.allocate(@enumToInt(Kernel.Memory.Physical.Flags.lock_acquired), null, null, null) | 0b111;
-            //const page_to_invalidate_address = @ptrToInt(&Page.Table.L1[index_l1]);
-            //invalidate_page(page_to_invalidate_address); // not strictly necessary
-            //std.mem.set(u8, @intToPtr([*]u8, page_to_invalidate_address & ~@as(u64, Page.size - 1))[0..Page.size], 0); 
-            //memory_space.virtual_address_space.active_page_table_count += 1;
-        //}
-
         const old_value = Page.Table.access(.level_1, indices).*;
         var value = physical_address | 0b11;
 
-        if (flags & (1 << @enumToInt(MapFlags.write_combining)) != 0) value |= 16;
-        if (flags & (1 << @enumToInt(MapFlags.not_cacheable)) != 0) value |= 24;
-        if (flags & (1 << @enumToInt(MapFlags.user)) != 0)
-        {
-            value |= 7;
-        }
-        else
-        {
-            value |= 1 << 8; //global
-        }
-        if (flags & (1 << @enumToInt(MapFlags.read_only)) != 0) value &= ~@as(u64, 2);
-        if (flags & (1 << @enumToInt(MapFlags.copied)) != 0) value |= 1 << 9;
+        if (flags & MapFlags.write_combining != 0) value |= 16;
+        if (flags & MapFlags.not_cacheable != 0) value |= 24;
+        if (flags & MapFlags.user != 0) value |= 7
+        else value |= 1 << 8; //global
+
+        if (flags & MapFlags.read_only != 0) value &= ~@as(u64, 2);
+        if (flags & MapFlags.copied != 0) value |= 1 << 9;
 
         value |= (1 << 5) | (1 << 6);
 
-        if (old_value & 1 != 0 and flags & (1 << @enumToInt(MapFlags.overwrite)) == 0)
+        if (old_value & 1 != 0 and flags & MapFlags.overwrite == 0)
         {
             CPU_stop();
         }
@@ -532,14 +490,16 @@ pub const Page = struct
         invalidate_page(asked_virtual_address);
     }
 
-    pub const UnmapFlags = enum(u8)
+    pub const UnmapFlags = struct
     {
-        free,
-        free_copied,
-        balance_file,
+        pub const Type = u32;
+
+        pub const free: u32 = 1 << 0;
+        pub const free_copied: u32 = 1 << 1;
+        pub const balance_file: u32 = 1 << 2;
     };
 
-    pub fn unmap(memory_space: *Kernel.Memory.Space, virtual_address_start: u64, page_count: u64, flags: u32, maybe_unmap_maximum: ?u64, resume_position: ?*u64) void
+    pub fn unmap(memory_space: *Kernel.Memory.Space, virtual_address_start: u64, page_count: u64, flags: UnmapFlags.Type, maybe_unmap_maximum: ?u64, resume_position: ?*u64) void
     {
         const unmap_maximum = maybe_unmap_maximum orelse 0;
         _ = memory_space;
@@ -583,12 +543,12 @@ pub const Page = struct
 
             const copy = translation & (1 << 9) != 0;
 
-            if (copy and (flags & (1 << @enumToInt(UnmapFlags.balance_file)) != 0) and (~flags & (1 << @enumToInt(UnmapFlags.free_copied)) != 0))
+            if (copy and flags & UnmapFlags.balance_file != 0 and ~flags & UnmapFlags.free_copied != 0)
             {
                 continue;
             }
 
-            if ((~translation & (1 << 5) != 0) or (~translation & (1 << 6) != 0))
+            if (~translation & (1 << 5) != 0 or ~translation & (1 << 6) != 0)
             {
                 Kernel.Arch.CPU_stop();
             }
@@ -597,11 +557,11 @@ pub const Page = struct
 
             const physical_address = translation & 0x0000FFFFFFFFF000;
 
-            if ((flags & (1 << @enumToInt(UnmapFlags.free)) != 0) or (flags & (1 << @enumToInt(UnmapFlags.free_copied)) != 0 and copy))
+            if (flags & UnmapFlags.free != 0 or (flags & UnmapFlags.free_copied != 0 and copy))
             {
                 Kernel.physical_memory_allocator.free(physical_address, true, null);
             }
-            else if (flags & (1 << @enumToInt(UnmapFlags.balance_file)) != 0)
+            else if (flags & UnmapFlags.balance_file != 0)
             {
                 // It's safe to do this before page invalidation,
                 // because the page fault handler is synchronised with the same mutexes acquired above.
@@ -1031,12 +991,10 @@ pub export fn interrupt_handler(context: *InterruptContext) callconv(.C) void
                     // @SpinLock condition kernel panic
                     const write_flag: u32 = 
                         if (context.error_code & @enumToInt(Page.Fault.ErrorCodeBit.write) != 0)
-                            1 << @as(u32, @enumToInt(Kernel.Memory.Space.HandlePageFaultFlags.write))
+                            Kernel.Memory.Space.HandlePageFaultFlags.write
                         else 0;
 
-                    const handle_flags: u32 =
-                        1 << @enumToInt(Kernel.Memory.Space.HandlePageFaultFlags.for_supervisor) |
-                        write_flag;
+                    const handle_flags: u32 = Kernel.Memory.Space.HandlePageFaultFlags.for_supervisor | write_flag;
 
                     Page.Fault.handle(context.cr2, handle_flags) catch
                     {

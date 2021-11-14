@@ -18,7 +18,7 @@ pub fn init() void
         core_region_count = 1;
         Kernel.Arch.Memory.init();
 
-        const region = @intToPtr(*Region, Kernel.core_heap.allocate(@sizeOf(Region), true) catch unreachable);
+        const region = @intToPtr(*Region, Kernel.core_heap.allocate(@sizeOf(Region), true, false) catch unreachable);
         region.base_address = Kernel.Arch.Memory.kernel_space_start;
         region.page_count = Kernel.Arch.Memory.kernel_space_size / Kernel.Arch.Page.size;
 
@@ -29,7 +29,7 @@ pub fn init() void
     // initialize physical memory management
     {
         // @Spinlock
-        const manipulation_region = Kernel.memory_space.reserve(Physical.manipulation_region_page_count * Kernel.Arch.Page.size, 0, null, null) orelse
+        const manipulation_region = Kernel.memory_space.reserve(Physical.manipulation_region_page_count * Kernel.Arch.Page.size, 0, null, null, false) orelse
         {
             Kernel.Arch.CPU_stop();
         };
@@ -38,9 +38,9 @@ pub fn init() void
         // @Spinlock
         
         const page_frame_db_count = (Kernel.Arch.physical_memory_highest_get() + (Kernel.Arch.Page.size << 3)) >> Kernel.Arch.Page.bit_count;
-        const page_frames = Kernel.memory_space.standard_allocate(page_frame_db_count * @sizeOf(PageFrame), 1 << @enumToInt(Region.Flags.fixed), null, null) catch unreachable;
+        const page_frames = Kernel.memory_space.standard_allocate(page_frame_db_count * @sizeOf(PageFrame), Region.Flags.fixed, null, null, false) catch unreachable;
         Kernel.physical_memory_allocator.page_frames = @intToPtr([*]volatile PageFrame, @ptrToInt(page_frames.ptr))[0..page_frame_db_count];
-        Kernel.physical_memory_allocator.free_or_zeroed_page_bitset.initialize(page_frame_db_count, true);
+        Kernel.physical_memory_allocator.free_or_zeroed_page_bitset.initialize(page_frame_db_count, true, false);
 
         Kernel.physical_memory_allocator.insert_free_pages_start();
         const commit_limit = Kernel.physical_memory_allocator.populate_pageframe_database();
@@ -72,13 +72,13 @@ pub const Space = struct
     reserve_page_count: u64,
     user: bool,
 
-    pub fn map_physical(self: *Space, asked_offset: u64, asked_byte_count: u64, caching: u32) ?u64
+    pub fn map_physical(self: *Space, asked_offset: u64, asked_byte_count: u64, caching: Region.Flags.Type, comptime lock: bool) ?u64
     {
         const offset2 = asked_offset & (Kernel.Arch.Page.size - 1);
         const offset = asked_offset - offset2;
         const byte_count = asked_byte_count + @as(u64, @boolToInt(offset2 != 0)) * Kernel.Arch.Page.size;
         //@Spinlock
-        const region = self.reserve(byte_count, 1 << @enumToInt(Region.Flags.physical) | 1 << @enumToInt(Region.Flags.fixed) | caching, null, null) orelse return null;
+        const region = self.reserve(byte_count, Region.Flags.physical | Region.Flags.fixed | caching, null, null, lock) orelse return null;
 
         region.data.physical.offset = offset;
 
@@ -91,11 +91,13 @@ pub const Space = struct
         return region.base_address + offset2;
     }
 
-    pub const HandlePageFaultFlags = enum(u8)
+    pub const HandlePageFaultFlags = struct
     {
-        write = 0,
-        lock_acquired = 1,
-        for_supervisor = 2,
+        pub const Type = u32;
+
+        pub const write = 1 << 0;
+        pub const lock_acquired = 1 << 1;
+        pub const for_supervisor = 1 << 2;
     };
 
     pub const HandlePageFaultError = error
@@ -105,12 +107,12 @@ pub const Space = struct
         outside_commit_range,
     };
 
-    pub fn handle_page_fault(self: *Space, fault_address: u64, fault_flags: u32) HandlePageFaultError!void
+    pub fn handle_page_fault(self: *Space, fault_address: u64, fault_flags: HandlePageFaultFlags.Type) HandlePageFaultError!void
     {
         const address = fault_address & ~@intCast(u64, Kernel.Arch.Page.size - 1);
 
         // @TODO: @Spinlock
-        const lock_acquired = fault_flags & @enumToInt(HandlePageFaultFlags.lock_acquired) != 0;
+        const lock_acquired = fault_flags & HandlePageFaultFlags.lock_acquired != 0;
         if (!lock_acquired)
         {
             if (Kernel.physical_memory_allocator.get_available_page_count() < critical_available_page_count_threshold)
@@ -149,14 +151,14 @@ pub const Space = struct
 
         // @Spinlock
         //
-        const write_access = fault_flags & @enumToInt(HandlePageFaultFlags.write) != 0;
+        const write_access = fault_flags & HandlePageFaultFlags.write != 0;
         if (Kernel.Arch.translate_address(address, write_access) != 0)
         {
             return;
         }
 
-        const copy_on_write = write_access and (region.flags & (1 << @enumToInt(Memory.Region.Flags.copy_on_write)) != 0);
-        if (write_access and !copy_on_write and (region.flags & (1 << @enumToInt(Memory.Region.Flags.read_only)) != 0))
+        const copy_on_write = write_access and (region.flags & Memory.Region.Flags.copy_on_write != 0);
+        if (write_access and !copy_on_write and (region.flags & Memory.Region.Flags.read_only != 0))
         {
             return HandlePageFaultError.read_only_page_fault;
         }
@@ -166,29 +168,29 @@ pub const Space = struct
 
         const region_offset = address - region.base_address;
         var zero_page = !self.user;
-        const need_zero_pages = @as(u32, @boolToInt(zero_page)) << @enumToInt(Physical.Flags.zeroed);
+        const need_zero_pages = @boolToInt(zero_page) * @as(Physical.Flags.Type, Physical.Flags.zeroed);
 
         const flags = 
-            @as(u32, @boolToInt(self.user)) << @as(u8, @enumToInt(Kernel.Arch.Page.MapFlags.user)) |
-            @as(u32, @boolToInt(region.flags & (1 << @enumToInt(Memory.Region.Flags.not_cacheable)) != 0)) << @enumToInt(Kernel.Arch.Page.MapFlags.not_cacheable) |
-            @as(u32, @boolToInt((region.flags & (1 << @enumToInt(Memory.Region.Flags.write_combining))) != 0)) << @enumToInt(Kernel.Arch.Page.MapFlags.write_combining) |
-            @as(u32, @boolToInt(!mark_modified and region.flags & (1 << @enumToInt(Memory.Region.Flags.fixed)) == 0 and region.flags & (1 << @enumToInt(Memory.Region.Flags.file)) != 0)) << @enumToInt(Kernel.Arch.Page.MapFlags.read_only);
+            @boolToInt(self.user) * Kernel.Arch.Page.MapFlags.user |
+            @boolToInt(region.flags & Memory.Region.Flags.not_cacheable != 0) * Kernel.Arch.Page.MapFlags.not_cacheable |
+            @boolToInt(region.flags & Memory.Region.Flags.write_combining != 0) * Kernel.Arch.Page.MapFlags.write_combining |
+            @boolToInt(!mark_modified and region.flags & Memory.Region.Flags.fixed == 0 and region.flags & Memory.Region.Flags.file != 0) * Kernel.Arch.Page.MapFlags.read_only;
 
-        if (region.flags & (1 << @enumToInt(Memory.Region.Flags.physical)) != 0)
+        if (region.flags & Memory.Region.Flags.physical != 0)
         {
             Kernel.Arch.Page.map(self, region.data.physical.offset + address - region.base_address, address, flags) catch unreachable;
         }
-        else if (region.flags & (1 << @enumToInt(Memory.Region.Flags.shared)) != 0)
+        else if (region.flags & Memory.Region.Flags.shared != 0)
         {
             Kernel.Arch.CPU_stop();
         }
-        else if (region.flags & (1 << @enumToInt(Memory.Region.Flags.file)) != 0)
+        else if (region.flags & Memory.Region.Flags.file != 0)
         {
             Kernel.Arch.CPU_stop();
         }
-        else if (region.flags & (1 << @enumToInt(Memory.Region.Flags.normal)) != 0)
+        else if (region.flags & Memory.Region.Flags.normal != 0)
         {
-            if (region.flags & (1 << @enumToInt(Memory.Region.Flags.no_commit_tracking)) == 0)
+            if (region.flags & Memory.Region.Flags.no_commit_tracking == 0)
             {
                 // @TODO: further check
                  if (!region.data.normal.commit.contains(region_offset >> Kernel.Arch.Page.bit_count))
@@ -203,7 +205,7 @@ pub const Space = struct
                 std.mem.set(u8, @intToPtr([*]u8, address)[0..Kernel.Arch.Page.size], 0);
             }
         }
-        else if (region.flags & (1 << @enumToInt(Memory.Region.Flags.guard)) != 0)
+        else if (region.flags & Memory.Region.Flags.guard != 0)
         {
             Kernel.Arch.CPU_stop();
         }
@@ -245,7 +247,7 @@ pub const Space = struct
         return null;
     }
 
-    pub fn reserve(self: *Space, byte_count: u64, flags: u32, maybe_forced_address: ?u64, maybe_generate_guard_pages: ?bool) ?*Region
+    pub fn reserve(self: *Space, byte_count: u64, flags: u32, maybe_forced_address: ?u64, maybe_generate_guard_pages: ?bool, comptime lock: bool) ?*Region
     {
         const forced_address = maybe_forced_address orelse 0;
         const generate_guard_pages = maybe_generate_guard_pages orelse false;
@@ -254,7 +256,7 @@ pub const Space = struct
         const needed_page_count = ((byte_count + Kernel.Arch.Page.size - 1) & ~@as(u64, Kernel.Arch.Page.size - 1)) / Kernel.Arch.Page.size;
         if (needed_page_count == 0) return null;
 
-        // @Spinlock
+        if (lock) self.reserve_mutex.assert_locked();
 
         const output_region = blk:
         {
@@ -328,7 +330,7 @@ pub const Space = struct
 
                     if (region.page_count > total_needed_page_count)
                     {
-                        const split = @intToPtr(*Region, Kernel.core_heap.allocate(@sizeOf(Region), true) catch unreachable);
+                        const split = @intToPtr(*Region, Kernel.core_heap.allocate(@sizeOf(Region), true, false) catch unreachable);
                         split.* = region.*;
                         split.base_address += total_needed_page_count * Kernel.Arch.Page.size;
                         split.page_count -= total_needed_page_count;
@@ -388,12 +390,12 @@ pub const Space = struct
             }
         }
 
-        if (region_to_remove.flags & (1 << @enumToInt(Region.Flags.normal)) != 0)
+        if (region_to_remove.flags & Region.Flags.normal != 0)
         {
             if (region_to_remove.data.normal.guard_before) |guard_before| self.unreserve(guard_before, false, true);
             if (region_to_remove.data.normal.guard_after) |guard_after| self.unreserve(guard_after, false, true);
         }
-        else if (region_to_remove.flags & (1 << @enumToInt(Region.Flags.guard)) != 0 and !guard_region)
+        else if (region_to_remove.flags & Region.Flags.guard != 0 and !guard_region)
         {
             Kernel.Arch.CPU_stop();
         }
@@ -490,13 +492,13 @@ pub const Space = struct
         commit_range,
     };
 
-    pub fn standard_allocate(self: *Self, byte_count: u64, flags: u32, maybe_base_address: ?u64, maybe_commit_all: ?bool) ![]u8
+    pub fn standard_allocate(self: *Self, byte_count: u64, flags: Region.Flags.Type, maybe_base_address: ?u64, maybe_commit_all: ?bool, comptime lock: bool) ![]u8
     {
         const base_address = maybe_base_address orelse 0;
         const commit_all = maybe_commit_all orelse true;
         //@Spinlock
 
-        var region = self.reserve(byte_count, flags | 1 << @enumToInt(Region.Flags.normal), base_address, true) orelse return StandardAllocateError.reserve_failed;
+        var region = self.reserve(byte_count, flags | Region.Flags.normal, base_address, true, lock) orelse return StandardAllocateError.reserve_failed;
 
         if (commit_all)
         {
@@ -518,7 +520,7 @@ pub const Space = struct
 
         const region = self.find_region(address) orelse return FreeError.region_not_found;
 
-        if (user_only and (~region.flags & (1 << @enumToInt(Region.Flags.user)) != 0))
+        if (user_only and (~region.flags & Region.Flags.user != 0))
         {
             return FreeError.attempt_to_free_non_user_region;
         }
@@ -527,7 +529,7 @@ pub const Space = struct
 
         var unmap_pages = true;
 
-        if (region.base_address != address and (~region.flags & (1 << @enumToInt(Region.Flags.physical)) != 0))
+        if (region.base_address != address and (~region.flags & Region.Flags.physical != 0))
         {
             return FreeError.incorrect_base_address;
         }
@@ -537,23 +539,23 @@ pub const Space = struct
             return FreeError.incorrect_free_size;
         }
 
-        if (region.flags & (1 << @enumToInt(Region.Flags.normal)) != 0)
+        if (region.flags & Region.Flags.normal != 0)
         {
             Kernel.Arch.CPU_stop();
         }
-        else if (region.flags & (1 << @enumToInt(Region.Flags.normal)) != 0)
+        else if (region.flags & Region.Flags.normal != 0)
         {
             Kernel.Arch.CPU_stop();
         }
-        else if (region.flags & (1 << @enumToInt(Region.Flags.file)) != 0)
+        else if (region.flags & Region.Flags.file != 0)
         {
             Kernel.Arch.CPU_stop();
         }
-        else if (region.flags & (1 << @enumToInt(Region.Flags.guard)) != 0)
+        else if (region.flags & Region.Flags.guard != 0)
         {
             Kernel.Arch.CPU_stop();
         }
-        else if (region.flags & (1 << @enumToInt(Region.Flags.physical)) != 0)
+        else if (region.flags & Region.Flags.physical != 0)
         { 
             // do nothing
         }
@@ -638,7 +640,7 @@ pub const Heap = struct
         region_allocation_failed
     };
 
-    pub fn allocate(self: *Self, asked_size: u64, zero_memory: bool) AllocateError!u64
+    pub fn allocate(self: *Self, asked_size: u64, zero_memory: bool, comptime lock: bool) AllocateError!u64
     {
         if (asked_size == 0) return AllocateError.size_is_zero;
 
@@ -669,7 +671,7 @@ pub const Heap = struct
                 break :blk heap_region;
             }
 
-            const allocation_result = Kernel.core_memory_space.standard_allocate(0x10000, 1 << @enumToInt(Region.Flags.fixed), null, null) catch
+            const allocation_result = Kernel.core_memory_space.standard_allocate(0x10000, Region.Flags.fixed, null, null, lock) catch
             {
                 // @Spinlock
                 return AllocateError.region_allocation_failed;
@@ -909,7 +911,7 @@ fn pm_zero(asked_pages: [*]u64, asked_page_count: u64, contiguous: bool) void
         var it: u64 = 0;
         while (it < do_count) : (it += 1)
         {
-            Kernel.Arch.Page.map(address_space, if (contiguous) pages[0] + (it << Kernel.Arch.Page.bit_count) else pages[it], region + Kernel.Arch.Page.size * it, 1 << @enumToInt(Kernel.Arch.Page.MapFlags.overwrite) | 1 << @enumToInt(Kernel.Arch.Page.MapFlags.no_new_tables)) catch unreachable;
+            Kernel.Arch.Page.map(address_space, if (contiguous) pages[0] + (it << Kernel.Arch.Page.bit_count) else pages[it], region + Kernel.Arch.Page.size * it, Kernel.Arch.Page.MapFlags.overwrite | Kernel.Arch.Page.MapFlags.no_new_tables) catch unreachable;
         }
 
         // @Spinlock
@@ -957,12 +959,12 @@ const Bitset = struct
     single_count: u64,
     group_count: u64,
 
-    fn initialize(self: *Self, count: u64, map_all: bool) void
+    fn initialize(self: *Self, count: u64, map_all: bool, comptime lock: bool) void
     {
         self.single_count = (count + 31) & ~@as(@TypeOf(count), 31);
         self.group_count = self.single_count / bitset_group_size + 1;
 
-        const allocation_result = Kernel.memory_space.standard_allocate((self.single_count >> 3) + (self.group_count * 2), if (map_all) 1 << @enumToInt(Region.Flags.fixed) else 0, null, null) catch unreachable;
+        const allocation_result = Kernel.memory_space.standard_allocate((self.single_count >> 3) + (self.group_count * 2), if (map_all) Region.Flags.fixed else 0, null, null, lock) catch unreachable;
         self.single_usage = @intToPtr([*]u32, @ptrToInt(allocation_result.ptr));
         self.group_usage = @intToPtr([*]u16, @ptrToInt(self.single_usage) + (@sizeOf(u16) * (self.single_count >> 4)));
     }
@@ -1152,17 +1154,14 @@ pub const Physical = struct
 {
     pub const manipulation_region_page_count = 0x10;
 
-    pub const Flags = enum(u8)
+    pub const Flags = struct
     {
-        can_fail = 0,
-        commit_now = 1,
-        zeroed = 2,
-        lock_acquired = 3,
+        pub const Type = u32;
 
-        fn included(flags: u32, comptime desired_flag: Flags) callconv(.Inline) bool
-        {
-            return (flags & (1 << @enumToInt(desired_flag))) != 0;
-        }
+        pub const can_fail = 1 << 0;
+        pub const commit_now = 1 << 1;
+        pub const zeroed = 1 << 2;
+        pub const lock_acquired = 1 << 3;
     };
 
     pub const Allocator = struct
@@ -1202,7 +1201,7 @@ pub const Physical = struct
             PageableCommitError,
         };
 
-        pub fn allocate(self: *Allocator, flags: u32, maybe_count: ?u64, maybe_alignment: ?u64, maybe_below: ?u64) u64
+        pub fn allocate(self: *Allocator, flags: Flags.Type, maybe_count: ?u64, maybe_alignment: ?u64, maybe_below: ?u64) u64
         {
             const count = maybe_count orelse 1;
             const alignment = maybe_alignment orelse 1;
@@ -1210,7 +1209,7 @@ pub const Physical = struct
 
             var commit_now = count * Kernel.Arch.Page.size;
 
-            if (Flags.included(flags, .commit_now))
+            if (flags & Flags.commit_now != 0)
             {
                 self.commit_lockfree(commit_now, true) catch
                 {
@@ -1233,10 +1232,10 @@ pub const Physical = struct
 
                 const page = Kernel.Arch.early_allocate_page();
 
-                if (flags & (1 << @enumToInt(Flags.zeroed)) != 0)
+                if (flags & Flags.zeroed != 0)
                 {
                     // @TODO: hack
-                    Kernel.Arch.Page.map(&Kernel.core_memory_space, page, @ptrToInt(&early_zero_buffer), 1 << @enumToInt(Kernel.Arch.Page.MapFlags.overwrite) | 1 << @enumToInt(Kernel.Arch.Page.MapFlags.no_new_tables) | 1 << @enumToInt(Kernel.Arch.Page.MapFlags.frame_lock_acquired)) catch
+                    Kernel.Arch.Page.map(&Kernel.core_memory_space, page, @ptrToInt(&early_zero_buffer), Kernel.Arch.Page.MapFlags.overwrite | Kernel.Arch.Page.MapFlags.no_new_tables | Kernel.Arch.Page.MapFlags.frame_lock_acquired) catch
                     {
                         // ignore the error for now
                     };
@@ -1284,7 +1283,7 @@ pub const Physical = struct
                     self.activate_pages(page, 1, flags);
 
                     var address = page << Kernel.Arch.Page.bit_count;
-                    if (not_zeroed and (flags & (1 << @enumToInt(Physical.Flags.zeroed)) != 0)) pm_zero(@ptrCast([*]u64, &address), 1, false);
+                    if (not_zeroed and (flags & Physical.Flags.zeroed != 0)) pm_zero(@ptrCast([*]u64, &address), 1, false);
                     return address;
                 }
 
@@ -1292,7 +1291,7 @@ pub const Physical = struct
             }
 
             // Failure:
-            if (flags & (1 << @enumToInt(Flags.can_fail)) == 0)
+            if (flags & Flags.can_fail == 0)
             {
                 Kernel.Arch.CPU_stop();
             }
@@ -1329,7 +1328,7 @@ pub const Physical = struct
         {
             //@Spinlock
 
-            if (memory_region.flags & (1 << @enumToInt(Memory.Region.Flags.no_commit_tracking)) != 0)
+            if (memory_region.flags & Memory.Region.Flags.no_commit_tracking != 0)
             {
                 Kernel.Arch.CPU_stop();
             }
@@ -1337,7 +1336,7 @@ pub const Physical = struct
             {
                 Kernel.Arch.CPU_stop();
             }
-            if (~memory_region.flags & (1 << @enumToInt(Memory.Region.Flags.normal)) != 0)
+            if (~memory_region.flags & Memory.Region.Flags.normal != 0)
             {
                 Kernel.Arch.CPU_stop();
             }
@@ -1349,7 +1348,7 @@ pub const Physical = struct
 
             if (delta == 0) return;
 
-            self.commit_lockfree(@intCast(u64, delta) * Kernel.Arch.Page.size, memory_region.flags & (1 << @enumToInt(Region.Flags.fixed)) != 0) catch
+            self.commit_lockfree(@intCast(u64, delta) * Kernel.Arch.Page.size, memory_region.flags & Region.Flags.fixed != 0) catch
             {
                 return CommitRangeError.commit_failed;
             };
@@ -1367,12 +1366,12 @@ pub const Physical = struct
                 Kernel.Arch.CPU_stop();
             };
 
-            if (memory_region.flags & (1 << @enumToInt(Region.Flags.fixed)) != 0)
+            if (memory_region.flags & Region.Flags.fixed != 0)
             {
                 var page_i: u64 = page_offset;
                 while (page_i < page_offset + page_count) : (page_i += 1)
                 {
-                    memory_space.handle_page_fault(memory_region.base_address + page_i * Kernel.Arch.Page.size, 1 << @enumToInt(Memory.Space.HandlePageFaultFlags.lock_acquired)) catch
+                    memory_space.handle_page_fault(memory_region.base_address + page_i * Kernel.Arch.Page.size, Memory.Space.HandlePageFaultFlags.lock_acquired) catch
                     {
                         Kernel.Arch.CPU_stop();
                     };
@@ -1607,28 +1606,30 @@ pub const Region = struct
 {
     base_address: u64,
     page_count: u64,
-    flags: u32,
+    flags: Flags.Type,
 
     data: Data,
 
     more: More,
 
-    pub const Flags = enum(u8)
+    pub const Flags = struct
     {
-        fixed = 0,
-        not_cacheable = 1,
-        no_commit_tracking = 2,
-        read_only = 3,
-        copy_on_write = 4,
-        write_combining = 5,
-        executable = 6,
-        user = 7,
-        physical = 8,
-        normal = 9,
-        shared = 10,
-        guard = 11,
-        cache = 12,
-        file = 13,
+        pub const Type = u32;
+
+        pub const fixed = 1 << 0;
+        pub const not_cacheable = 1 << 1;
+        pub const no_commit_tracking = 1 << 2;
+        pub const read_only = 1 << 3;
+        pub const copy_on_write = 1 << 4;
+        pub const write_combining = 1 << 5;
+        pub const executable = 1 << 6;
+        pub const user = 1 << 7;
+        pub const physical = 1 << 8;
+        pub const normal = 1 << 9;
+        pub const shared = 1 << 10;
+        pub const guard = 1 << 11;
+        pub const cache = 1 << 12;
+        pub const file = 1 << 13;
     };
 
     const More = extern union

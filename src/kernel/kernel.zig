@@ -1,15 +1,15 @@
 const Kernel = @This();
+
 pub const Arch = @import("arch.zig");
 pub const Drivers = @import("../drivers.zig");
 pub const Logger = @import("logger.zig");
 pub const Memory = @import("memory.zig");
 pub const Scheduler = @import("scheduler.zig");
-pub const Synchronization = @import("synchronization.zig");
+pub usingnamespace @import("synchronization.zig");
 
 pub const panic = Logger.panic;
 pub const panic_lf = Logger.panic_lockfree;
 pub const log_lf = Logger.log_lockfree;
-pub const Spinlock = Synchronization.Spinlock;
 
 pub var scheduler: Scheduler = undefined;
 pub var memory_space: Memory.Space = undefined;

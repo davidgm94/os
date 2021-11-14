@@ -7,8 +7,9 @@ const Self = @This();
 // substitute for real dynamic data structure
 processes: [16]Process,
 kernel_process: Process,
-lock: Kernel.Spinlock,
 next_process_id: u64,
+dispatch_spinlock: Kernel.Spinlock,
+
 shutdown: bool,
 panic: bool,
 
