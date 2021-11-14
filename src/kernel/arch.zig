@@ -8,6 +8,7 @@ pub const CPU = extern struct
     APIC_ID: u8,
     boot_processor: bool,
     local_storage: *Kernel.CPULocalStorage,
+    kernel_stack: u64,
 
     // @TODO: add more components
     //

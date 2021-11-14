@@ -7,48 +7,6 @@ var timestamp_ticks_per_ms: u64 = undefined;
 
 var next_processor_id: u32 = 0;
 
-const ProcessorStorage = struct
-{
-    local: *Kernel.CPULocalStorage,
-    gdt: *u32,
-
-    fn allocate(cpu: *Kernel.Arch.CPU) ProcessorStorage
-    {
-        const local_storage = @intToPtr(*Kernel.CPULocalStorage, Kernel.fixed_heap.allocate(@sizeOf(Kernel.CPULocalStorage), true) catch unreachable);
-        const gdt_physical_address = Kernel.physical_memory_allocator.allocate_lockfree(1 << @enumToInt(Kernel.Memory.Physical.Flags.commit_now), null, null, null);
-        const gdt = @intToPtr(*u32, Kernel.Memory.map_physical(&Kernel.kernel_memory_space, gdt_physical_address, Page.size, 0) orelse unreachable);
-        cpu.local_storage = local_storage;
-        var cpu_storage = ProcessorStorage
-        {
-            .local = local_storage,
-            .gdt = gdt,
-        };
-
-        cpu_storage.local.processor_ID = @atomicRmw(u32, &next_processor_id, .Add, 1, .SeqCst); // this line should be in the next function call
-        // do a lot of thread stuff here
-        //Kernel.scheduler.create_processor_threads();
-        cpu.kernel_processor_ID = @intCast(u8, cpu_storage.local.processor_ID); 
-
-        return cpu_storage;
-    }
-};
-
-fn end_processor_setup(storage: ProcessorStorage) void
-{
-    // local interrupts
-    for (ACPI.acpi.LAPIC_NMIs[0..ACPI.acpi.LAPIC_NMI_count]) |*nmi|
-    {
-        if (nmi.processor == 0xff or nmi.processor == storage.local.cpu.processor_ID)
-        {
-            const register_index: u32 = (0x350 + (@intCast(u32, nmi.lint_index) << 4)) >> 2;
-            const value: u32 = 2 | (1 << 10) | @as(u32, @boolToInt(nmi.active_low)) << 13 | @as(u32, @boolToInt(nmi.level_triggered)) << 15;
-            LAPIC.write(register_index, value);
-        }
-    }
-
-    Kernel.Arch.CPU_stop();
-}
-
 pub fn init() void
 {
     ACPI.parse_tables();
@@ -83,9 +41,74 @@ pub fn init() void
     timestamp_ticks_per_ms = (end - start) >> 3;
     enable_interrupts();
 
-    const new_processor_storage = ProcessorStorage.allocate(current_cpu);
-    end_processor_setup(new_processor_storage);
-    Kernel.Arch.CPU_stop();
+    _ = current_cpu;
+    // @TODO @WARNING @ERROR: this is causing previous code to crash when it shouldn't
+    var new_processor_storage = ProcessorStorage.allocate(current_cpu);
+    end_processor_setup(&new_processor_storage);
+}
+
+const ProcessorStorage = struct
+{
+    local: *Kernel.CPULocalStorage,
+    gdt: *u32,
+
+    fn allocate(cpu: *Kernel.Arch.CPU) ProcessorStorage
+    {
+        const local_storage = @intToPtr(*Kernel.CPULocalStorage, Kernel.fixed_heap.allocate(@sizeOf(Kernel.CPULocalStorage), true) catch unreachable);
+        const gdt_physical_address = Kernel.physical_memory_allocator.allocate_lockfree(1 << @enumToInt(Kernel.Memory.Physical.Flags.commit_now), null, null, null);
+        const gdt = @intToPtr(*u32, Kernel.Memory.map_physical(&Kernel.kernel_memory_space, gdt_physical_address, Page.size, 0) orelse unreachable);
+        cpu.local_storage = local_storage;
+        local_storage.cpu = cpu;
+        var cpu_storage = ProcessorStorage
+        {
+            .local = local_storage,
+            .gdt = gdt,
+        };
+
+        cpu_storage.local.processor_ID = @atomicRmw(u32, &next_processor_id, .Add, 1, .SeqCst); // this line should be in the next function call
+        // do a lot of thread stuff here
+        //Kernel.scheduler.create_processor_threads();
+        cpu.kernel_processor_ID = @intCast(u8, cpu_storage.local.processor_ID); 
+
+        return cpu_storage;
+    }
+};
+
+fn end_processor_setup(storage: *ProcessorStorage) void
+{
+    // local interrupts
+    for (ACPI.acpi.LAPIC_NMIs[0..ACPI.acpi.LAPIC_NMI_count]) |*nmi|
+    {
+        if (nmi.processor == 0xff or nmi.processor == storage.local.cpu.processor_ID)
+        {
+            const register_index: u32 = (0x350 + (@intCast(u32, nmi.lint_index) << 4)) >> 2;
+            const value: u32 = 2 | (1 << 10) | @as(u32, @boolToInt(nmi.active_low)) << 13 | @as(u32, @boolToInt(nmi.level_triggered)) << 15;
+            LAPIC.write(register_index, value);
+        }
+    }
+
+    LAPIC.write(0x350 >> 2, LAPIC.read(0x350 >> 2) & ~@as(u32, 1 << 16));
+    LAPIC.write(0x360 >> 2, LAPIC.read(0x360 >> 2) & ~@as(u32, 1 << 16));
+    LAPIC.write(0x080 >> 2, 0);
+    if (LAPIC.read(0x30 >> 2) & 0x80000000 != 0) LAPIC.write(0x410 >> 2, 0);
+    LAPIC.end_of_interrupt();
+
+    //// Configure the LAPIC timer
+    LAPIC.write(0x3e0 >> 2, 2);
+
+    //// Create the processor local storage
+    set_local_storage(storage.local);
+
+    const gdt = storage.gdt;
+    _ = gdt;
+    const gdtr_address = GDTR_get();
+    const bootstrap_GDT = @intToPtr(*align(1) u64, gdtr_address + @sizeOf(u16)).*;
+    //_ = gdtr_address;
+    const tss_offset = 2048;
+    std.mem.copy(u8, @ptrCast([*]u8, gdt)[0..tss_offset], @intToPtr([*]u8, bootstrap_GDT)[0..tss_offset]);
+    const tss_address = @ptrToInt(storage.gdt) + tss_offset;
+    storage.local.cpu.kernel_stack = tss_address + @sizeOf(u32);
+    TSS_install(@ptrToInt(gdt), tss_address);
 }
 
 var rng: RNG = undefined;
@@ -139,6 +162,11 @@ const LAPIC = struct
     {
         LAPIC.write(0x320 >> 2, timer_interrupt | (1 << 17));
         LAPIC.write(0x380 << 2, ACPI.acpi.LAPIC_ticks_per_ms * ms);
+    }
+
+    fn end_of_interrupt() void
+    {
+        LAPIC.write(0xb0 >> 2, 0);
     }
 };
 
@@ -1046,9 +1074,11 @@ pub export fn syscall() callconv(.C) noreturn
 
 pub extern fn CPU_stop() callconv(.C) noreturn;
 pub extern fn CR3_read() callconv(.C) u64;
+pub extern fn TSS_install(gdt: u64, tss: u64) callconv(.C) void;
 
 pub extern fn thread_get_current() callconv(.C) ?*Kernel.Scheduler.Thread;
 pub extern fn get_local_storage() callconv(.C) *Kernel.CPULocalStorage;
+pub extern fn set_local_storage(local_storage: *Kernel.CPULocalStorage) callconv(.C) void;
 
 pub extern fn are_interrupts_enabled() callconv(.C) bool;
 pub extern fn enable_interrupts() callconv(.C) void;
@@ -1059,6 +1089,8 @@ pub extern fn invalidate_all_pages() callconv(.C) void;
 pub extern fn read_timestamp() callconv(.C) u64;
 pub extern fn in8(port: u16) callconv(.C) u8;
 pub extern fn out8(port: u16, value: u8) callconv(.C) void;
+
+pub extern fn GDTR_get() callconv(.C) u64;
 
 pub extern fn physical_memory_regions_get() callconv(.C) *Kernel.Memory.PhysicalRegions;
 pub extern fn physical_memory_highest_get() callconv(.C) u64;

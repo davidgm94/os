@@ -54,8 +54,8 @@ bootloader_ID: dd 0
 bootloader_information_offset: dq 0
 
 align 0x10
-[global processor_GDTR]
-processor_GDTR:
+[global GDTR]
+GDTR:
     dq 0
     dq 0
 
@@ -123,7 +123,7 @@ IDT_install:
 %endrep
 
     ; save bootstrap GDT
-    mov rcx, processor_GDTR
+    mov rcx, GDTR
     sgdt [rcx]
 
 memory_calculations:
@@ -569,6 +569,36 @@ CR3_read:
     mov rax, cr3
     ret
 
+[global TSS_install]
+TSS_install:
+    push rbx
+
+    ; Set the location of the TSS in the GDT
+    mov rax, rdi
+    mov rbx, rsi
+    mov [rax + 56 + 2], bx
+    shr rbx, 16
+    mov [rax + 56 + 4], bl
+    shr rbx, 8
+    mov [rax + 56 + 7], bl
+    shr rbx, 8
+    mov [rax + 56 + 8], rbx
+
+    ; Flush the GDT
+    mov rax, gdt_data.gdt2
+    mov rdx, [rax]
+    mov [rax], rdi
+    mov rdi, gdt_data.gdt
+    lgdt [rdi]
+    mov [rax], rdx
+
+    ; Flush the TSS
+    mov ax, 0x38
+    ltr ax
+
+    pop rbx
+    ret
+
 [global thread_get_current]
 thread_get_current:
     mov rax, [gs:16]
@@ -577,6 +607,11 @@ thread_get_current:
 [global get_local_storage]
 get_local_storage:
     mov rax, [gs:0]
+    ret
+
+[global set_local_storage]
+set_local_storage:
+    mov [gs:0], rdi
     ret
 
 [global are_interrupts_enabled]
@@ -638,6 +673,11 @@ out8:
     out dx, al
     ret
 
+[global GDTR_get]
+GDTR_get:
+    mov rax, GDTR
+    ret
+
 [global physical_memory_regions_get]
 physical_memory_regions_get:
     mov rax, physical_memory_regions
@@ -652,3 +692,58 @@ physical_memory_highest_get:
 bootloader_information_offset_get:
     mov rax, [bootloader_information_offset]
     ret
+
+gdt_data:
+gdt_data:
+	.null_entry:	dq 0
+	.code_entry:	dd 0xFFFF	; 0x08
+			db 0
+			dw 0xCF9A
+			db 0
+	.data_entry:	dd 0xFFFF	; 0x10
+			db 0
+			dw 0xCF92
+			db 0
+	.code_entry_16:	dd 0xFFFF	; 0x18
+			db 0
+			dw 0x0F9A
+			db 0
+	.data_entry_16:	dd 0xFFFF	; 0x20
+			db 0
+			dw 0x0F92
+			db 0
+	.user_code:	dd 0xFFFF	; 0x2B
+			db 0
+			dw 0xCFFA
+			db 0
+	.user_data:	dd 0xFFFF	; 0x33
+			db 0
+			dw 0xCFF2
+			db 0
+	.tss:		dd 0x68		; 0x38
+			db 0
+			dw 0xE9
+			db 0
+			dq 0
+	.code_entry64:	dd 0xFFFF	; 0x48
+			db 0
+			dw 0xAF9A
+			db 0
+	.data_entry64:	dd 0xFFFF	; 0x50
+			db 0
+			dw 0xAF92
+			db 0
+	.user_code64:	dd 0xFFFF	; 0x5B
+			db 0
+			dw 0xAFFA
+			db 0
+	.user_data64:	dd 0xFFFF	; 0x63
+			db 0
+			dw 0xAFF2
+			db 0
+	.user_code64c:	dd 0xFFFF	; 0x6B
+			db 0
+			dw 0xAFFA
+			db 0
+	.gdt:		dw (gdt_data.gdt - gdt_data - 1)
+	.gdt2:		dq 0x11000
