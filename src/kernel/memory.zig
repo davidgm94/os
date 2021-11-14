@@ -42,9 +42,9 @@ pub fn init() void
         Kernel.physical_memory_allocator.page_frames = @intToPtr([*]volatile PageFrame, @ptrToInt(page_frames.ptr))[0..page_frame_db_count];
         Kernel.physical_memory_allocator.free_or_zeroed_page_bitset.initialize(page_frame_db_count, true);
 
-        Physical.insert_free_pages_start();
-        const commit_limit = populate_pageframe_database();
-        Physical.insert_free_pages_end();
+        Kernel.physical_memory_allocator.insert_free_pages_start();
+        const commit_limit = Kernel.physical_memory_allocator.populate_pageframe_database();
+        Kernel.physical_memory_allocator.insert_free_pages_end();
         Kernel.physical_memory_allocator.commit_fixed_limit = commit_limit;
         Kernel.physical_memory_allocator.commit_limit = commit_limit;
 
@@ -68,8 +68,8 @@ pub const Space = struct
     free_regions_size: AVLTree(Region),
     used_regions: AVLTree(Region),
 
-    commit: u64,
-    reserve: u64,
+    commit_page_count: u64,
+    reserve_page_count: u64,
     user: bool,
 
     pub fn map_physical(self: *Space, asked_offset: u64, asked_byte_count: u64, caching: u32) ?u64
@@ -245,7 +245,7 @@ pub const Space = struct
         return null;
     }
 
-    pub fn reserve(self: *Self, byte_count: u64, flags: u32, maybe_forced_address: ?u64, maybe_generate_guard_pages: ?bool) ?*Region
+    pub fn reserve(self: *Space, byte_count: u64, flags: u32, maybe_forced_address: ?u64, maybe_generate_guard_pages: ?bool) ?*Region
     {
         const forced_address = maybe_forced_address orelse 0;
         const generate_guard_pages = maybe_generate_guard_pages orelse false;
@@ -406,7 +406,7 @@ pub const Space = struct
             Kernel.Arch.Page.unmap(self, region_to_remove.base_address, region_to_remove.page_count, 0, null, null);
         }
 
-        self.reserve += region_to_remove.page_count;
+        self.reserve_page_count += region_to_remove.page_count;
 
         if (self == &Kernel.core_memory_space)
         {
@@ -946,28 +946,6 @@ const FreeError = error
 };
 
 
-fn populate_pageframe_database() u64
-{
-    var commit_limit: u64 = 0;
-
-    const physical_memory_regions = Kernel.Arch.physical_memory_regions_get();
-    for (physical_memory_regions.ptr[0..physical_memory_regions.count]) |region|
-    {
-        const base = region.base_address >> Kernel.Arch.Page.bit_count;
-        const count = region.page_count;
-        commit_limit += count;
-
-        var page_i: u64 = 0;
-        while (page_i < count) : (page_i += 1)
-        {
-            const page = base + page_i;
-            Kernel.physical_memory_allocator.insert_free_pages_next(page);
-        }
-    }
-
-    physical_memory_regions.page_count = 0;
-    return commit_limit;
-}
 
 const Bitset = struct
 {
@@ -1377,7 +1355,7 @@ pub const Physical = struct
             };
 
             memory_region.data.normal.commit_page_count += @intCast(u64, delta);
-            memory_space.commit += @intCast(u64, delta);
+            memory_space.commit_page_count += @intCast(u64, delta);
 
             if (memory_region.data.normal.commit_page_count > memory_region.page_count)
             {
@@ -1580,6 +1558,29 @@ pub const Physical = struct
             }
 
             // ...
+        }
+
+        fn populate_pageframe_database(self: *Self) u64
+        {
+            var commit_limit: u64 = 0;
+
+            const physical_memory_regions = Kernel.Arch.physical_memory_regions_get();
+            for (physical_memory_regions.ptr[0..physical_memory_regions.count]) |region|
+            {
+                const base = region.base_address >> Kernel.Arch.Page.bit_count;
+                const count = region.page_count;
+                commit_limit += count;
+
+                var page_i: u64 = 0;
+                while (page_i < count) : (page_i += 1)
+                {
+                    const page = base + page_i;
+                    self.insert_free_pages_next(page);
+                }
+            }
+
+            physical_memory_regions.page_count = 0;
+            return commit_limit;
         }
     };
 
