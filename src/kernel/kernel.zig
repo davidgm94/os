@@ -12,21 +12,24 @@ pub const log_lf = Logger.log_lockfree;
 pub const Spinlock = Synchronization.Spinlock;
 
 pub var scheduler: Scheduler = undefined;
-pub var kernel_memory_space: Memory.Space = undefined;
-pub var core_memory_space: Memory.Space = undefined;
+pub var memory_space: Memory.Space = undefined;
+pub var process: *Scheduler.Process = undefined;
 pub var physical_memory_allocator: Memory.Physical.Allocator = undefined;
 
+pub var core_memory_space: Memory.Space = undefined;
 pub var core_heap: Memory.Heap = undefined;
+
 pub var fixed_heap: Memory.Heap = undefined;
 
 pub const CPULocalStorage = extern struct
 {
     cpu: *Kernel.Arch.CPU,
-    processor_ID: u32, // Scheduler ID
+    processor_ID: u8, // Scheduler ID
 };
 
 pub fn init() void
 {
+    Kernel.process = scheduler.prepare_process(.kernel) orelse unreachable;
     Memory.init();
     Arch.init();
 }

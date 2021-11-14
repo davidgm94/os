@@ -28,7 +28,7 @@ pub const ACPI = extern struct
     pub fn parse_tables() void
     {
         const rsdp_address = Kernel.Arch.RSDP_find();
-        acpi.rsdp = @intToPtr(*RootSystemDescriptorPointer, Kernel.Memory.map_physical(&Kernel.kernel_memory_space, rsdp_address, 0x4000, 0) orelse unreachable);
+        acpi.rsdp = @intToPtr(*RootSystemDescriptorPointer, Kernel.memory_space.map_physical(rsdp_address, 0x4000, 0) orelse unreachable);
 
         if (acpi.rsdp.revision == 2 and acpi.rsdp.extended_address != 0)
         {
@@ -37,7 +37,7 @@ pub const ACPI = extern struct
         }
 
         const is_xsdt = false;
-        const sdt = @intToPtr(*align(1) DescriptorTable, Kernel.Memory.map_physical(&Kernel.kernel_memory_space, acpi.rsdp.address, 0x4000, 0) orelse unreachable);
+        const sdt = @intToPtr(*align(1) DescriptorTable, Kernel.memory_space.map_physical(acpi.rsdp.address, 0x4000, 0) orelse unreachable);
         if (!(sdt.signature == RSDT_signature and sdt.length < 0x4000))
         {
             Kernel.Arch.CPU_stop();
@@ -54,14 +54,14 @@ pub const ACPI = extern struct
         {
             // XSDT
             const physical_header_address = @intToPtr([*]align(1) u32, table_list_address)[table_i];
-            const virtual_header_address = Kernel.Memory.map_physical(&Kernel.kernel_memory_space, physical_header_address, @sizeOf(DescriptorTable), 0) orelse unreachable;
+            const virtual_header_address = Kernel.memory_space.map_physical(physical_header_address, @sizeOf(DescriptorTable), 0) orelse unreachable;
             const header = @intToPtr(*align(1) DescriptorTable, virtual_header_address);
 
             switch (header.signature)
             {
                 MADT_signature =>
                 {
-                    const madt_header = @intToPtr(*align(1) DescriptorTable, Kernel.Memory.map_physical(&Kernel.kernel_memory_space, physical_header_address, header.length, 0) orelse unreachable);
+                    const madt_header = @intToPtr(*align(1) DescriptorTable, Kernel.memory_space.map_physical(physical_header_address, header.length, 0) orelse unreachable);
                     madt_header.check();
                     const madt = @intToPtr(*align(1) MADT, @ptrToInt(madt_header) + DescriptorTable.header_length);
                     var data = @intToPtr([*]u8, @ptrToInt(madt) + @sizeOf(MADT));
@@ -133,7 +133,7 @@ pub const ACPI = extern struct
                 },
                 FADT_signature =>
                 {
-                    const fadt = @intToPtr(*align(1) DescriptorTable, Kernel.Memory.map_physical(&Kernel.kernel_memory_space, physical_header_address, header.length, 0) orelse unreachable);
+                    const fadt = @intToPtr(*align(1) DescriptorTable, Kernel.memory_space.map_physical(physical_header_address, header.length, 0) orelse unreachable);
                     fadt.check();
 
                     if (header.length > 109)
@@ -145,11 +145,11 @@ pub const ACPI = extern struct
                         acpi.VGA_controller_unavailable = (boot_architecture_flags & (1 << 2)) != 0;
                     }
 
-                    Kernel.Memory.free(&Kernel.kernel_memory_space, @ptrToInt(fadt), null, null) catch unreachable;
+                    Kernel.memory_space.free(@ptrToInt(fadt), null, null) catch unreachable;
                 },
                 HPET_signature =>
                 {
-                    const hpet = @intToPtr(*align(1) DescriptorTable, Kernel.Memory.map_physical(&Kernel.kernel_memory_space, physical_header_address, header.length, 0) orelse unreachable);
+                    const hpet = @intToPtr(*align(1) DescriptorTable, Kernel.memory_space.map_physical(physical_header_address, header.length, 0) orelse unreachable);
                     hpet.check();
 
                     if (header.length == 52 and @ptrCast([*]u8, hpet)[52] == 0)
@@ -159,12 +159,12 @@ pub const ACPI = extern struct
                         _ = base_address;
                     }
 
-                    Kernel.Memory.free(&Kernel.kernel_memory_space, @ptrToInt(hpet), null, null) catch unreachable;
+                    Kernel.memory_space.free(@ptrToInt(hpet), null, null) catch unreachable;
                 },
                 else => {}
             }
 
-            Kernel.Memory.free(&Kernel.kernel_memory_space, virtual_header_address, null, null) catch unreachable;
+            Kernel.memory_space.free(virtual_header_address, null, null) catch unreachable;
         }
 
         const processor_count = acpi.processor_count;
@@ -178,7 +178,7 @@ pub const ACPI = extern struct
 
     fn map_physical_memory(physical_address: u64, length: u64) u64
     {
-        return Kernel.Memory.map_physical(&Kernel.kernel_memory_space, physical_address, length, 1 << @enumToInt(Kernel.Memory.Region.Flags.not_cacheable)) orelse unreachable;
+        return Kernel.memory_space.map_physical(physical_address, length, 1 << @enumToInt(Kernel.Memory.Region.Flags.not_cacheable)) orelse unreachable;
     }
 
     pub const MADT = extern struct

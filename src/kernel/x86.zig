@@ -5,7 +5,7 @@ const ACPI = Kernel.Drivers.ACPI;
 const timer_interrupt = 0x80;
 var timestamp_ticks_per_ms: u64 = undefined;
 
-var next_processor_id: u32 = 0;
+var next_processor_id: u8 = 0;
 
 pub fn init() void
 {
@@ -55,8 +55,8 @@ const ProcessorStorage = struct
     fn allocate(cpu: *Kernel.Arch.CPU) ProcessorStorage
     {
         const local_storage = @intToPtr(*Kernel.CPULocalStorage, Kernel.fixed_heap.allocate(@sizeOf(Kernel.CPULocalStorage), true) catch unreachable);
-        const gdt_physical_address = Kernel.physical_memory_allocator.allocate_lockfree(1 << @enumToInt(Kernel.Memory.Physical.Flags.commit_now), null, null, null);
-        const gdt = @intToPtr(*u32, Kernel.Memory.map_physical(&Kernel.kernel_memory_space, gdt_physical_address, Page.size, 0) orelse unreachable);
+        const gdt_physical_address = Kernel.physical_memory_allocator.allocate(1 << @enumToInt(Kernel.Memory.Physical.Flags.commit_now), null, null, null);
+        const gdt = @intToPtr(*u32, Kernel.memory_space.map_physical(gdt_physical_address, Page.size, 0) orelse unreachable);
         cpu.local_storage = local_storage;
         local_storage.cpu = cpu;
         var cpu_storage = ProcessorStorage
@@ -65,7 +65,7 @@ const ProcessorStorage = struct
             .gdt = gdt,
         };
 
-        cpu_storage.local.processor_ID = @atomicRmw(u32, &next_processor_id, .Add, 1, .SeqCst); // this line should be in the next function call
+        cpu_storage.local.processor_ID = @atomicRmw(u8, &next_processor_id, .Add, 1, .SeqCst); // this line should be in the next function call
         // do a lot of thread stuff here
         //Kernel.scheduler.create_processor_threads();
         cpu.kernel_processor_ID = @intCast(u8, cpu_storage.local.processor_ID); 
@@ -194,8 +194,7 @@ pub const Memory = struct
     {
         const cr3 = CR3_read();
         Kernel.core_memory_space.virtual_address_space.cr3 = cr3;
-        Kernel.kernel_memory_space.virtual_address_space.cr3 = cr3;
-        Kernel.core_memory_space.virtual_address_space.l1_commit = core_L1_commit[0..];
+        Kernel.memory_space.virtual_address_space.cr3 = cr3;
 
         Kernel.Memory.core_regions[0].base_address = core_space_start;
         Kernel.Memory.core_regions[0].page_count = core_space_size / Page.size;
@@ -205,16 +204,18 @@ pub const Memory = struct
         {
             if (Page.Table.access_by_index(.level_4, page_table_l4_i).* == 0)
             {
-                Page.Table.access_by_index(.level_4, page_table_l4_i).* = Kernel.physical_memory_allocator.allocate_lockfree(0, null, null, null) | 0b11;
+                Page.Table.access_by_index(.level_4, page_table_l4_i).* = Kernel.physical_memory_allocator.allocate(0, null, null, null) | 0b11;
                 var page_table_slice = @intToPtr([*]u8, Page.Table.get_level_address(.level_3) + (page_table_l4_i * 0x200 * @sizeOf(u64)));
                 std.mem.set(u8, page_table_slice[0..Kernel.Arch.Page.size], 0);
             }
         }
 
+        Kernel.core_memory_space.virtual_address_space.l1_commit = core_L1_commit[0..];
+
         // @Spinlock
-        if (Kernel.Memory.reserve(&Kernel.core_memory_space, VirtualAddressSpace.l1_commit_size, 1 << @enumToInt(Kernel.Memory.Region.Flags.normal) | 1 << @enumToInt(Kernel.Memory.Region.Flags.no_commit_tracking) | 1 << @enumToInt(Kernel.Memory.Region.Flags.fixed), null, null)) |kernel_l1_commit|
+        if (Kernel.core_memory_space.reserve(VirtualAddressSpace.l1_commit_size, 1 << @enumToInt(Kernel.Memory.Region.Flags.normal) | 1 << @enumToInt(Kernel.Memory.Region.Flags.no_commit_tracking) | 1 << @enumToInt(Kernel.Memory.Region.Flags.fixed), null, null)) |kernel_l1_commit|
         {
-            Kernel.kernel_memory_space.virtual_address_space.l1_commit = @intToPtr([*]u8, kernel_l1_commit.base_address)[0..VirtualAddressSpace.l1_commit_size];
+            Kernel.memory_space.virtual_address_space.l1_commit = @intToPtr([*]u8, kernel_l1_commit.base_address)[0..VirtualAddressSpace.l1_commit_size];
         }
         else
         {
@@ -312,7 +313,7 @@ pub const Page = struct
         pub fn handle(fault_address: u64, flags: u32) HandleError!void
         {
             const address = fault_address & ~@as(u64, Page.size - 1);
-            const for_supervisor = (flags & (1 << @enumToInt(Kernel.Memory.PageFault.Flags.for_supervisor))) != 0;
+            const for_supervisor = (flags & (1 << @enumToInt(Kernel.Memory.Space.HandlePageFaultFlags.for_supervisor))) != 0;
 
             if (!are_interrupts_enabled())
             {
@@ -325,18 +326,18 @@ pub const Page = struct
                 {
                     if (address >= Memory.low_memory_start and address < Memory.low_memory_start + Memory.low_memory_limit and for_supervisor)
                     {
-                        Page.map(&Kernel.kernel_memory_space, address - Memory.low_memory_start, address, 1 << @enumToInt(MapFlags.not_cacheable) | 1 << @enumToInt(MapFlags.commit_tables_now)) catch {};
+                        Page.map(&Kernel.memory_space, address - Memory.low_memory_start, address, 1 << @enumToInt(MapFlags.not_cacheable) | 1 << @enumToInt(MapFlags.commit_tables_now)) catch {};
                         break :blk null;
                     }
                     else if (address >= Memory.core_region_start and address < Memory.core_region_start + (Memory.core_region_count * @sizeOf(Kernel.Memory.Region)) and for_supervisor)
                     {
-                        const new_physical_address = Kernel.physical_memory_allocator.allocate_lockfree(@enumToInt(Kernel.Memory.Physical.Flags.zeroed), null, null, null);
-                        Page.map(&Kernel.kernel_memory_space, new_physical_address, address, 1 << @enumToInt(MapFlags.commit_tables_now)) catch {};
+                        const new_physical_address = Kernel.physical_memory_allocator.allocate(@enumToInt(Kernel.Memory.Physical.Flags.zeroed), null, null, null);
+                        Page.map(&Kernel.memory_space, new_physical_address, address, 1 << @enumToInt(MapFlags.commit_tables_now)) catch {};
                         break :blk null;
                     }
                     else if (address >= Memory.core_space_start and address < Memory.core_space_start + Memory.core_space_size and for_supervisor)
                     {
-                        Kernel.Memory.PageFault.handle(&Kernel.core_memory_space, address, flags) catch
+                        Kernel.core_memory_space.handle_page_fault(address, flags) catch
                         {
                             break :blk HandleError.CoreSpaceError;
                         };
@@ -345,7 +346,7 @@ pub const Page = struct
                     }
                     else if (address >= Memory.kernel_space_start and address < Memory.kernel_space_start + Memory.kernel_space_size and for_supervisor)
                     {
-                        Kernel.Memory.PageFault.handle(&Kernel.kernel_memory_space, address, flags) catch
+                        Kernel.memory_space.handle_page_fault(address, flags) catch
                         {
                             break :blk HandleError.KernelSpaceError;
                         };
@@ -354,7 +355,7 @@ pub const Page = struct
                     }
                     else if (address >= Memory.modules_start and address < Memory.modules_start + Memory.modules_size and for_supervisor)
                     {
-                        Kernel.Memory.PageFault.handle(&Kernel.kernel_memory_space, address, flags) catch
+                        Kernel.memory_space.handle_page_fault(address, flags) catch
                         {
                             break :blk HandleError.ModuleSpaceError;
                         };
@@ -371,16 +372,16 @@ pub const Page = struct
                                     if (current_thread.temporary_address_space) |temporary_space|
                                         @ptrCast(*Kernel.Memory.Space, temporary_space)
                                     else 
-                                        current_thread.process.virtual_memory_space;
+                                        current_thread.process.address_space;
                             }
                             else
                             {
                                 // @TODO: this is a hack; clean it up
-                                break :space_blk &Kernel.kernel_memory_space;
+                                break :space_blk &Kernel.memory_space;
                             }
                         };
 
-                        Kernel.Memory.PageFault.handle(space, address, flags) catch
+                        space.handle_page_fault(address, flags) catch
                         {
                             break :blk HandleError.UnknownError;
                         };
@@ -423,7 +424,7 @@ pub const Page = struct
         {
             if (flags & (1 << @enumToInt(MapFlags.no_new_tables)) != 0) CPU_stop();
 
-            Page.Table.access(level, indices).* = Kernel.physical_memory_allocator.allocate_lockfree(1 << @enumToInt(Kernel.Memory.Physical.Flags.lock_acquired), null, null, null) | 0b111;
+            Page.Table.access(level, indices).* = Kernel.physical_memory_allocator.allocate(1 << @enumToInt(Kernel.Memory.Physical.Flags.lock_acquired), null, null, null) | 0b111;
             const a_lower_level = comptime @intToEnum(Page.Table.Level, @enumToInt(level) - 1);
             const page_to_invalidate_address = @ptrToInt(Page.Table.access(a_lower_level, indices));
             invalidate_page(page_to_invalidate_address); // not strictly necessary
@@ -458,7 +459,7 @@ pub const Page = struct
         {
             CPU_stop();
         }
-        else if (@ptrToInt(memory_space) != @ptrToInt(&Kernel.core_memory_space) and @ptrToInt(memory_space) != @ptrToInt(&Kernel.kernel_memory_space))
+        else if (@ptrToInt(memory_space) != @ptrToInt(&Kernel.core_memory_space) and @ptrToInt(memory_space) != @ptrToInt(&Kernel.memory_space))
         {
             CPU_stop();
         }
@@ -476,7 +477,7 @@ pub const Page = struct
         //if (Page.Table.access(.level_4, index_l4)* & 1 == 0)
         //{
             //if (flags & (1 << @enumToInt(MapFlags.no_new_tables)) != 0) CPU_stop();
-            //Page.Table.access(.level_4, index_l4).* = Kernel.physical_memory_allocator.allocate_lockfree(@enumToInt(Kernel.Memory.Physical.Flags.lock_acquired), null, null, null) | 0b111;
+            //Page.Table.access(.level_4, index_l4).* = Kernel.physical_memory_allocator.allocate(@enumToInt(Kernel.Memory.Physical.Flags.lock_acquired), null, null, null) | 0b111;
             //const page_to_invalidate_address = @ptrToInt(&Page.Table.L3[index_l3]);
             //invalidate_page(page_to_invalidate_address); // not strictly necessary
             //std.mem.set(u8, @intToPtr([*]u8, page_to_invalidate_address & ~@as(u64, Page.size - 1))[0..Page.size], 0); 
@@ -486,7 +487,7 @@ pub const Page = struct
         //if (Page.Table.L3[index_l3] & 1 == 0)
         //{
             //if (flags & (1 << @enumToInt(MapFlags.no_new_tables)) != 0) CPU_stop();
-            //Page.Table.L3[index_l3] = Kernel.physical_memory_allocator.allocate_lockfree(@enumToInt(Kernel.Memory.Physical.Flags.lock_acquired), null, null, null) | 0b111;
+            //Page.Table.L3[index_l3] = Kernel.physical_memory_allocator.allocate(@enumToInt(Kernel.Memory.Physical.Flags.lock_acquired), null, null, null) | 0b111;
             //const page_to_invalidate_address = @ptrToInt(&Page.Table.L2[index_l2]);
             //invalidate_page(page_to_invalidate_address); // not strictly necessary
             //std.mem.set(u8, @intToPtr([*]u8, page_to_invalidate_address & ~@as(u64, Page.size - 1))[0..Page.size], 0); 
@@ -496,7 +497,7 @@ pub const Page = struct
         //if (Page.Table.L2[index_l2] & 1 == 0)
         //{
             //if (flags & (1 << @enumToInt(MapFlags.no_new_tables)) != 0) CPU_stop();
-            //Page.Table.L2[index_l2] = Kernel.physical_memory_allocator.allocate_lockfree(@enumToInt(Kernel.Memory.Physical.Flags.lock_acquired), null, null, null) | 0b111;
+            //Page.Table.L2[index_l2] = Kernel.physical_memory_allocator.allocate(@enumToInt(Kernel.Memory.Physical.Flags.lock_acquired), null, null, null) | 0b111;
             //const page_to_invalidate_address = @ptrToInt(&Page.Table.L1[index_l1]);
             //invalidate_page(page_to_invalidate_address); // not strictly necessary
             //std.mem.set(u8, @intToPtr([*]u8, page_to_invalidate_address & ~@as(u64, Page.size - 1))[0..Page.size], 0); 
@@ -598,7 +599,7 @@ pub const Page = struct
 
             if ((flags & (1 << @enumToInt(UnmapFlags.free)) != 0) or (flags & (1 << @enumToInt(UnmapFlags.free_copied)) != 0 and copy))
             {
-                Kernel.Memory.free_physical(physical_address, true, null);
+                Kernel.physical_memory_allocator.free(physical_address, true, null);
             }
             else if (flags & (1 << @enumToInt(UnmapFlags.balance_file)) != 0)
             {
@@ -1030,11 +1031,11 @@ pub export fn interrupt_handler(context: *InterruptContext) callconv(.C) void
                     // @SpinLock condition kernel panic
                     const write_flag: u32 = 
                         if (context.error_code & @enumToInt(Page.Fault.ErrorCodeBit.write) != 0)
-                            1 << @as(u32, @enumToInt(Kernel.Memory.PageFault.Flags.write))
+                            1 << @as(u32, @enumToInt(Kernel.Memory.Space.HandlePageFaultFlags.write))
                         else 0;
 
                     const handle_flags: u32 =
-                        1 << @enumToInt(Kernel.Memory.PageFault.Flags.for_supervisor) |
+                        1 << @enumToInt(Kernel.Memory.Space.HandlePageFaultFlags.for_supervisor) |
                         write_flag;
 
                     Page.Fault.handle(context.cr2, handle_flags) catch
@@ -1077,7 +1078,7 @@ pub extern fn CR3_read() callconv(.C) u64;
 pub extern fn TSS_install(gdt: u64, tss: u64) callconv(.C) void;
 
 pub extern fn thread_get_current() callconv(.C) ?*Kernel.Scheduler.Thread;
-pub extern fn get_local_storage() callconv(.C) *Kernel.CPULocalStorage;
+pub extern fn get_local_storage() callconv(.C) ?*Kernel.CPULocalStorage;
 pub extern fn set_local_storage(local_storage: *Kernel.CPULocalStorage) callconv(.C) void;
 
 pub extern fn are_interrupts_enabled() callconv(.C) bool;
