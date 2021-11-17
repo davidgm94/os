@@ -1,8 +1,13 @@
 #define DEBUG_BUILD
 #define ES_BITS_64
 #define ES_ARCH_X86_64
+#define KERNEL
+#define TREE_VALIDATE
+#define K_ARCH_STACK_GROWS_DOWN
+
 #include <stdint.h>
 #include <stddef.h>
+#include <stdarg.h>
 
 typedef int64_t EsListViewIndex;
 typedef uintptr_t EsHandle;
@@ -13,8 +18,43 @@ typedef uint8_t EsNodeType;
 typedef int64_t EsFileOffsetDifference;
 
 #define EsLiteral(x) (char *) x, EsCStringLength((char *) x)
+#define EsAssert(x) do { if (!(x)) { EsAssertionFailure(__FILE__, __LINE__); } } while (0)
+#define EsCRTassert EsAssert
 
-inline int EsMemoryCompare(const void *a, const void *b, size_t bytes) {
+#define ES_MEMORY_MOVE_BACKWARDS -
+
+
+struct EsHeap;
+#define K_CORE (&heapCore)
+#define K_FIXED (&heapFixed)
+#define K_PAGED (&heapFixed)
+extern EsHeap heapCore;
+extern EsHeap heapFixed;
+struct MMSpace;
+extern MMSpace _kernelMMSpace, _coreMMSpace;
+#define kernelMMSpace (&_kernelMMSpace)
+#define coreMMSpace (&_coreMMSpace)
+
+#define CC_ACCESS_MAP                (1 << 0)
+#define CC_ACCESS_READ               (1 << 1)
+#define CC_ACCESS_WRITE              (1 << 2)
+#define CC_ACCESS_WRITE_BACK         (1 << 3) // Wait for the write to complete before returning.
+#define CC_ACCESS_PRECISE            (1 << 4) // Do not write back bytes not touched by this write. (Usually modified tracking is to page granularity.) Requires WRITE_BACK.
+#define CC_ACCESS_USER_BUFFER_MAPPED (1 << 5) // Set if the user buffer is memory-mapped to mirror this or another cache.
+
+
+void *MMStandardAllocate(MMSpace *space, size_t bytes, uint32_t flags, void *baseAddress = nullptr, bool commitAll = true);
+bool MMFree(MMSpace *space, void *address, size_t expectedSize = 0, bool userOnly = false);
+
+
+
+void EsMemoryFill(void *from, void *to, uint8_t byte) {
+	uint8_t *a = (uint8_t *) from;
+	uint8_t *b = (uint8_t *) to;
+	while (a != b) *a = byte, a++;
+}
+
+int EsMemoryCompare(const void *a, const void *b, size_t bytes) {
 	if (!bytes) {
 		return 0;
 	}
@@ -32,11 +72,46 @@ inline int EsMemoryCompare(const void *a, const void *b, size_t bytes) {
 
 	return 0;
 }
+void EsMemoryZero(void *destination, size_t bytes) {
+	// TODO Prevent this from being optimised out in the kernel.
+
+	if (!bytes) {
+		return;
+	}
+
+	for (uintptr_t i = 0; i < bytes; i++) {
+		((uint8_t *) destination)[i] = 0;
+	}
+}
+
+void EsMemoryCopy(void *_destination, const void *_source, size_t bytes) {
+	// TODO Prevent this from being optimised out in the kernel.
+
+	if (!bytes) {
+		return;
+	}
+
+	uint8_t *destination = (uint8_t *) _destination;
+	uint8_t *source = (uint8_t *) _source;
+
+	while (bytes >= 1) {
+		((uint8_t *) destination)[0] = ((uint8_t *) source)[0];
+
+		source += 1;
+		destination += 1;
+		bytes -= 1;
+	}
+}
+
+
 
 #define ES_MEMORY_OPEN_FAIL_IF_FOUND     (0x1000)
 #define ES_MEMORY_OPEN_FAIL_IF_NOT_FOUND (0x2000)
 
-struct EsHeap;
+#define ES_THREAD_EVENT_MUTEX_ACQUIRE (1)
+#define ES_THREAD_EVENT_MUTEX_RELEASE (2)
+
+
 enum KLogLevel {
 	LOG_VERBOSE,
 	LOG_INFO,
@@ -63,12 +138,6 @@ enum KernelObjectType : uint32_t {
 	KERNEL_OBJECT_DEVICE		= 0x00008000, // A device.
 };
 
-void KernelLog(KLogLevel level, const char *subsystem, const char *event, const char *format, ...);
-void KernelPanic(const char *format, ...);
-void EsPrint(const char *format, ...);
-
-void *EsHeapAllocate(size_t size, bool zeroMemory, EsHeap *kernelHeap);
-void EsHeapFree(void *address, size_t expectedSize, EsHeap *kernelHeap);
 
 struct ConstantBuffer {
 	volatile size_t handles;
@@ -77,7 +146,7 @@ struct ConstantBuffer {
 	// Data follows.
 };
 
-inline size_t EsCStringLength(const char *string) {
+size_t EsCStringLength(const char *string) {
 	if (!string) {
 		return 0;
 	}
@@ -94,7 +163,7 @@ inline size_t EsCStringLength(const char *string) {
 	}
 }
 
-inline int EsStringCompareRaw(const char *s1, ptrdiff_t length1, const char *s2, ptrdiff_t length2) {
+int EsStringCompareRaw(const char *s1, ptrdiff_t length1, const char *s2, ptrdiff_t length2) {
 	if (length1 == -1) length1 = EsCStringLength(s1);
 	if (length2 == -1) length2 = EsCStringLength(s2);
 
@@ -283,9 +352,31 @@ struct Thread;
 struct Process;
 struct EsCrashReason;
 struct InterruptContext;
+struct NewProcessorStorage;
 
-extern "C" {
+extern "C" uintptr_t _KThreadTerminate;
+extern "C"
+{
+    void KernelLog(KLogLevel level, const char *subsystem, const char *event, const char *format, ...);
+    void KernelPanic(const char *format, ...);
+    void EsPrint(const char *format, ...);
+
+    void *EsHeapAllocate(size_t size, bool zeroMemory, EsHeap *kernelHeap);
+    void EsHeapFree(void *address, size_t expectedSize, EsHeap *kernelHeap);
+    void MMPhysicalActivatePages(uintptr_t pages, uintptr_t count, unsigned flags);
+    bool MMCommit(uint64_t bytes, bool fixed);
+    void PMCopy(uintptr_t page, void *_source, size_t pageCount);
+    uintptr_t ProcessorGetRSP();
+    uintptr_t ProcessorGetRBP();
+    void ProcessorDebugOutputByte(uint8_t byte);
+    void SetupProcessor2(NewProcessorStorage *storage);
+    void processorGDTR();
+    bool PostContextSwitch(InterruptContext *context, MMSpace *oldAddressSpace);
+    void InterruptHandler(InterruptContext *context);
+    uintptr_t Syscall(uintptr_t argument0, uintptr_t argument1, uintptr_t argument2, uintptr_t returnAddress, uintptr_t argument3, uintptr_t argument4, uintptr_t *userStackPointer);
+    void PCProcessMemoryMap();
     void ProcessorHalt();
+    void ProcessorInstallTSS(uint32_t *gdt, uint32_t *tss);
     bool ProcessorAreInterruptsEnabled();
     Thread* GetCurrentThread();
     void ProcessorEnableInterrupts();
@@ -299,73 +390,126 @@ extern "C" {
     void PCDisablePIC();
     void ProcessCrash(Process *process, EsCrashReason *crashReason);
     void MMInitialise();
-	void ArchInitialise();
-	void ArchShutdown();
-	void ArchNextTimer(size_t ms); // Schedule the next TIMER_INTERRUPT.
-	uint64_t ArchGetTimeMs(); // Called by the scheduler on the boot processor every context switch.
-	InterruptContext *ArchInitialiseThread(uintptr_t kernelStack, uintptr_t kernelStackSize, struct Thread *thread, 
-			uintptr_t startAddress, uintptr_t argument1, uintptr_t argument2,
-			bool userland, uintptr_t stack, uintptr_t userStackSize);
-	void ArchSwitchContext(struct InterruptContext *context, struct MMArchVAS *virtualAddressSpace, uintptr_t threadKernelStack, 
-			struct Thread *newThread, struct MMSpace *oldAddressSpace);
-	EsError ArchApplyRelocation(uintptr_t type, uint8_t *buffer, uintptr_t offset, uintptr_t result);
+    void ArchInitialise();
+    void ArchShutdown();
+    void ArchNextTimer(size_t ms); // Schedule the next TIMER_INTERRUPT.
+    uint64_t ArchGetTimeMs(); // Called by the scheduler on the boot processor every context switch.
+    InterruptContext *ArchInitialiseThread(uintptr_t kernelStack, uintptr_t kernelStackSize, struct Thread *thread, 
+            uintptr_t startAddress, uintptr_t argument1, uintptr_t argument2,
+            bool userland, uintptr_t stack, uintptr_t userStackSize);
+    void ArchSwitchContext(struct InterruptContext *context, struct MMArchVAS *virtualAddressSpace, uintptr_t threadKernelStack, 
+            struct Thread *newThread, struct MMSpace *oldAddressSpace);
+    EsError ArchApplyRelocation(uintptr_t type, uint8_t *buffer, uintptr_t offset, uintptr_t result);
 
-	bool MMArchMapPage(MMSpace *space, uintptr_t physicalAddress, uintptr_t virtualAddress, unsigned flags); // Returns false if the page was already mapped.
-	void MMArchUnmapPages(MMSpace *space, uintptr_t virtualAddressStart, uintptr_t pageCount, unsigned flags, size_t unmapMaximum = 0, uintptr_t *resumePosition = nullptr);
-	bool MMArchMakePageWritable(MMSpace *space, uintptr_t virtualAddress);
-	bool MMArchHandlePageFault(uintptr_t address, uint32_t flags);
-	bool MMArchIsBufferInUserRange(uintptr_t baseAddress, size_t byteCount);
-	bool MMArchSafeCopy(uintptr_t destinationAddress, uintptr_t sourceAddress, size_t byteCount); // Returns false if a page fault occured during the copy.
-	bool MMArchCommitPageTables(MMSpace *space, struct MMRegion *region);
-	bool MMArchInitialiseUserSpace(MMSpace *space, struct MMRegion *firstRegion);
-	void MMArchInitialise();
-	void MMArchFreeVAS(MMSpace *space);
-	void MMArchFinalizeVAS(MMSpace *space);
-	uintptr_t MMArchEarlyAllocatePage();
-	uint64_t MMArchPopulatePageFrameDatabase();
-	uintptr_t MMArchGetPhysicalMemoryHighest();
+    bool MMArchMapPage(MMSpace *space, uintptr_t physicalAddress, uintptr_t virtualAddress, unsigned flags); // Returns false if the page was already mapped.
+    void MMArchUnmapPages(MMSpace *space, uintptr_t virtualAddressStart, uintptr_t pageCount, unsigned flags, size_t unmapMaximum = 0, uintptr_t *resumePosition = nullptr);
+    bool MMArchMakePageWritable(MMSpace *space, uintptr_t virtualAddress);
+    bool MMArchHandlePageFault(uintptr_t address, uint32_t flags);
+    bool MMArchIsBufferInUserRange(uintptr_t baseAddress, size_t byteCount);
+    bool MMArchSafeCopy(uintptr_t destinationAddress, uintptr_t sourceAddress, size_t byteCount); // Returns false if a page fault occured during the copy.
+    bool MMArchCommitPageTables(MMSpace *space, struct MMRegion *region);
+    bool MMArchInitialiseUserSpace(MMSpace *space, struct MMRegion *firstRegion);
+    void MMArchInitialise();
+    void MMArchFreeVAS(MMSpace *space);
+    void MMArchFinalizeVAS(MMSpace *space);
+    uintptr_t MMArchEarlyAllocatePage();
+    uint64_t MMArchPopulatePageFrameDatabase();
+    uintptr_t MMArchGetPhysicalMemoryHighest();
 
-	void ProcessorDisableInterrupts();
-	void ProcessorEnableInterrupts();
-	bool ProcessorAreInterruptsEnabled();
-	void ProcessorHalt();
-	void ProcessorSendYieldIPI(Thread *thread);
-	void ProcessorFakeTimerInterrupt();
-	void ProcessorInvalidatePage(uintptr_t virtualAddress);
-	void ProcessorInvalidateAllPages();
-	void ProcessorFlushCodeCache();
-	void ProcessorFlushCache();
-	void ProcessorSetLocalStorage(struct CPULocalStorage *cls);
-	void ProcessorSetThreadStorage(uintptr_t tls);
-	void ProcessorSetAddressSpace(struct MMArchVAS *virtualAddressSpace); // Need to call MMSpaceOpenReference/MMSpaceCloseReference if using this.
-	uint64_t ProcessorReadTimeStamp();
+    void ProcessorDisableInterrupts();
+    void ProcessorEnableInterrupts();
+    bool ProcessorAreInterruptsEnabled();
+    void ProcessorHalt();
+    void ProcessorSendYieldIPI(Thread *thread);
+    void ProcessorFakeTimerInterrupt();
+    void ProcessorInvalidatePage(uintptr_t virtualAddress);
+    void ProcessorInvalidateAllPages();
+    void ProcessorFlushCodeCache();
+    void ProcessorFlushCache();
+    void ProcessorSetLocalStorage(struct CPULocalStorage *cls);
+    void ProcessorSetThreadStorage(uintptr_t tls);
+    void ProcessorSetAddressSpace(struct MMArchVAS *virtualAddressSpace); // Need to call MMSpaceOpenReference/MMSpaceCloseReference if using this.
+    uint64_t ProcessorReadTimeStamp();
 
-	struct CPULocalStorage *GetLocalStorage();
-	struct Thread *GetCurrentThread();
+    struct CPULocalStorage *GetLocalStorage();
+    struct Thread *GetCurrentThread();
     void MMSpaceCloseReference(MMSpace* space);
     void KThreadTerminate();
     void ThreadSetTemporaryAddressSpace(MMSpace *space);
     void ProcessKill(Process* process);
 
 
-	// From module.h: 
-	// uintptr_t MMArchTranslateAddress(MMSpace *space, uintptr_t virtualAddress, bool writeAccess); 
-	// uint32_t KPCIReadConfig(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset, int size);
-	// void KPCIWriteConfig(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset, uint32_t value, int size);
-	// bool KRegisterIRQ(intptr_t interruptIndex, KIRQHandler handler, void *context, const char *cOwnerName, struct KPCIDevice *pciDevice);
-	// KMSIInformation KRegisterMSI(KIRQHandler handler, void *context, const char *cOwnerName);
-	// void KUnregisterMSI(uintptr_t tag);
-	// size_t KGetCPUCount();
-	// struct CPULocalStorage *KGetCPULocal(uintptr_t index);
-	// ProcessorOut/ProcessorIn functions.
+    // From module.h: 
+    // uintptr_t MMArchTranslateAddress(MMSpace *space, uintptr_t virtualAddress, bool writeAccess); 
+    // uint32_t KPCIReadConfig(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset, int size);
+    // void KPCIWriteConfig(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset, uint32_t value, int size);
+    // bool KRegisterIRQ(intptr_t interruptIndex, KIRQHandler handler, void *context, const char *cOwnerName, struct KPCIDevice *pciDevice);
+    // KMSIInformation KRegisterMSI(KIRQHandler handler, void *context, const char *cOwnerName);
+    // void KUnregisterMSI(uintptr_t tag);
+    // size_t KGetCPUCount();
+    // struct CPULocalStorage *KGetCPULocal(uintptr_t index);
+    // ProcessorOut/ProcessorIn functions.
 
-	// The architecture layer must also define:
-	// - MM_CORE_REGIONS_START and MM_CORE_REGIONS_COUNT.
-	// - MM_KERNEL_SPACE_START and MM_KERNEL_SPACE_SIZE.
-	// - MM_MODULES_START and MM_MODULES_SIZE.
-	// - ArchCheckBundleHeader and ArchCheckELFHeader.
-	// - K_ARCH_STACK_GROWS_DOWN or K_ARCH_STACK_GROWS_UP.
-	// - K_ARCH_NAME.
+    // The architecture layer must also define:
+    // - MM_CORE_REGIONS_START and MM_CORE_REGIONS_COUNT.
+    // - MM_KERNEL_SPACE_START and MM_KERNEL_SPACE_SIZE.
+    // - MM_MODULES_START and MM_MODULES_SIZE.
+    // - ArchCheckBundleHeader and ArchCheckELFHeader.
+    // - K_ARCH_STACK_GROWS_DOWN or K_ARCH_STACK_GROWS_UP.
+    // - K_ARCH_NAME.
+}
+
+void EsMemoryCopyReverse(void *_destination, void *_source, size_t bytes) {
+	// TODO Prevent this from being optimised out in the kernel.
+
+	if (!bytes) {
+		return;
+	}
+
+	uint8_t *destination = (uint8_t *) _destination;
+	uint8_t *source = (uint8_t *) _source;
+
+	destination += bytes - 1;
+	source += bytes - 1;
+
+	while (bytes >= 1) {
+		((uint8_t *) destination)[0] = ((uint8_t *) source)[0];
+
+		source -= 1;
+		destination -= 1;
+		bytes -= 1;
+	}
+}
+
+
+void EsMemoryMove(void *_start, void *_end, intptr_t amount, bool zeroEmptySpace) {
+	// TODO Prevent this from being optimised out in the kernel.
+
+	uint8_t *start = (uint8_t *) _start;
+	uint8_t *end = (uint8_t *) _end;
+
+	if (end < start) {
+		EsPrint("MemoryMove end < start: %x %x %x %d\n", start, end, amount, zeroEmptySpace);
+		return;
+	}
+
+	if (amount > 0) {
+		EsMemoryCopyReverse(start + amount, start, end - start);
+
+		if (zeroEmptySpace) {
+			EsMemoryZero(start, amount);
+		}
+	} else if (amount < 0) {
+		EsMemoryCopy(start + amount, start, end - start);
+
+		if (zeroEmptySpace) {
+			EsMemoryZero(end + amount, -amount);
+		}
+	}
+}
+
+void EsAssertionFailure(const char *file, int line) {
+	KernelPanic("%z:%d - EsAssertionFailure called.\n", file, line);
 }
 
 union EsGeneric {
@@ -433,7 +577,7 @@ template <typename F> _EsDefer4<F> _EsDeferFunction(F f) { return _EsDefer4<F>(f
 #define EsDefer(code) _EsDefer5(code)
 
 
-void EsPanic(const char*, ...);
+#define EsPanic KernelPanic
 
 template <class T>
 T RoundDown(T value, T divisor) {
@@ -1121,23 +1265,730 @@ struct KMutex { // Mutual exclusion. Thread-owned.
 	LinkedList<struct Thread> blockedThreads;
 };
 
+#ifdef DEBUG_BUILD
+bool _KMutexAcquire(KMutex *mutex, const char *cMutexString, const char *cFile, int line);
+void _KMutexRelease(KMutex *mutex, const char *cMutexString, const char *cFile, int line);
+#define KMutexAcquire(mutex) _KMutexAcquire(mutex, #mutex, __FILE__, __LINE__)
+#define KMutexRelease(mutex) _KMutexRelease(mutex, #mutex, __FILE__, __LINE__)
+#else
 bool KMutexAcquire(KMutex *mutex);
 void KMutexRelease(KMutex *mutex);
+#endif
 void KMutexAssertLocked(KMutex *mutex);
 
 #define PHYSICAL_MEMORY_MANIPULATION_REGION_PAGES (16)
 #define POOL_CACHE_COUNT                          (16)
+struct CPULocalStorage {
+	struct Thread *currentThread;          // The currently executing thread on this CPU.
+	struct Thread *idleThread;             // The CPU's idle thread.
+	struct Thread *asyncTaskThread;        // The CPU's async task thread, used to process the asyncTaskList.
+	struct InterruptContext *panicContext; // The interrupt context saved from a kernel panic IPI.
+	bool irqSwitchThread;                  // The CPU should call Scheduler::Yield after the IRQ handler exits.
+	bool schedulerReady;                   // The CPU is ready to execute threads from the pre-emptive scheduler.
+	bool inIRQ;                            // The CPU is currently executing an IRQ handler registered with KRegisterIRQ.
+	bool inAsyncTask;                      // The CPU is currently executing an asynchronous task.
+	uint32_t processorID;                  // The scheduler's ID for the process.
+	size_t spinlockCount;                  // The number of spinlocks currently acquired.
+	struct ArchCPU *archCPU;               // The architecture layer's data for the CPU.
+	SimpleList asyncTaskList;              // The list of AsyncTasks to be processed.
+};
+
+
+struct KSpinlock { // Mutual exclusion. CPU-owned. Disables interrupts. The only synchronisation primitive that can be acquired with interrupts disabled.
+	volatile uint8_t state, ownerCPU;
+	volatile bool interruptsEnabled;
+#ifdef DEBUG_BUILD
+	struct Thread *volatile owner;
+	volatile uintptr_t acquireAddress, releaseAddress;
+#endif
+};
+
+void KSpinlockAcquire(KSpinlock *spinlock);
+void KSpinlockRelease(KSpinlock *spinlock, bool force = false);
+void KSpinlockAssertLocked(KSpinlock *spinlock);
+
 
 
 struct Pool {
-	void *Add(size_t elementSize); 		// Aligned to the size of a pointer.
-	void Remove(void *element);
+    void *Add(size_t _elementSize) { 		// Aligned to the size of a pointer.
+        KMutexAcquire(&mutex);
+        EsDefer(KMutexRelease(&mutex));
+
+        if (elementSize && _elementSize != elementSize) KernelPanic("Pool::Add - Pool element size mismatch.\n");
+        elementSize = _elementSize;
+
+        void *address;
+
+        if (cacheEntries) {
+            address = cache[--cacheEntries];
+            EsMemoryZero(address, elementSize);
+        } else {
+            address = EsHeapAllocate(elementSize, true, K_FIXED);
+        }
+
+        return address;
+
+    }
+    void Remove(void *address) {
+
+        KMutexAcquire(&mutex);
+        EsDefer(KMutexRelease(&mutex));
+
+        if (!address) return;
+
+#if 1
+        if (cacheEntries == POOL_CACHE_COUNT) {
+            EsHeapFree(address, elementSize, K_FIXED);
+        } else {
+            cache[cacheEntries++] = address;
+        }
+#else
+        EsHeapFree(address, elementSize);
+#endif
+    }
 
 	size_t elementSize;
 	void *cache[POOL_CACHE_COUNT];
 	size_t cacheEntries;
 	KMutex mutex;
 };
+
+struct KEvent { // Waiting and notifying. Can wait on multiple at once. Can be set and reset with interrupts disabled.
+	volatile bool autoReset; // This should be first field in the structure, so that the type of KEvent can be easily declared with {autoReset}.
+	volatile uintptr_t state;
+	LinkedList<Thread> blockedThreads;
+	volatile size_t handles;
+};
+
+bool KEventSet(KEvent *event, bool maybeAlreadySet = false);
+void KEventReset(KEvent *event); 
+bool KEventPoll(KEvent *event); // TODO Remove this! Currently it is only used by KAudioFillBuffersFromMixer.
+bool KEventWait(KEvent *event, uint64_t timeoutMs = ES_WAIT_NO_TIMEOUT); // See KEventWaitMultiple to wait for multiple events. Returns false if the wait timed out.
+
+#ifdef DEBUG_BUILD
+#define MAYBE_VALIDATE_HEAP() HeapValidate(&heap)
+#else
+#define MAYBE_VALIDATE_HEAP() 
+#endif
+
+#ifndef KERNEL
+// #define MEMORY_LEAK_DETECTOR
+#endif
+
+#define LARGE_ALLOCATION_THRESHOLD (32768)
+#define USED_HEAP_REGION_MAGIC (0xABCD)
+
+struct HeapRegion {
+	union {
+		uint16_t next;
+		uint16_t size;
+	};
+
+	uint16_t previous;
+	uint16_t offset;
+	uint16_t used;
+
+	union {
+		uintptr_t allocationSize;
+
+		// Valid if the region is not in use.
+		HeapRegion *regionListNext;
+	};
+
+	// Free regions only:
+	HeapRegion **regionListReference;
+#define USED_HEAP_REGION_HEADER_SIZE (sizeof(HeapRegion) - sizeof(HeapRegion **))
+#define FREE_HEAP_REGION_HEADER_SIZE (sizeof(HeapRegion))
+};
+
+static uintptr_t HeapCalculateIndex(uintptr_t size) {
+	int x = __builtin_clz(size);
+	uintptr_t msb = sizeof(unsigned int) * 8 - x - 1;
+	return msb - 4;
+}
+
+#ifdef MEMORY_LEAK_DETECTOR
+extern "C" uint64_t ProcessorGetRBP();
+
+struct MemoryLeakDetectorEntry {
+	void *address;
+	size_t bytes;
+	uintptr_t stack[8];
+	size_t seenCount;
+};
+#else
+#define MemoryLeakDetectorAdd(...)
+#define MemoryLeakDetectorRemove(...)
+#define MemoryLeakDetectorCheckpoint(...)
+#endif
+
+struct EsHeap {
+#ifdef KERNEL
+	KMutex mutex;
+#else
+	EsMutex mutex;
+#endif
+
+	HeapRegion *regions[12];
+	volatile size_t allocationsCount, size, blockCount;
+	void *blocks[16];
+
+	bool cannotValidate;
+
+#ifdef MEMORY_LEAK_DETECTOR
+	MemoryLeakDetectorEntry leakDetectorEntries[4096];
+#endif
+};
+
+// TODO Better heap panic messages.
+#define HEAP_PANIC(n, x, y) EsPanic("Heap panic (%d/%x/%x).\n", n, x, y)
+
+#ifdef KERNEL
+EsHeap heapCore, heapFixed;
+#define HEAP_ACQUIRE_MUTEX(a) KMutexAcquire(&(a))
+#define HEAP_RELEASE_MUTEX(a) KMutexRelease(&(a))
+#define HEAP_ALLOCATE_CALL(x) MMStandardAllocate(_heap == &heapCore ? coreMMSpace : kernelMMSpace, x, MM_REGION_FIXED)
+#define HEAP_FREE_CALL(x) MMFree(_heap == &heapCore ? coreMMSpace : kernelMMSpace, x)
+#else
+EsHeap heap;
+#define HEAP_ACQUIRE_MUTEX(a) EsMutexAcquire(&(a))
+#define HEAP_RELEASE_MUTEX(a) EsMutexRelease(&(a))
+#define HEAP_ALLOCATE_CALL(x) EsMemoryReserve(x)
+#define HEAP_FREE_CALL(x) EsMemoryUnreserve(x)
+#endif
+
+#define HEAP_REGION_HEADER(region) ((HeapRegion *) ((uint8_t *) region - USED_HEAP_REGION_HEADER_SIZE))
+#define HEAP_REGION_DATA(region) ((uint8_t *) region + USED_HEAP_REGION_HEADER_SIZE)
+#define HEAP_REGION_NEXT(region) ((HeapRegion *) ((uint8_t *) region + region->next))
+#define HEAP_REGION_PREVIOUS(region) (region->previous ? ((HeapRegion *) ((uint8_t *) region - region->previous)) : nullptr)
+
+#ifdef USE_PLATFORM_HEAP
+void *PlatformHeapAllocate(size_t size, bool zero);
+void PlatformHeapFree(void *address);
+void *PlatformHeapReallocate(void *oldAddress, size_t newAllocationSize, bool zeroNewSpace);
+#endif
+
+#ifdef MEMORY_LEAK_DETECTOR
+static void MemoryLeakDetectorAdd(EsHeap *heap, void *address, size_t bytes) {
+	if (!address || !bytes) {
+		return;
+	}
+
+	for (uintptr_t i = 0; i < sizeof(heap->leakDetectorEntries) / sizeof(heap->leakDetectorEntries[0]); i++) {
+		MemoryLeakDetectorEntry *entry = &heap->leakDetectorEntries[i];
+
+		if (entry->address) {
+			continue;
+		}
+
+		entry->address = address;
+		entry->bytes = bytes;
+		entry->seenCount = 0;
+
+		uint64_t rbp = ProcessorGetRBP();
+		uintptr_t traceDepth = 0;
+
+		while (rbp && traceDepth < sizeof(entry->stack) / sizeof(entry->stack[0])) {
+			uint64_t value = *(uint64_t *) (rbp + 8);
+			entry->stack[traceDepth++] = value;
+			if (!value) break;
+			rbp = *(uint64_t *) rbp;
+		}
+
+		break;
+	}
+}
+
+static void MemoryLeakDetectorRemove(EsHeap *heap, void *address) {
+	if (!address) {
+		return;
+	}
+
+	for (uintptr_t i = 0; i < sizeof(heap->leakDetectorEntries) / sizeof(heap->leakDetectorEntries[0]); i++) {
+		if (heap->leakDetectorEntries[i].address == address) {
+			heap->leakDetectorEntries[i].address = nullptr;
+			break;
+		}
+	}
+}
+
+static void MemoryLeakDetectorCheckpoint(EsHeap *heap) {
+	EsPrint("--- MemoryLeakDetectorCheckpoint ---\n");
+
+	for (uintptr_t i = 0; i < sizeof(heap->leakDetectorEntries) / sizeof(heap->leakDetectorEntries[0]); i++) {
+		MemoryLeakDetectorEntry *entry = &heap->leakDetectorEntres[i];
+		if (!entry->address) continue;
+		entry->seenCount++;
+		EsPrint("  %d %d %x %d\n", i, entry->seenCount, entry->address, entry->bytes);
+	}
+}
+#endif
+
+static void HeapRemoveFreeRegion(HeapRegion *region) {
+	if (!region->regionListReference || region->used) {
+		HEAP_PANIC(50, region, 0);
+	}
+
+	*region->regionListReference = region->regionListNext;
+
+	if (region->regionListNext) {
+		region->regionListNext->regionListReference = region->regionListReference;
+	}
+
+	region->regionListReference = nullptr;
+}
+
+static void HeapAddFreeRegion(HeapRegion *region, HeapRegion **heapRegions) {
+	if (region->used || region->size < 32) {
+		HEAP_PANIC(1, region, heapRegions);
+	}
+
+	int index = HeapCalculateIndex(region->size);
+	region->regionListNext = heapRegions[index];
+	if (region->regionListNext) region->regionListNext->regionListReference = &region->regionListNext;
+	heapRegions[index] = region;
+	region->regionListReference = heapRegions + index;
+}
+
+static void HeapValidate(EsHeap *heap) {
+	if (heap->cannotValidate) return;
+
+	for (uintptr_t i = 0; i < heap->blockCount; i++) {
+		HeapRegion *start = (HeapRegion *) heap->blocks[i];
+		if (!start) continue;
+
+		HeapRegion *end = (HeapRegion *) ((uint8_t *) heap->blocks[i] + 65536);
+		HeapRegion *previous = nullptr;
+		HeapRegion *region = start;
+
+		while (region < end) {
+			if (previous && previous != HEAP_REGION_PREVIOUS(region)) {
+				HEAP_PANIC(21, previous, region);
+			}
+
+			if (!previous && region->previous) {
+				HEAP_PANIC(23, previous, region);
+			}
+
+			if (region->size & 31) {
+				HEAP_PANIC(51, region, start);
+			}
+
+			if ((char *) region - (char *) start != region->offset) {
+				HEAP_PANIC(22, region, start);
+			}
+
+			if (region->used != USED_HEAP_REGION_MAGIC && region->used != 0x0000) {
+				HEAP_PANIC(24, region, region->used);
+			}
+
+			if (region->used == 0x0000 && !region->regionListReference) {
+				HEAP_PANIC(25, region, region->regionListReference);
+			}
+
+			if (region->used == 0x0000 && region->regionListNext && region->regionListNext->regionListReference != &region->regionListNext) {
+				HEAP_PANIC(26, region->regionListNext, region);
+			}
+				
+			previous = region;
+			region = HEAP_REGION_NEXT(region);
+		}
+
+		if (region != end) {
+			HEAP_PANIC(20, region, end);
+		}
+	}
+}
+
+static void HeapPrintAllocatedRegions(EsHeap *heap) {
+	EsPrint("--- Heap (%d allocations, %d bytes, %d blocks) ---\n", heap->allocationsCount, heap->size, heap->blockCount);
+	HeapValidate(heap);
+	if (heap->cannotValidate) return;
+
+	for (uintptr_t i = 0; i < heap->blockCount; i++) {
+		HeapRegion *start = (HeapRegion *) heap->blocks[i];
+		if (!start) continue;
+
+		HeapRegion *end = (HeapRegion *) ((uint8_t *) heap->blocks[i] + 65536);
+		HeapRegion *region = start;
+
+		while (region < end) {
+			if (region->used == USED_HEAP_REGION_MAGIC) {
+				EsPrint("%x %d\n", HEAP_REGION_DATA(region), region->size);
+			}
+
+			region = HEAP_REGION_NEXT(region);
+		}
+	}
+
+	MemoryLeakDetectorCheckpoint(heap);
+}
+
+void *EsHeapAllocate(size_t size, bool zeroMemory, EsHeap *_heap) {
+#ifndef KERNEL
+	if (!_heap) _heap = &heap;
+#endif
+	EsHeap &heap = *(EsHeap *) _heap;
+	if (!size) return nullptr;
+
+#ifdef USE_PLATFORM_HEAP
+	return PlatformHeapAllocate(size, zeroMemory);
+#endif
+
+	size_t largeAllocationThreshold = LARGE_ALLOCATION_THRESHOLD;
+
+#ifndef KERNEL
+	// EsPrint("Allocate: %d\n", size);
+#else
+	// EsPrint("%z: %d\n", mmvmm ? "CORE" : "KERN", size);
+#endif
+
+	size_t originalSize = size;
+
+	if ((ptrdiff_t) size < 0) {
+		HEAP_PANIC(0, 0, 0);
+	}
+
+	size += USED_HEAP_REGION_HEADER_SIZE; // Region metadata.
+	size = (size + 0x1F) & ~0x1F; // Allocation granularity: 32 bytes.
+
+	if (size >= largeAllocationThreshold) {
+		// This is a very large allocation, so allocate it by itself.
+		// We don't need to zero this memory. (It'll be done by the PMM).
+		HeapRegion *region = (HeapRegion *) HEAP_ALLOCATE_CALL(size);
+		if (!region) return nullptr; 
+		region->used = USED_HEAP_REGION_MAGIC;
+		region->size = 0;
+		region->allocationSize = originalSize;
+		__sync_fetch_and_add(&heap.size, originalSize);
+		MemoryLeakDetectorAdd(&heap, HEAP_REGION_DATA(region), originalSize);
+		return HEAP_REGION_DATA(region);
+	}
+
+	HEAP_ACQUIRE_MUTEX(heap.mutex);
+
+	MAYBE_VALIDATE_HEAP();
+
+	HeapRegion *region = nullptr;
+
+	for (int i = HeapCalculateIndex(size); i < 12; i++) {
+		if (heap.regions[i] == nullptr || heap.regions[i]->size < size) {
+			continue;
+		}
+
+		region = heap.regions[i];
+		HeapRemoveFreeRegion(region);
+		goto foundRegion;
+	}
+
+	region = (HeapRegion *) HEAP_ALLOCATE_CALL(65536);
+	if (heap.blockCount < 16) heap.blocks[heap.blockCount] = region;
+	else heap.cannotValidate = true;
+	heap.blockCount++;
+	if (!region) {
+		HEAP_RELEASE_MUTEX(heap.mutex);
+		return nullptr; 
+	}
+	region->size = 65536 - 32;
+
+	// Prevent EsHeapFree trying to merge off the end of the block.
+	{
+		HeapRegion *endRegion = HEAP_REGION_NEXT(region);
+		endRegion->used = USED_HEAP_REGION_MAGIC;
+		endRegion->offset = 65536 - 32;
+		endRegion->next = 32;
+		*((EsHeap **) HEAP_REGION_DATA(endRegion)) = &heap;
+	}
+
+	foundRegion:
+
+	if (region->used || region->size < size) {
+		HEAP_PANIC(4, region, size);
+	}
+
+	heap.allocationsCount++;
+	__sync_fetch_and_add(&heap.size, size);
+
+	if (region->size == size) {
+		// If the size of this region is equal to the size of the region we're trying to allocate,
+		// return this region immediately.
+		region->used = USED_HEAP_REGION_MAGIC;
+		region->allocationSize = originalSize;
+		HEAP_RELEASE_MUTEX(heap.mutex);
+		uint8_t *address = (uint8_t *) HEAP_REGION_DATA(region);
+		if (zeroMemory) EsMemoryZero(address, originalSize);
+#ifdef DEBUG_BUILD
+		else EsMemoryFill(address, (uint8_t *) address + originalSize, 0xA1);
+#endif
+		MemoryLeakDetectorAdd(&heap, address, originalSize);
+		return address;
+	}
+
+	// Split the region into 2 parts.
+	
+	HeapRegion *allocatedRegion = region;
+	size_t oldSize = allocatedRegion->size;
+	allocatedRegion->size = size;
+	allocatedRegion->used = USED_HEAP_REGION_MAGIC;
+
+	HeapRegion *freeRegion = HEAP_REGION_NEXT(allocatedRegion);
+	freeRegion->size = oldSize - size;
+	freeRegion->previous = size;
+	freeRegion->offset = allocatedRegion->offset + size;
+	freeRegion->used = false;
+	HeapAddFreeRegion(freeRegion, heap.regions);
+
+	HeapRegion *nextRegion = HEAP_REGION_NEXT(freeRegion);
+	nextRegion->previous = freeRegion->size;
+
+	MAYBE_VALIDATE_HEAP();
+
+	region->allocationSize = originalSize;
+
+	HEAP_RELEASE_MUTEX(heap.mutex);
+
+	void *address = HEAP_REGION_DATA(region);
+
+	if (zeroMemory) EsMemoryZero(address, originalSize);
+#ifdef DEBUG_BUILD
+	else EsMemoryFill(address, (uint8_t *) address + originalSize, 0xA1);
+#endif
+
+	MemoryLeakDetectorAdd(&heap, address, originalSize);
+	return address;
+}
+
+void EsHeapFree(void *address, size_t expectedSize, EsHeap *_heap) {
+#ifndef KERNEL
+	if (!_heap) _heap = &heap;
+#endif
+	EsHeap &heap = *(EsHeap *) _heap;
+
+	if (!address && expectedSize) HEAP_PANIC(10, address, expectedSize);
+	if (!address) return;
+
+#ifdef USE_PLATFORM_HEAP
+	PlatformHeapFree(address);
+	return;
+#endif
+
+	MemoryLeakDetectorRemove(&heap, address);
+
+	HeapRegion *region = HEAP_REGION_HEADER(address);
+	if (region->used != USED_HEAP_REGION_MAGIC) HEAP_PANIC(region->used, region, nullptr);
+	if (expectedSize && region->allocationSize != expectedSize) HEAP_PANIC(6, region, expectedSize);
+
+	if (!region->size) {
+		// The region was allocated by itself.
+		__sync_fetch_and_sub(&heap.size, region->allocationSize);
+		HEAP_FREE_CALL(region);
+		return;
+	}
+
+#ifdef DEBUG_BUILD
+	EsMemoryFill(address, (uint8_t *) address + region->allocationSize, 0xB1);
+#endif
+
+	// Check this is the correct heap.
+
+	if (*(EsHeap **) HEAP_REGION_DATA((uint8_t *) region - region->offset + 65536 - 32) != &heap) {
+		HEAP_PANIC(52, address, 0);
+	}
+
+	HEAP_ACQUIRE_MUTEX(heap.mutex);
+
+	MAYBE_VALIDATE_HEAP();
+
+	region->used = false;
+
+	if (region->offset < region->previous) {
+		HEAP_PANIC(31, address, 0);
+	}
+
+	heap.allocationsCount--;
+	__sync_fetch_and_sub(&heap.size, region->size);
+
+	// Attempt to merge with the next region.
+
+	HeapRegion *nextRegion = HEAP_REGION_NEXT(region);
+
+	if (nextRegion && !nextRegion->used) {
+		HeapRemoveFreeRegion(nextRegion);
+
+		// Merge the regions.
+		region->size += nextRegion->size;
+		HEAP_REGION_NEXT(nextRegion)->previous = region->size;
+	}
+
+	// Attempt to merge with the previous region.
+
+	HeapRegion *previousRegion = HEAP_REGION_PREVIOUS(region);
+
+	if (previousRegion && !previousRegion->used) {
+		HeapRemoveFreeRegion(previousRegion);
+
+		// Merge the regions.
+		previousRegion->size += region->size;
+		HEAP_REGION_NEXT(region)->previous = previousRegion->size;
+		region = previousRegion;
+	}
+
+	if (region->size == 65536 - 32) {
+		if (region->offset) HEAP_PANIC(7, region, region->offset);
+
+		// The memory block is empty.
+		heap.blockCount--;
+
+		if (!heap.cannotValidate) {
+			bool found = false;
+
+			for (uintptr_t i = 0; i <= heap.blockCount; i++) {
+				if (heap.blocks[i] == region) {
+					heap.blocks[i] = heap.blocks[heap.blockCount];
+					found = true;
+					break;
+				}
+			}
+
+			EsAssert(found);
+		}
+
+		HEAP_FREE_CALL(region);
+		HEAP_RELEASE_MUTEX(heap.mutex);
+		return;
+	}
+
+	// Put the free region in the region list.
+	HeapAddFreeRegion(region, heap.regions);
+
+	MAYBE_VALIDATE_HEAP();
+
+	HEAP_RELEASE_MUTEX(heap.mutex);
+}
+
+void *EsHeapReallocate(void *oldAddress, size_t newAllocationSize, bool zeroNewSpace, EsHeap *_heap) {
+#ifndef KERNEL
+	if (!_heap) _heap = &heap;
+#endif
+	EsHeap &heap = *(EsHeap *) _heap;
+
+	/*
+		Test with:
+			void *a = EsHeapReallocate(nullptr, 128, true);
+			a = EsHeapReallocate(a, 256, true);
+			a = EsHeapReallocate(a, 128, true);
+			a = EsHeapReallocate(a, 65536, true);
+			a = EsHeapReallocate(a, 128, true);
+			a = EsHeapReallocate(a, 128, true);
+			void *b = EsHeapReallocate(nullptr, 64, true);
+			void *c = EsHeapReallocate(nullptr, 64, true);
+			EsHeapReallocate(b, 0, true);
+			a = EsHeapReallocate(a, 128 + 88, true);
+			a = EsHeapReallocate(a, 128, true);
+			EsHeapReallocate(a, 0, true);
+			EsHeapReallocate(c, 0, true);
+	*/
+
+	if (!oldAddress) {
+		return EsHeapAllocate(newAllocationSize, zeroNewSpace, _heap);
+	} else if (!newAllocationSize) {
+		EsHeapFree(oldAddress, 0, _heap);
+		return nullptr;
+	}
+
+#ifdef USE_PLATFORM_HEAP
+	return PlatformHeapReallocate(oldAddress, newAllocationSize, zeroNewSpace);
+#endif
+
+	HeapRegion *region = HEAP_REGION_HEADER(oldAddress);
+
+	if (region->used != USED_HEAP_REGION_MAGIC) {
+		HEAP_PANIC(region->used, region, nullptr);
+	}
+
+	size_t oldAllocationSize = region->allocationSize;
+	size_t oldRegionSize = region->size;
+	size_t newRegionSize = (newAllocationSize + USED_HEAP_REGION_HEADER_SIZE + 0x1F) & ~0x1F;
+	void *newAddress = oldAddress;
+	bool inHeapBlock = region->size;
+	bool canMerge = true;
+
+	if (inHeapBlock) {
+		HEAP_ACQUIRE_MUTEX(heap.mutex);
+		MAYBE_VALIDATE_HEAP();
+
+		HeapRegion *adjacent = HEAP_REGION_NEXT(region);
+
+		if (oldRegionSize < newRegionSize) {
+			if (!adjacent->used && newRegionSize < oldRegionSize + adjacent->size - FREE_HEAP_REGION_HEADER_SIZE) {
+				HeapRegion *post = HEAP_REGION_NEXT(adjacent);
+				HeapRemoveFreeRegion(adjacent);
+				region->size = newRegionSize;
+				adjacent = HEAP_REGION_NEXT(region);
+				adjacent->next = (uint8_t *) post - (uint8_t *) adjacent;
+				adjacent->used = 0;
+				adjacent->offset = region->offset + region->size;
+				post->previous = adjacent->next;
+				adjacent->previous = region->next;
+				HeapAddFreeRegion(adjacent, heap.regions);
+			} else if (!adjacent->used && newRegionSize <= oldRegionSize + adjacent->size) {
+				HeapRegion *post = HEAP_REGION_NEXT(adjacent);
+				HeapRemoveFreeRegion(adjacent);
+				region->size = newRegionSize;
+				post->previous = region->next;
+			} else {
+				canMerge = false;
+			}
+		} else if (newRegionSize < oldRegionSize) {
+			if (!adjacent->used) {
+				HeapRegion *post = HEAP_REGION_NEXT(adjacent);
+				HeapRemoveFreeRegion(adjacent);
+				region->size = newRegionSize;
+				adjacent = HEAP_REGION_NEXT(region);
+				adjacent->next = (uint8_t *) post - (uint8_t *) adjacent;
+				adjacent->used = 0;
+				adjacent->offset = region->offset + region->size;
+				post->previous = adjacent->next;
+				adjacent->previous = region->next;
+				HeapAddFreeRegion(adjacent, heap.regions);
+			} else if (newRegionSize + USED_HEAP_REGION_HEADER_SIZE <= oldRegionSize) {
+				region->size = newRegionSize;
+				HeapRegion *middle = HEAP_REGION_NEXT(region);
+				middle->size = oldRegionSize - newRegionSize;
+				middle->used = 0;
+				middle->previous = region->size;
+				middle->offset = region->offset + region->size;
+				adjacent->previous = middle->size;
+				HeapAddFreeRegion(middle, heap.regions);
+			}
+		}
+
+		MAYBE_VALIDATE_HEAP();
+		HEAP_RELEASE_MUTEX(heap.mutex);
+	} else {
+		canMerge = false;
+	}
+
+	if (!canMerge) {
+		newAddress = EsHeapAllocate(newAllocationSize, false, _heap);
+		EsMemoryCopy(newAddress, oldAddress, oldAllocationSize > newAllocationSize ? newAllocationSize : oldAllocationSize);
+		EsHeapFree(oldAddress, 0, _heap);
+	} else {
+		HEAP_REGION_HEADER(newAddress)->allocationSize = newAllocationSize;
+		__sync_fetch_and_add(&heap.size, newRegionSize - oldRegionSize);
+	}
+
+	if (zeroNewSpace && newAllocationSize > oldAllocationSize) {
+		EsMemoryZero((uint8_t *) newAddress + oldAllocationSize, newAllocationSize - oldAllocationSize);
+	}
+	return newAddress;
+}
+
+#ifndef KERNEL
+void EsHeapValidate() {
+	HeapValidate(&heap);
+
+#endif
 
 enum EsSyscallType {
 	// Memory.
@@ -1297,11 +2148,6 @@ enum EsSyscallType {
 
 
 
-#define K_CORE (&heapCore)
-#define K_FIXED (&heapFixed)
-struct EsHeap;
-extern EsHeap heapCore;
-extern EsHeap heapFixed;
 
 #define MM_HANDLE_PAGE_FAULT_WRITE 		(1 << 0)
 #define MM_HANDLE_PAGE_FAULT_LOCK_ACQUIRED	(1 << 1)
@@ -1347,16 +2193,110 @@ struct _ArrayHeader {
 	size_t length, allocated;
 };
 
-bool _ArrayEnsureAllocated(void **array, size_t minimumAllocated, size_t itemSize, uint8_t additionalHeaderBytes, EsHeap *heap);
-bool _ArraySetLength(void **array, size_t newLength, size_t itemSize, uint8_t additionalHeaderBytes, EsHeap *heap);
-void _ArrayDelete(void *array, uintptr_t position, size_t itemSize, size_t count);
-void _ArrayDeleteSwap(void *array, uintptr_t position, size_t itemSize);
-void *_ArrayInsert(void **array, const void *item, size_t itemSize, ptrdiff_t position, uint8_t additionalHeaderBytes, EsHeap *heap);
-void *_ArrayInsertMany(void **array, size_t itemSize, ptrdiff_t position, size_t count, EsHeap *heap);
-void _ArrayFree(void **array, size_t itemSize, EsHeap *heap);
-
 #define ArrayHeader(array) ((_ArrayHeader *) (array) - 1)
 #define ArrayLength(array) ((array) ? (ArrayHeader(array)->length) : 0)
+
+bool _ArrayMaybeInitialise(void **array, size_t itemSize, EsHeap *heap) {
+	if (*array) return true;
+	size_t newLength = 4;
+	_ArrayHeader *header = (_ArrayHeader *) EsHeapAllocate(sizeof(_ArrayHeader) + itemSize * newLength, true, heap);
+	if (!header) return false;
+	header->length = 0;
+	header->allocated = newLength;
+	*array = header + 1;
+	return true;
+}
+
+bool _ArrayEnsureAllocated(void **array, size_t minimumAllocated, size_t itemSize, uint8_t additionalHeaderBytes, EsHeap *heap) {
+	if (!_ArrayMaybeInitialise(array, itemSize, heap)) {
+		return false;
+	}
+
+	_ArrayHeader *oldHeader = ArrayHeader(*array);
+
+	if (oldHeader->allocated >= minimumAllocated) {
+		return true;
+	}
+
+	_ArrayHeader *newHeader = (_ArrayHeader *) EsHeapReallocate((uint8_t *) oldHeader - additionalHeaderBytes, 
+			sizeof(_ArrayHeader) + additionalHeaderBytes + itemSize * minimumAllocated, false, heap);
+
+	if (!newHeader) {
+		return false;
+	}
+
+	newHeader->allocated = minimumAllocated;
+	*array = (uint8_t *) (newHeader + 1) + additionalHeaderBytes;
+	return true;
+}
+
+bool _ArraySetLength(void **array, size_t newLength, size_t itemSize, uint8_t additionalHeaderBytes, EsHeap *heap) {
+	if (!_ArrayMaybeInitialise(array, itemSize, heap)) {
+		return false;
+	}
+
+	_ArrayHeader *header = ArrayHeader(*array);
+
+	if (header->allocated >= newLength) {
+		header->length = newLength;
+		return true;
+	}
+
+	if (!_ArrayEnsureAllocated(array, header->allocated * 2 > newLength ? header->allocated * 2 : newLength + 16, itemSize, additionalHeaderBytes, heap)) {
+		return false;
+	}
+
+	header = ArrayHeader(*array);
+	header->length = newLength;
+	return true;
+}
+
+void _ArrayDelete(void *array, uintptr_t position, size_t itemSize, size_t count) {
+	if (!count) return;
+	size_t oldArrayLength = ArrayLength(array);
+	if (position >= oldArrayLength) EsPanic("_ArrayDelete - Position out of bounds (%d/%d).\n", position, oldArrayLength);
+	if (count > oldArrayLength - position) EsPanic("_ArrayDelete - Count out of bounds (%d/%d/%d).\n", position, count, oldArrayLength);
+	ArrayHeader(array)->length = oldArrayLength - count;
+	uint8_t *data = (uint8_t *) array;
+	EsMemoryMove(data + itemSize * (position + count), data + itemSize * oldArrayLength, ES_MEMORY_MOVE_BACKWARDS itemSize * count, false);
+}
+
+void _ArrayDeleteSwap(void *array, uintptr_t position, size_t itemSize) {
+	size_t oldArrayLength = ArrayLength(array);
+	if (position >= oldArrayLength) EsPanic("_ArrayDeleteSwap - Position out of bounds (%d/%d).\n", position, oldArrayLength);
+	ArrayHeader(array)->length = oldArrayLength - 1;
+	uint8_t *data = (uint8_t *) array;
+	EsMemoryCopy(data + itemSize * position, data + itemSize * ArrayLength(array), itemSize);
+}
+
+void *_ArrayInsert(void **array, const void *item, size_t itemSize, ptrdiff_t position, uint8_t additionalHeaderBytes, EsHeap *heap) {
+	size_t oldArrayLength = ArrayLength(*array);
+	if (position == -1) position = oldArrayLength;
+	if (position < 0 || (size_t) position > oldArrayLength) EsPanic("_ArrayInsert - Position out of bounds (%d/%d).\n", position, oldArrayLength);
+	if (!_ArraySetLength(array, oldArrayLength + 1, itemSize, additionalHeaderBytes, heap)) return nullptr;
+	uint8_t *data = (uint8_t *) *array;
+	EsMemoryMove(data + itemSize * position, data + itemSize * oldArrayLength, itemSize, false);
+	if (item) EsMemoryCopy(data + itemSize * position, item, itemSize);
+	else EsMemoryZero(data + itemSize * position, itemSize);
+	return data + itemSize * position;
+}
+
+void *_ArrayInsertMany(void **array, size_t itemSize, ptrdiff_t position, size_t insertCount, EsHeap *heap) {
+	size_t oldArrayLength = ArrayLength(*array);
+	if (position == -1) position = oldArrayLength;
+	if (position < 0 || (size_t) position > oldArrayLength) EsPanic("_ArrayInsertMany - Position out of bounds (%d/%d).\n", position, oldArrayLength);
+	if (!_ArraySetLength(array, oldArrayLength + insertCount, itemSize, 0, heap)) return nullptr;
+	uint8_t *data = (uint8_t *) *array;
+	EsMemoryMove(data + itemSize * position, data + itemSize * oldArrayLength, itemSize * insertCount, false);
+	return data + itemSize * position;
+}
+
+void _ArrayFree(void **array, size_t itemSize, EsHeap *heap) {
+	if (!(*array)) return;
+	EsHeapFree(ArrayHeader(*array), sizeof(_ArrayHeader) + itemSize * ArrayHeader(*array)->allocated, heap);
+	*array = nullptr;
+}
+
 
 template <class T, EsHeap *heap>
 struct Array
@@ -1421,13 +2361,334 @@ struct RangeSet {
 	Array<Range, K_CORE> ranges;
 	uintptr_t contiguous;
 
-	Range *Find(uintptr_t offset, bool touching);
-	bool Contains(uintptr_t offset);
-	void Validate();
-	bool Normalize();
+    Range *Find(uintptr_t offset, bool touching) {
+        if (!ranges.Length()) return nullptr;
 
-	bool Set(uintptr_t from, uintptr_t to, intptr_t *delta, bool modify);
-	bool Clear(uintptr_t from, uintptr_t to, intptr_t *delta, bool modify);
+        intptr_t low = 0, high = ranges.Length() - 1;
+
+        while (low <= high) {
+            intptr_t i = low + (high - low) / 2;
+            Range *range = &ranges[i];
+
+            if (range->from <= offset && (offset < range->to || (touching && offset <= range->to))) {
+                return range;
+            } else if (range->from <= offset) {
+                low = i + 1;
+            } else {
+                high = i - 1;
+            }
+        }
+
+        return nullptr;
+    }
+
+    bool Contains(uintptr_t offset) {
+        if (ranges.Length()) {
+            return Find(offset, false);
+        } else {
+            return offset < contiguous;
+        }
+    }
+
+    void Validate() {
+#ifdef DEBUG_BUILD
+        uintptr_t previousTo = 0;
+
+        if (!ranges.Length()) return;
+
+        for (uintptr_t i = 0; i < ranges.Length(); i++) {
+            Range *range = &ranges[i];
+
+            if (previousTo && range->from <= previousTo) {
+                KernelPanic("RangeSet::Validate - Range %d in set %x is not placed after the prior range.\n", i, this);
+            }
+
+            if (range->from >= range->to) {
+                KernelPanic("RangeSet::Validate - Range %d in set %x is invalid.\n", i, this);
+            }
+
+            previousTo = range->to;
+        }
+#endif
+
+#if 0
+        for (uintptr_t i = 0; i < sizeof(check); i++) {
+            if (check[i]) {
+                assert(Find(set, i, false));
+            } else {
+                assert(!Find(set, i, false));
+            }
+        }
+#endif
+    }
+
+    bool Normalize() {
+        KernelLog(LOG_INFO, "RangeSet", "normalize", "Normalizing range set %x...\n", this);
+
+        if (contiguous) {
+            uintptr_t oldContiguous = contiguous;
+            contiguous = 0;
+
+            if (!Set(0, oldContiguous, nullptr, true)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    bool Set(uintptr_t from, uintptr_t to, intptr_t *delta, bool modify) {
+#if 0
+        for (uintptr_t i = from; i < to; i++) {
+            check[i] = true;
+        }
+#endif
+
+        if (to <= from) {
+            KernelPanic("RangeSet::Set - Invalid range %x to %x.\n", from, to);
+        }
+
+        // Can we store this as a single contiguous range?
+
+        if (!ranges.Length()) {
+            if (delta) {
+                if (from >= contiguous) {
+                    *delta = to - from;
+                } else if (to >= contiguous) {
+                    *delta = to - contiguous;
+                } else {
+                    *delta = 0;
+                }
+            }
+
+            if (!modify) {
+                return true;
+            }
+
+            if (from <= contiguous) {
+                if (to > contiguous) {
+                    contiguous = to;
+                }
+
+                return true;
+            }
+
+            if (!Normalize()) {
+                return false;
+            }
+        }
+
+        // Calculate the contiguous range covered.
+
+        Range newRange = {};
+
+        {
+            Range *left = Find(from, true);
+            Range *right = Find(to, true);
+
+            newRange.from = left ? left->from : from;
+            newRange.to = right ? right->to : to;
+        }
+
+        // Insert the new range.
+
+        uintptr_t i = 0;
+
+        for (; i <= ranges.Length(); i++) {
+            if (i == ranges.Length() || ranges[i].to > newRange.from) {
+                if (modify) {
+                    if (!ranges.Insert(newRange, i)) {
+                        return false;
+                    }
+
+                    i++;
+                }
+
+                break;
+            }
+        }
+
+        // Remove overlapping ranges.
+
+        uintptr_t deleteStart = i;
+        size_t deleteCount = 0;
+        uintptr_t deleteTotal = 0;
+
+        for (; i < ranges.Length(); i++) {
+            Range *range = &ranges[i];
+
+            bool overlap = (range->from >= newRange.from && range->from <= newRange.to) 
+                || (range->to >= newRange.from && range->to <= newRange.to);
+
+            if (overlap) {
+                deleteCount++;
+                deleteTotal += range->to - range->from;
+            } else {
+                break;
+            }
+        }
+
+        if (modify) {
+            ranges.DeleteMany(deleteStart, deleteCount);
+        }
+
+        Validate();
+
+        if (delta) {
+            *delta = newRange.to - newRange.from - deleteTotal;
+        }
+
+        return true;
+
+    }
+    bool Clear(uintptr_t from, uintptr_t to, intptr_t *delta, bool modify) {
+#if 0
+        for (uintptr_t i = from; i < to; i++) {
+            check[i] = false;
+        }
+#endif
+
+        if (to <= from) {
+            KernelPanic("RangeSet::Clear - Invalid range %x to %x.\n", from, to);
+        }
+
+        if (!ranges.Length()) {
+            if (from < contiguous && contiguous) {
+                if (to < contiguous) {
+                    if (modify) {
+                        if (!Normalize()) return false;
+                    } else {
+                        if (delta) *delta = from - to;
+                        return true;
+                    }
+                } else {
+                    if (delta) *delta = from - contiguous;
+                    if (modify) contiguous = from;
+                    return true;
+                }
+            } else {
+                if (delta) *delta = 0;
+                return true;
+            }
+        }
+
+        if (!ranges.Length()) {
+            ranges.Free();
+            if (delta) *delta = 0;
+            return true;
+        }
+
+        if (to <= ranges.First().from || from >= ranges.Last().to) {
+            if (delta) *delta = 0;
+            return true;
+        }
+
+        if (from <= ranges.First().from && to >= ranges.Last().to) {
+            if (delta) {
+                intptr_t total = 0;
+
+                for (uintptr_t i = 0; i < ranges.Length(); i++) {
+                    total += ranges[i].to - ranges[i].from;
+                }
+
+                *delta = -total;
+            }
+
+            if (modify) {
+                ranges.Free();
+            }
+
+            return true;
+        }
+
+        // Find the first and last overlapping regions.
+
+        uintptr_t overlapStart = ranges.Length();
+        size_t overlapCount = 0;
+
+        for (uintptr_t i = 0; i < ranges.Length(); i++) {
+            Range *range = &ranges[i];
+
+            if (range->to > from && range->from < to) {
+                overlapStart = i;
+                overlapCount = 1;
+                break;
+            }
+        }
+
+        for (uintptr_t i = overlapStart + 1; i < ranges.Length(); i++) {
+            Range *range = &ranges[i];
+
+            if (range->to >= from && range->from < to) {
+                overlapCount++;
+            } else {
+                break;
+            }
+        }
+
+        // Remove the overlapping sections.
+
+        intptr_t _delta = 0;
+
+        if (overlapCount == 1) {
+            Range *range = &ranges[overlapStart];
+
+            if (range->from < from && range->to > to) {
+                Range newRange = { to, range->to };
+                _delta -= to - from;
+
+                if (modify) {
+                    if (!ranges.Insert(newRange, overlapStart + 1)) {
+                        return false;
+                    }
+
+                    ranges[overlapStart].to = from;
+                }
+            } else if (range->from < from) {
+                _delta -= range->to - from;
+                if (modify) range->to = from;
+            } else if (range->to > to) {
+                _delta -= to - range->from;
+                if (modify) range->from = to;
+            } else {
+                _delta -= range->to - range->from;
+                if (modify) ranges.Delete(overlapStart);
+            }
+        } else if (overlapCount > 1) {
+            Range *left = &ranges[overlapStart];
+            Range *right = &ranges[overlapStart + overlapCount - 1];
+
+            if (left->from < from) {
+                _delta -= left->to - from;
+                if (modify) left->to = from;
+                overlapStart++, overlapCount--;
+            }
+
+            if (right->to > to) {
+                _delta -= to - right->from;
+                if (modify) right->from = to;
+                overlapCount--;
+            }
+
+            if (delta) {
+                for (uintptr_t i = overlapStart; i < overlapStart + overlapCount; i++) {
+                    _delta -= ranges[i].to - ranges[i].from;
+                }
+            }
+
+            if (modify) {
+                ranges.DeleteMany(overlapStart, overlapCount);
+            }
+        }
+
+        if (delta) {
+            *delta = _delta;
+        }
+
+        Validate();
+        return true;
+
+    }
 };
 
 struct KDevice {
@@ -1457,7 +2718,6 @@ struct KDevice {
 
 struct Process;
 struct Thread;
-struct MMSpace;
 struct Handle;
 struct Scheduler;
 struct MessageQueue;
@@ -1475,11 +2735,7 @@ struct EsThreadEventLogEntry {
 
 
 
-extern Process _kernelProcess;
-extern Process* kernelProcess;
-extern Scheduler scheduler;
 
-#define K_PAGED (&heapFixed)
 
 
 struct EsProcessCreateData {
@@ -1511,17 +2767,6 @@ struct EsCrashReason {
 
 
 
-inline void EsMemoryZero(void *destination, size_t bytes) {
-	// TODO Prevent this from being optimised out in the kernel.
-
-	if (!bytes) {
-		return;
-	}
-
-	for (uintptr_t i = 0; i < bytes; i++) {
-		((uint8_t *) destination)[i] = 0;
-	}
-}
 
 
 
@@ -1531,32 +2776,6 @@ inline void EsMemoryZero(void *destination, size_t bytes) {
 
 
 
-struct CPULocalStorage {
-	struct Thread *currentThread;          // The currently executing thread on this CPU.
-	struct Thread *idleThread;             // The CPU's idle thread.
-	struct Thread *asyncTaskThread;        // The CPU's async task thread, used to process the asyncTaskList.
-	struct InterruptContext *panicContext; // The interrupt context saved from a kernel panic IPI.
-	bool irqSwitchThread;                  // The CPU should call Scheduler::Yield after the IRQ handler exits.
-	bool schedulerReady;                   // The CPU is ready to execute threads from the pre-emptive scheduler.
-	bool inIRQ;                            // The CPU is currently executing an IRQ handler registered with KRegisterIRQ.
-	bool inAsyncTask;                      // The CPU is currently executing an asynchronous task.
-	uint32_t processorID;                  // The scheduler's ID for the process.
-	size_t spinlockCount;                  // The number of spinlocks currently acquired.
-	struct ArchCPU *archCPU;               // The architecture layer's data for the CPU.
-	SimpleList asyncTaskList;              // The list of AsyncTasks to be processed.
-};
-
-struct KEvent { // Waiting and notifying. Can wait on multiple at once. Can be set and reset with interrupts disabled.
-	volatile bool autoReset; // This should be first field in the structure, so that the type of KEvent can be easily declared with {autoReset}.
-	volatile uintptr_t state;
-	LinkedList<Thread> blockedThreads;
-	volatile size_t handles;
-};
-
-bool KEventSet(KEvent *event, bool maybeAlreadySet = false);
-void KEventReset(KEvent *event); 
-bool KEventPoll(KEvent *event); // TODO Remove this! Currently it is only used by KAudioFillBuffersFromMixer.
-bool KEventWait(KEvent *event, uint64_t timeoutMs = ES_WAIT_NO_TIMEOUT); // See KEventWaitMultiple to wait for multiple events. Returns false if the wait timed out.
 
 #define THREAD_PRIORITY_NORMAL 	(0) // Lower value = higher priority.
 #define THREAD_PRIORITY_LOW 	(1)
@@ -1699,6 +2918,13 @@ struct CCCachedSection {
 		     pageCount;			// The number of pages in the section.
 	volatile size_t mappedRegionsCount; 	// The number of mapped regions that use this section.
 	uintptr_t *data;			// A list of page frames covering the section.
+};
+
+struct CCSpace;
+
+struct CCSpaceCallbacks {
+	EsError (*readInto)(CCSpace *fileCache, void *buffer, EsFileOffset offset, EsFileOffset count);
+	EsError (*writeFrom)(CCSpace *fileCache, const void *buffer, EsFileOffset offset, EsFileOffset count);
 };
 
 struct CCSpace {
@@ -2438,6 +3664,8 @@ struct Process {
 	int pgid;
 #endif
 };
+Process _kernelProcess;
+Process* kernelProcess = &_kernelProcess;
 
 #define SPAWN_THREAD_USERLAND     (1 << 0)
 #define SPAWN_THREAD_LOW_PRIORITY (1 << 1)
@@ -2446,18 +3674,6 @@ struct Process {
 #define SPAWN_THREAD_IDLE         (1 << 4)
 
 
-struct KSpinlock { // Mutual exclusion. CPU-owned. Disables interrupts. The only synchronisation primitive that can be acquired with interrupts disabled.
-	volatile uint8_t state, ownerCPU;
-	volatile bool interruptsEnabled;
-#ifdef DEBUG_BUILD
-	struct Thread *volatile owner;
-	volatile uintptr_t acquireAddress, releaseAddress;
-#endif
-};
-
-void KSpinlockAcquire(KSpinlock *spinlock);
-void KSpinlockRelease(KSpinlock *spinlock, bool force = false);
-void KSpinlockAssertLocked(KSpinlock *spinlock);
 
 #define THREAD_PRIORITY_NORMAL 	(0) // Lower value = higher priority.
 #define THREAD_PRIORITY_LOW 	(1)
@@ -2479,10 +3695,125 @@ void KTimerRemove(KTimer *timer); // Timers with callbacks cannot be removed (it
 struct Scheduler {
 	void Yield(InterruptContext *context);
 	void CreateProcessorThreads(CPULocalStorage *local);
-	void AddActiveThread(Thread *thread, bool start /* put it at the start of the active list */); // Add an active thread into the queue.
+	void AddActiveThread(Thread *thread, bool start /* put it at the start of the active list */) // Add an active thread into the queue.
+    {
+        if (thread->type == THREAD_ASYNC_TASK) {
+            // An asynchronous task thread was unblocked.
+            // It will be run immediately, so there's no need to add it to the active thread list.
+            return;
+        }
+
+        KSpinlockAssertLocked(&dispatchSpinlock);
+
+        if (thread->state != THREAD_ACTIVE) {
+            KernelPanic("Scheduler::AddActiveThread - Thread %d not active\n", thread->id);
+        } else if (thread->executing) {
+            KernelPanic("Scheduler::AddActiveThread - Thread %d executing\n", thread->id);
+        } else if (thread->type != THREAD_NORMAL) {
+            KernelPanic("Scheduler::AddActiveThread - Thread %d has type %d\n", thread->id, thread->type);
+        } else if (thread->item.list) {
+            KernelPanic("Scheduler::AddActiveThread - Thread %d is already in queue %x.\n", thread->id, thread->item.list);
+        }
+
+        if (thread->paused && thread->terminatableState == THREAD_TERMINATABLE) {
+            // The thread is paused, so we can put it into the paused queue until it is resumed.
+            pausedThreads.InsertStart(&thread->item);
+        } else {
+            int8_t effectivePriority = GetThreadEffectivePriority(thread);
+
+            if (start) {
+                activeThreads[effectivePriority].InsertStart(&thread->item);
+            } else {
+                activeThreads[effectivePriority].InsertEnd(&thread->item);
+            }
+        }
+
+    }
 	void MaybeUpdateActiveList(Thread *thread); // After changing the priority of a thread, call this to move it to the correct active thread queue if needed.
-	void NotifyObject(LinkedList<Thread> *blockedThreads, bool unblockAll, Thread *previousMutexOwner = nullptr);
-	void UnblockThread(Thread *unblockedThread, Thread *previousMutexOwner = nullptr);
+    void NotifyObject(LinkedList<Thread> *blockedThreads, bool unblockAll, Thread *previousMutexOwner = nullptr) {
+        KSpinlockAssertLocked(&dispatchSpinlock);
+
+        LinkedItem<Thread> *unblockedItem = blockedThreads->firstItem;
+
+        if (!unblockedItem) {
+            // There weren't any threads blocking on the object.
+            return; 
+        }
+
+        do {
+            LinkedItem<Thread> *nextUnblockedItem = unblockedItem->nextItem;
+            Thread *unblockedThread = unblockedItem->thisItem;
+            UnblockThread(unblockedThread, previousMutexOwner);
+            unblockedItem = nextUnblockedItem;
+        } while (unblockAll && unblockedItem);
+    }
+    void UnblockThread(Thread *unblockedThread, Thread *previousMutexOwner = nullptr) {
+        KSpinlockAssertLocked(&dispatchSpinlock);
+
+        if (unblockedThread->state == THREAD_WAITING_MUTEX) {
+            if (unblockedThread->item.list) {
+                // If we get here from KMutex::Release -> Scheduler::NotifyObject -> Scheduler::UnblockedThread,
+                // the mutex owner has already been cleared to nullptr, so use the previousMutexOwner parameter.
+                // But if we get here from Scheduler::TerminateThread, the mutex wasn't released;
+                // rather, the waiting thread was unblocked as it is in the WAIT system call, but needs to terminate.
+
+                if (!previousMutexOwner) {
+                    KMutex *mutex = EsContainerOf(KMutex, blockedThreads, unblockedThread->item.list);
+
+                    if (&mutex->blockedThreads != unblockedThread->item.list) {
+                        KernelPanic("Scheduler::UnblockThread - Unblocked thread %x was not in a mutex blockedThreads list.\n", 
+                                unblockedThread);
+                    }
+
+                    previousMutexOwner = mutex->owner;
+                }
+
+                if (!previousMutexOwner->blockedThreadPriorities[unblockedThread->priority]) {
+                    KernelPanic("Scheduler::UnblockThread - blockedThreadPriorities was zero (%x/%x).\n", 
+                            unblockedThread, previousMutexOwner);
+                }
+
+                previousMutexOwner->blockedThreadPriorities[unblockedThread->priority]--;
+                MaybeUpdateActiveList(previousMutexOwner);
+
+                unblockedThread->item.RemoveFromList();
+            }
+        } else if (unblockedThread->state == THREAD_WAITING_EVENT) {
+            for (uintptr_t i = 0; i < unblockedThread->blocking.eventCount; i++) {
+                if (unblockedThread->blocking.eventItems[i].list) {
+                    unblockedThread->blocking.eventItems[i].RemoveFromList();
+                }
+            }
+        } else if (unblockedThread->state == THREAD_WAITING_WRITER_LOCK) {
+            if (unblockedThread->item.list) {
+                KWriterLock *lock = EsContainerOf(KWriterLock, blockedThreads, unblockedThread->item.list);
+
+                if (&lock->blockedThreads != unblockedThread->item.list) {
+                    KernelPanic("Scheduler::UnblockThread - Unblocked thread %x was not in a writer lock blockedThreads list.\n", 
+                            unblockedThread);
+                }
+
+                if ((unblockedThread->blocking.writerLockType == K_LOCK_SHARED && lock->state >= 0)
+                        || (unblockedThread->blocking.writerLockType == K_LOCK_EXCLUSIVE && lock->state == 0)) {
+                    unblockedThread->item.RemoveFromList();
+                }
+            }
+        } else {
+            KernelPanic("Scheduler::UnblockedThread - Blocked thread in invalid state %d.\n", 
+                    unblockedThread->state);
+        }
+
+        unblockedThread->state = THREAD_ACTIVE;
+
+        if (!unblockedThread->executing) {
+            // Put the unblocked thread at the start of the activeThreads list
+            // so that it is immediately executed when the scheduler yields.
+            AddActiveThread(unblockedThread, true);
+        } 
+
+        // TODO If any processors are idleing, send them a yield IPI.
+
+    }
 	Thread *PickThread(CPULocalStorage *local); // Pick the next thread to execute.
 	int8_t GetThreadEffectivePriority(Thread *thread);
 
@@ -2513,6 +3844,292 @@ struct Scheduler {
 	volatile size_t threadEventLogAllocated;
 #endif
 };
+Scheduler scheduler;
+
+
+void KSpinlockAcquire(KSpinlock *spinlock) {
+	if (scheduler.panic) return;
+
+	bool _interruptsEnabled = ProcessorAreInterruptsEnabled();
+	ProcessorDisableInterrupts();
+
+	CPULocalStorage *storage = GetLocalStorage();
+
+#ifdef DEBUG_BUILD
+	if (storage && storage->currentThread && spinlock->owner && spinlock->owner == storage->currentThread) {
+		KernelPanic("KSpinlock::Acquire - Attempt to acquire a spinlock owned by the current thread (%x/%x, CPU: %d/%d).\nAcquired at %x.\n", 
+				storage->currentThread, spinlock->owner, storage->processorID, spinlock->ownerCPU, spinlock->acquireAddress);
+	}
+#endif
+
+	if (storage) {
+		storage->spinlockCount++;
+	}
+
+	while (__sync_val_compare_and_swap(&spinlock->state, 0, 1));
+	__sync_synchronize();
+
+	spinlock->interruptsEnabled = _interruptsEnabled;
+
+	if (storage) {
+#ifdef DEBUG_BUILD
+		spinlock->owner = storage->currentThread;
+#endif
+		spinlock->ownerCPU = storage->processorID;
+	} else {
+		// Because spinlocks can be accessed very early on in initialisation there may not be
+		// a CPULocalStorage available for the current processor. Therefore, just set this field to nullptr.
+
+#ifdef DEBUG_BUILD
+		spinlock->owner = nullptr;
+#endif
+	}
+
+#ifdef DEBUG_BUILD
+	spinlock->acquireAddress = (uintptr_t) __builtin_return_address(0);
+#endif
+}
+
+void KSpinlockRelease(KSpinlock *spinlock, bool force) {
+	if (scheduler.panic) return;
+
+	CPULocalStorage *storage = GetLocalStorage();
+
+	if (storage) {
+		storage->spinlockCount--;
+	}
+
+	if (!force) {
+		KSpinlockAssertLocked(spinlock);
+	}
+	
+	volatile bool wereInterruptsEnabled = spinlock->interruptsEnabled;
+
+#ifdef DEBUG_BUILD
+	spinlock->owner = nullptr;
+#endif
+	__sync_synchronize();
+	spinlock->state = 0;
+
+	if (wereInterruptsEnabled) ProcessorEnableInterrupts();
+
+#ifdef DEBUG_BUILD
+	spinlock->releaseAddress = (uintptr_t) __builtin_return_address(0);
+#endif
+}
+
+void KSpinlockAssertLocked(KSpinlock *spinlock) {
+	if (scheduler.panic) return;
+
+#ifdef DEBUG_BUILD
+	CPULocalStorage *storage = GetLocalStorage();
+
+	if (!spinlock->state || ProcessorAreInterruptsEnabled() 
+			|| (storage && spinlock->owner != storage->currentThread)) {
+#else
+	if (!spinlock->state || ProcessorAreInterruptsEnabled()) {
+#endif
+		KernelPanic("KSpinlock::AssertLocked - KSpinlock not correctly acquired\n"
+				"Return address = %x.\n"
+				"state = %d, ProcessorAreInterruptsEnabled() = %d, this = %x\n",
+				__builtin_return_address(0), spinlock->state, 
+				ProcessorAreInterruptsEnabled(), spinlock);
+	}
+}
+
+#ifdef DEBUG_BUILD
+bool _KMutexAcquire(KMutex *mutex, const char *cMutexString, const char *cFile, int line) {
+#else
+bool KMutexAcquire(KMutex *mutex) {
+#endif
+	if (scheduler.panic) return false;
+
+	Thread *currentThread = GetCurrentThread();
+	bool hasThread = currentThread;
+
+	if (!currentThread) {
+		currentThread = (Thread *) 1;
+	} else {
+		if (currentThread->terminatableState == THREAD_TERMINATABLE) {
+			KernelPanic("KMutex::Acquire - Thread is terminatable.\n");
+		}
+	}
+
+	if (hasThread && mutex->owner && mutex->owner == currentThread) {
+#ifdef DEBUG_BUILD
+		KernelPanic("KMutex::Acquire - Attempt to acquire mutex (%x) at %x owned by current thread (%x) acquired at %x.\n", 
+				mutex, __builtin_return_address(0), currentThread, mutex->acquireAddress);
+#else
+		KernelPanic("KMutex::Acquire - Attempt to acquire mutex (%x) at %x owned by current thread (%x).\n", 
+				mutex, __builtin_return_address(0), currentThread);
+#endif
+	}
+
+	if (!ProcessorAreInterruptsEnabled()) {
+		KernelPanic("KMutex::Acquire - Trying to acquire a mutex while interrupts are disabled.\n");
+	}
+
+	while (true) {
+		KSpinlockAcquire(&scheduler.dispatchSpinlock);
+		Thread *old = mutex->owner;
+		if (!old) mutex->owner = currentThread;
+		KSpinlockRelease(&scheduler.dispatchSpinlock);
+		if (!old) break;
+
+		__sync_synchronize();
+
+		if (GetLocalStorage() && GetLocalStorage()->schedulerReady) {
+			if (currentThread->state != THREAD_ACTIVE) {
+				KernelPanic("KWaitMutex - Attempting to wait on a mutex in a non-active thread.\n");
+			}
+
+			currentThread->blocking.mutex = mutex;
+			__sync_synchronize();
+
+			// Instead of spinning on the lock, 
+			// let's tell the scheduler to not schedule this thread
+			// until it's released.
+			currentThread->state = THREAD_WAITING_MUTEX;
+
+			KSpinlockAcquire(&scheduler.dispatchSpinlock);
+			// Is the owner of this mutex executing?
+			// If not, there's no point in spinning on it.
+			bool spin = mutex && mutex->owner && mutex->owner->executing;
+			KSpinlockRelease(&scheduler.dispatchSpinlock);
+
+			if (!spin && currentThread->blocking.mutex->owner) {
+				ProcessorFakeTimerInterrupt();
+			}
+
+			// Early exit if this is a user request to block the thread and the thread is terminating.
+			while ((!currentThread->terminating || currentThread->terminatableState != THREAD_USER_BLOCK_REQUEST) && mutex->owner) {
+				currentThread->state = THREAD_WAITING_MUTEX;
+			}
+
+			currentThread->state = THREAD_ACTIVE;
+
+			if (currentThread->terminating && currentThread->terminatableState == THREAD_USER_BLOCK_REQUEST) {
+				// We didn't acquire the mutex because the thread is terminating.
+				return false;
+			}
+		}
+	}
+
+	__sync_synchronize();
+
+	if (mutex->owner != currentThread) {
+		KernelPanic("KMutex::Acquire - Invalid owner thread (%x, expected %x).\n", mutex->owner, currentThread);
+	}
+
+#ifdef DEBUG_BUILD
+	mutex->acquireAddress = (uintptr_t) __builtin_return_address(0);
+	KMutexAssertLocked(mutex);
+
+	if (!mutex->id) {
+		static uintptr_t nextMutexID;
+		mutex->id = __sync_fetch_and_add(&nextMutexID, 1);
+	}
+
+	if (currentThread && scheduler.threadEventLog) {
+		uintptr_t position = __sync_fetch_and_add(&scheduler.threadEventLogPosition, 1);
+
+		if (position < scheduler.threadEventLogAllocated) {
+			EsThreadEventLogEntry *entry = scheduler.threadEventLog + position;
+			entry->event = ES_THREAD_EVENT_MUTEX_ACQUIRE;
+			entry->objectID = mutex->id;
+			entry->threadID = currentThread->id;
+			entry->line = line;
+			entry->fileBytes = EsCStringLength(cFile);
+			if (entry->fileBytes > sizeof(entry->file)) entry->fileBytes = sizeof(entry->file);
+			entry->expressionBytes = EsCStringLength(cMutexString);
+			if (entry->expressionBytes > sizeof(entry->expression)) entry->expressionBytes = sizeof(entry->expression);
+			EsMemoryCopy(entry->file, cFile, entry->fileBytes);
+			EsMemoryCopy(entry->expression, cMutexString, entry->expressionBytes);
+		}
+	}
+#endif
+
+	return true;
+}
+
+#ifdef DEBUG_BUILD
+void _KMutexRelease(KMutex *mutex, const char *cMutexString, const char *cFile, int line) {
+#else
+void KMutexRelease(KMutex *mutex) {
+#endif
+	if (scheduler.panic) return;
+
+	KMutexAssertLocked(mutex);
+	Thread *currentThread = GetCurrentThread();
+	KSpinlockAcquire(&scheduler.dispatchSpinlock);
+
+#ifdef DEBUG_BUILD
+	// EsPrint("$%x:%x:0\n", owner, id);
+#endif
+
+	if (currentThread) {
+		Thread *temp = __sync_val_compare_and_swap(&mutex->owner, currentThread, nullptr);
+		if (currentThread != temp) KernelPanic("KMutex::Release - Invalid owner thread (%x, expected %x).\n", temp, currentThread);
+	} else mutex->owner = nullptr;
+
+	volatile bool preempt = mutex->blockedThreads.count;
+
+	if (scheduler.started) {
+		// NOTE We unblock all waiting threads, because of how blockedThreadPriorities works.
+		scheduler.NotifyObject(&mutex->blockedThreads, true, currentThread); 
+	}
+
+	KSpinlockRelease(&scheduler.dispatchSpinlock);
+	__sync_synchronize();
+
+#ifdef DEBUG_BUILD
+	mutex->releaseAddress = (uintptr_t) __builtin_return_address(0);
+
+	if (currentThread && scheduler.threadEventLog) {
+		uintptr_t position = __sync_fetch_and_add(&scheduler.threadEventLogPosition, 1);
+
+		if (position < scheduler.threadEventLogAllocated) {
+			EsThreadEventLogEntry *entry = scheduler.threadEventLog + position;
+			entry->event = ES_THREAD_EVENT_MUTEX_RELEASE;
+			entry->objectID = mutex->id;
+			entry->threadID = currentThread->id;
+			entry->line = line;
+			entry->fileBytes = EsCStringLength(cFile);
+			if (entry->fileBytes > sizeof(entry->file)) entry->fileBytes = sizeof(entry->file);
+			entry->expressionBytes = EsCStringLength(cMutexString);
+			if (entry->expressionBytes > sizeof(entry->expression)) entry->expressionBytes = sizeof(entry->expression);
+			EsMemoryCopy(entry->file, cFile, entry->fileBytes);
+			EsMemoryCopy(entry->expression, cMutexString, entry->expressionBytes);
+		}
+	}
+#endif
+
+	if (preempt) ProcessorFakeTimerInterrupt();
+}
+
+void KMutexAssertLocked(KMutex *mutex) {
+	Thread *currentThread = GetCurrentThread();
+
+	if (!currentThread) {
+		currentThread = (Thread *) 1;
+	}
+
+	if (mutex->owner != currentThread) {
+#ifdef DEBUG_BUILD
+		KernelPanic("KMutex::AssertLocked - Mutex not correctly acquired\n"
+				"currentThread = %x, owner = %x\nthis = %x\nReturn %x/%x\nLast used from %x->%x\n", 
+				currentThread, mutex->owner, mutex, __builtin_return_address(0), __builtin_return_address(1), 
+				mutex->acquireAddress, mutex->releaseAddress);
+#else
+		KernelPanic("KMutex::AssertLocked - Mutex not correctly acquired\n"
+				"currentThread = %x, owner = %x\nthis = %x\nReturn %x\n", 
+				currentThread, mutex->owner, mutex, __builtin_return_address(0));
+#endif
+	}
+}
+
+
+
 
 struct MMArchVAS {
 	// NOTE Must be first in the structure. See ProcessorSetAddressSpace and ArchSwitchContext.
@@ -2562,6 +4179,7 @@ struct MMSpace {
 
 	KAsyncTask removeAsyncTask;      // The asynchronous task for deallocating the memory space once it's no longer in use.
 };
+MMSpace _coreMMSpace, _kernelMMSpace;
 
 struct GlobalData {
 	volatile int32_t clickChainTimeoutMs;
@@ -2575,15 +4193,189 @@ struct GlobalData {
 	volatile uint64_t schedulerTimeOffset;
 	volatile uint16_t keyboardLayout;
 };
+struct MMRegion {
+	uintptr_t baseAddress;
+	size_t pageCount;
+	uint32_t flags;
 
+	struct {
+		union {
+			struct {
+				uintptr_t offset;
+			} physical;
 
-MMSpace _kernelMMSpace, _coreMMSpace;
-#define kernelMMSpace (&_kernelMMSpace)
-#define coreMMSpace (&_coreMMSpace)
-void *MMStandardAllocate(MMSpace *space, size_t bytes, uint32_t flags, void *baseAddress = nullptr, bool commitAll = true);
+			struct {
+				struct MMSharedRegion *region;
+				uintptr_t offset;
+			} shared;
+
+			struct {
+				struct FSFile *node;
+				EsFileOffset offset;
+				size_t zeroedBytes;
+				uint64_t fileHandleFlags;
+			} file;
+
+			struct {
+				RangeSet commit; // TODO Currently guarded by MMSpace::reserveMutex, maybe give it its own mutex?
+				size_t commitPageCount;
+				MMRegion *guardBefore, *guardAfter;
+			} normal;
+		};
+
+		KWriterLock pin; // Take SHARED when using the region in a system call. Take EXCLUSIVE to free the region.
+		KMutex mapMutex; // Access the page tables for a specific region, e.g. to atomically check if a mapping exists and if not, create it.
+	} data;
+
+	union {
+		struct {
+			AVLItem<MMRegion> itemBase;
+
+			union {
+				AVLItem<MMRegion> itemSize;
+				LinkedItem<MMRegion> itemNonGuard;
+			};
+		};
+
+		struct {
+			bool used;
+		} core;
+	};
+};
+
 MMRegion *MMFindAndPinRegion(MMSpace *space, uintptr_t address, uintptr_t size); 
 bool MMCommitRange(MMSpace *space, MMRegion *region, uintptr_t pageOffset, size_t pageCount);
-void MMUnpinRegion(MMSpace *space, MMRegion *region);
+void MMUnpinRegion(MMSpace *space, MMRegion *region) {
+	KMutexAcquire(&space->reserveMutex);
+	KWriterLockReturn(&region->data.pin, K_LOCK_SHARED);
+	KMutexRelease(&space->reserveMutex);
+}
+
+
+void KWriterLockAssertLocked(KWriterLock *lock) {
+	if (lock->state == 0) {
+		KernelPanic("KWriterLock::AssertLocked - Unlocked.\n");
+	}
+}
+
+void KWriterLockAssertShared(KWriterLock *lock) {
+	if (lock->state == 0) {
+		KernelPanic("KWriterLock::AssertShared - Unlocked.\n");
+	} else if (lock->state < 0) {
+		KernelPanic("KWriterLock::AssertShared - In exclusive mode.\n");
+	}
+}
+
+void KWriterLockAssertExclusive(KWriterLock *lock) {
+	if (lock->state == 0) {
+		KernelPanic("KWriterLock::AssertExclusive - Unlocked.\n");
+	} else if (lock->state > 0) {
+		KernelPanic("KWriterLock::AssertExclusive - In shared mode, with %d readers.\n", lock->state);
+	}
+}
+
+void KWriterLockReturn(KWriterLock *lock, bool write) {
+	KSpinlockAcquire(&scheduler.dispatchSpinlock);
+
+	if (lock->state == -1) {
+		if (!write) {
+			KernelPanic("KWriterLock::Return - Attempting to return shared access to an exclusively owned lock.\n");
+		}
+
+		lock->state = 0;
+	} else if (lock->state == 0) {
+		KernelPanic("KWriterLock::Return - Attempting to return access to an unowned lock.\n");
+	} else {
+		if (write) {
+			KernelPanic("KWriterLock::Return - Attempting to return exclusive access to an shared lock.\n");
+		}
+
+		lock->state--;
+	}
+
+	if (!lock->state) {
+		scheduler.NotifyObject(&lock->blockedThreads, true);
+	}
+
+	KSpinlockRelease(&scheduler.dispatchSpinlock);
+}
+
+bool KWriterLockTake(KWriterLock *lock, bool write, bool poll) {
+	// TODO Preventing exclusive access starvation.
+	// TODO Do this without taking the scheduler's lock?
+
+	bool done = false;
+
+	Thread *thread = GetCurrentThread();
+
+	if (thread) {
+		thread->blocking.writerLock = lock;
+		thread->blocking.writerLockType = write;
+		__sync_synchronize();
+	}
+
+	while (true) {
+		KSpinlockAcquire(&scheduler.dispatchSpinlock);
+
+		if (write) {
+			if (lock->state == 0) {
+				lock->state = -1;
+				done = true;
+#ifdef DEBUG_BUILD
+				lock->exclusiveOwner = thread;
+#endif
+			}
+		} else {
+			if (lock->state >= 0) {
+				lock->state++;
+				done = true;
+			}
+		}
+
+		KSpinlockRelease(&scheduler.dispatchSpinlock);
+
+		if (poll || done) {
+			break;
+		} else {
+			if (!thread) {
+				KernelPanic("KWriterLock::Take - Scheduler not ready yet.\n");
+			}
+
+			thread->state = THREAD_WAITING_WRITER_LOCK;
+			ProcessorFakeTimerInterrupt();
+			thread->state = THREAD_ACTIVE;
+		}
+	}
+
+	return done;
+}
+
+void KWriterLockTakeMultiple(KWriterLock **locks, size_t lockCount, bool write) {
+	uintptr_t i = 0, taken = 0;
+
+	while (taken != lockCount) {
+		if (KWriterLockTake(locks[i], write, taken)) {
+			taken++, i++;
+			if (i == lockCount) i = 0;
+		} else {
+			intptr_t j = i - 1;
+
+			while (taken) {
+				if (j == -1) j = lockCount - 1;
+				KWriterLockReturn(locks[j], write);
+				j--, taken--;
+			}
+		}
+	}
+}
+
+void KWriterLockConvertExclusiveToShared(KWriterLock *lock) {
+	KSpinlockAcquire(&scheduler.dispatchSpinlock);
+	KWriterLockAssertExclusive(lock);
+	lock->state = 1;
+	scheduler.NotifyObject(&lock->blockedThreads, true);
+	KSpinlockRelease(&scheduler.dispatchSpinlock);
+}
 
 
 #define ES_SHARED_MEMORY_NAME_MAX_LENGTH (32)
@@ -2597,7 +4389,6 @@ struct MMSharedRegion {
 };
 
 bool OpenHandleToObject(void *object, KernelObjectType type, uint32_t flags);
-bool MMFree(MMSpace *space, void *address, size_t expectedSize = 0, bool userOnly = false);
 
 
 
@@ -2811,55 +4602,6 @@ struct CPULocalStorage;
 
 struct CPULocalStorage;
 
-struct MMRegion {
-	uintptr_t baseAddress;
-	size_t pageCount;
-	uint32_t flags;
-
-	struct {
-		union {
-			struct {
-				uintptr_t offset;
-			} physical;
-
-			struct {
-				struct MMSharedRegion *region;
-				uintptr_t offset;
-			} shared;
-
-			struct {
-				struct FSFile *node;
-				EsFileOffset offset;
-				size_t zeroedBytes;
-				uint64_t fileHandleFlags;
-			} file;
-
-			struct {
-				RangeSet commit; // TODO Currently guarded by MMSpace::reserveMutex, maybe give it its own mutex?
-				size_t commitPageCount;
-				MMRegion *guardBefore, *guardAfter;
-			} normal;
-		};
-
-		KWriterLock pin; // Take SHARED when using the region in a system call. Take EXCLUSIVE to free the region.
-		KMutex mapMutex; // Access the page tables for a specific region, e.g. to atomically check if a mapping exists and if not, create it.
-	} data;
-
-	union {
-		struct {
-			AVLItem<MMRegion> itemBase;
-
-			union {
-				AVLItem<MMRegion> itemSize;
-				LinkedItem<MMRegion> itemNonGuard;
-			};
-		};
-
-		struct {
-			bool used;
-		} core;
-	};
-};
 
 struct MMPageFrame {
 	volatile enum : uint8_t {
@@ -2933,7 +4675,8 @@ struct MMObjectCache {
 
 
 
-bool MMHandlePageFault(MMSpace *space, uintptr_t address, unsigned flags);
+
+
 
 uintptr_t /* Returns physical address of first page, or 0 if none were available. */ MMPhysicalAllocate(unsigned flags, 
 		uintptr_t count = 1 /* Number of contiguous pages to allocate. */, 
@@ -2946,6 +4689,8 @@ void MMPhysicalFree(uintptr_t page /* Physical address. */,
 bool MMPhysicalAllocateAndMap(size_t sizeBytes, size_t alignmentBytes, size_t maximumBits, bool zeroed, 
 		uint64_t caching, uint8_t **virtualAddress, uintptr_t *physicalAddress);
 void MMPhysicalFreeAndUnmap(void *virtualAddress, uintptr_t physicalAddress);
+
+
 
 
 
@@ -3056,10 +4801,6 @@ struct KPCIDevice : KDevice {
 	bool EnableMSI(KIRQHandler irqHandler, void *context, const char *cOwnerName); 
 };
 
-
-
-Scheduler scheduler;
-
 MMRegion *MMFindRegion(MMSpace *space, uintptr_t address) {
 	KMutexAssertLocked(&space->reserveMutex);
 
@@ -3146,6 +4887,75 @@ bool MMDecommitRange(MMSpace *space, MMRegion *region, uintptr_t pageOffset, siz
 	return true;
 }
 
+
+uintptr_t MMArchTranslateAddress(MMSpace *, uintptr_t virtualAddress, bool writeAccess =false);
+
+#define CC_ACTIVE_SECTION_SIZE                    ((EsFileOffset) 262144)
+
+struct CCActiveSectionReference {
+	EsFileOffset offset; // Offset into the file; multiple of CC_ACTIVE_SECTION_SIZE.
+	uintptr_t index; // Index of the active section.
+};
+
+struct CCActiveSection {
+	KEvent loadCompleteEvent, writeCompleteEvent; 
+	LinkedItem<CCActiveSection> listItem; // Either in the LRU list, or the modified list. If accessors > 0, it should not be in a list.
+
+	EsFileOffset offset;
+	struct CCSpace *cache;
+
+	size_t accessors;
+	volatile bool loading, writing, modified, flush;
+
+	uint16_t referencedPageCount; 
+	uint8_t referencedPages[CC_ACTIVE_SECTION_SIZE / K_PAGE_SIZE / 8]; // If accessors > 0, then pages cannot be dereferenced.
+
+	uint8_t modifiedPages[CC_ACTIVE_SECTION_SIZE / K_PAGE_SIZE / 8];
+};
+
+struct MMActiveSectionManager {
+	CCActiveSection *sections;
+	size_t sectionCount;
+	uint8_t *baseAddress;
+	KMutex mutex;
+	LinkedList<CCActiveSection> lruList;
+	LinkedList<CCActiveSection> modifiedList;
+	KEvent modifiedNonEmpty, modifiedNonFull, modifiedGettingFull;
+	Thread *writeBackThread;
+};
+
+MMActiveSectionManager activeSectionManager;
+
+#define CC_MAX_MODIFIED                           (67108864 / CC_ACTIVE_SECTION_SIZE)
+#define CC_MODIFIED_GETTING_FULL                  (CC_MAX_MODIFIED * 2 / 3)
+
+void CCDereferenceActiveSection(CCActiveSection *section, uintptr_t startingPage = 0) {
+	KMutexAssertLocked(&activeSectionManager.mutex);
+
+	if (!startingPage) {
+		MMArchUnmapPages(kernelMMSpace, 
+				(uintptr_t) activeSectionManager.baseAddress + (section - activeSectionManager.sections) * CC_ACTIVE_SECTION_SIZE, 
+				CC_ACTIVE_SECTION_SIZE / K_PAGE_SIZE, MM_UNMAP_PAGES_BALANCE_FILE);
+		EsMemoryZero(section->referencedPages, sizeof(section->referencedPages));
+		EsMemoryZero(section->modifiedPages, sizeof(section->modifiedPages));
+		section->referencedPageCount = 0;
+	} else {
+		MMArchUnmapPages(kernelMMSpace, 
+				(uintptr_t) activeSectionManager.baseAddress 
+					+ (section - activeSectionManager.sections) * CC_ACTIVE_SECTION_SIZE 
+					+ startingPage * K_PAGE_SIZE, 
+				(CC_ACTIVE_SECTION_SIZE / K_PAGE_SIZE - startingPage), MM_UNMAP_PAGES_BALANCE_FILE);
+
+		for (uintptr_t i = startingPage; i < CC_ACTIVE_SECTION_SIZE / K_PAGE_SIZE; i++) {
+			if (section->referencedPages[i >> 3] & (1 << (i & 7))) {
+				section->referencedPages[i >> 3] &= ~(1 << (i & 7));
+				section->modifiedPages[i >> 3] &= ~(1 << (i & 7));
+				section->referencedPageCount--;
+			}
+		}
+	}
+}
+
 CCCachedSection *CCFindCachedSectionContaining(CCSpace *cache, EsFileOffset sectionOffset) {
 	KMutexAssertLocked(&cache->cachedSectionsMutex);
 
@@ -3202,6 +5012,930 @@ void CCSpaceUncover(CCSpace *cache, EsFileOffset removeStart, EsFileOffset remov
 		}
 	}
 }
+
+bool CCSpaceCover(CCSpace *cache, EsFileOffset insertStart, EsFileOffset insertEnd) {
+	KMutexAssertLocked(&cache->cachedSectionsMutex);
+
+	// TODO Test this thoroughly.
+	// TODO Break up really large sections. (maybe into GBs?)
+
+	insertStart = RoundDown(insertStart, (EsFileOffset) K_PAGE_SIZE);
+	insertEnd = RoundUp(insertEnd, (EsFileOffset) K_PAGE_SIZE);
+	EsFileOffset position = insertStart, lastEnd = 0;
+	CCCachedSection *result = nullptr;
+
+	// EsPrint("New: %d, %d\n", insertStart / K_PAGE_SIZE, insertEnd / K_PAGE_SIZE);
+
+	for (uintptr_t i = 0; i < cache->cachedSections.Length(); i++) {
+		CCCachedSection *section = &cache->cachedSections[i];
+
+		EsFileOffset sectionStart = section->offset, 
+			     sectionEnd = section->offset + section->pageCount * K_PAGE_SIZE;
+
+		// EsPrint("Existing (%d): %d, %d\n", i, sectionStart / K_PAGE_SIZE, sectionEnd / K_PAGE_SIZE);
+
+		if (insertStart > sectionEnd) continue;
+
+		// If the inserted region starts before this section starts, then we need to make a new section before us.
+
+		if (position < sectionStart) {
+			CCCachedSection newSection = {};
+			newSection.mappedRegionsCount = 0;
+			newSection.offset = position;
+			newSection.pageCount = ((insertEnd > sectionStart ? sectionStart : insertEnd) - position) / K_PAGE_SIZE;
+
+			if (newSection.pageCount) {
+				// EsPrint("\tAdded: %d, %d\n", newSection.offset / K_PAGE_SIZE, newSection.pageCount);
+				newSection.data = (uintptr_t *) EsHeapAllocate(sizeof(uintptr_t) * newSection.pageCount, true, K_CORE);
+
+				if (!newSection.data) {
+					goto fail;
+				}
+
+				if (!cache->cachedSections.Insert(newSection, i)) { 
+					EsHeapFree(newSection.data, sizeof(uintptr_t) * newSection.pageCount, K_CORE); 
+					goto fail; 
+				}
+
+				i++;
+			}
+
+		}
+
+		position = sectionEnd;
+		if (position > insertEnd) break;
+	}
+
+	// Insert the final section if necessary.
+
+	if (position < insertEnd) {
+		CCCachedSection newSection = {};
+		newSection.mappedRegionsCount = 0;
+		newSection.offset = position;
+		newSection.pageCount = (insertEnd - position) / K_PAGE_SIZE;
+		newSection.data = (uintptr_t *) EsHeapAllocate(sizeof(uintptr_t) * newSection.pageCount, true, K_CORE);
+		// EsPrint("\tAdded (at end): %d, %d\n", newSection.offset / K_PAGE_SIZE, newSection.pageCount);
+
+		if (!newSection.data) {
+			goto fail;
+		}
+
+		if (!cache->cachedSections.Add(newSection)) { 
+			EsHeapFree(newSection.data, sizeof(uintptr_t) * newSection.pageCount, K_CORE); 
+			goto fail; 
+		}
+	}
+
+	for (uintptr_t i = 0; i < cache->cachedSections.Length(); i++) {
+		CCCachedSection *section = &cache->cachedSections[i];
+
+		EsFileOffset sectionStart = section->offset, 
+			     sectionEnd = section->offset + section->pageCount * K_PAGE_SIZE;
+
+		if (sectionStart < lastEnd) KernelPanic("CCSpaceCover - Overlapping MMCachedSections.\n");
+
+		// If the inserted region ends after this section starts, 
+		// and starts before this section ends, then it intersects it.
+
+		if (insertEnd > sectionStart && insertStart < sectionEnd) {
+			section->mappedRegionsCount++;
+			// EsPrint("+ %x %x %d\n", cache, section->data, section->mappedRegionsCount);
+			if (result && sectionStart != lastEnd) KernelPanic("CCSpaceCover - Incomplete MMCachedSections.\n");
+			if (!result) result = section;
+		}
+
+		lastEnd = sectionEnd;
+	}
+
+	return true;
+
+	fail:;
+	return false; // TODO Remove unused cached sections?
+}
+
+void CCWriteSection(CCActiveSection *section) {
+	// Write any modified pages to the backing store.
+
+	uint8_t *sectionBase = activeSectionManager.baseAddress + (section - activeSectionManager.sections) * CC_ACTIVE_SECTION_SIZE;
+	EsError error = ES_SUCCESS;
+
+	for (uintptr_t i = 0; i < CC_ACTIVE_SECTION_SIZE / K_PAGE_SIZE; i++) {
+		uintptr_t from = i, count = 0;
+
+		while (i != CC_ACTIVE_SECTION_SIZE / K_PAGE_SIZE 
+				&& (section->modifiedPages[i >> 3] & (1 << (i & 7)))) {
+			count++, i++;
+		}
+
+		if (!count) continue;
+
+		error = section->cache->callbacks->writeFrom(section->cache, sectionBase + from * K_PAGE_SIZE, 
+				section->offset + from * K_PAGE_SIZE, count * K_PAGE_SIZE);
+
+		if (error != ES_SUCCESS) {
+			break;
+		}
+	}
+
+	// Return the active section.
+
+	KMutexAcquire(&activeSectionManager.mutex);
+
+	if (!section->accessors) KernelPanic("CCWriteSection - Section %x has no accessors while being written.\n", section);
+	if (section->modified) KernelPanic("CCWriteSection - Section %x was modified while being written.\n", section);
+
+	section->accessors--;
+	section->writing = false;
+	EsMemoryZero(section->modifiedPages, sizeof(section->modifiedPages));
+	__sync_synchronize();
+	KEventSet(&section->writeCompleteEvent);
+	KEventSet(&section->cache->writeComplete, true);
+
+	if (!section->accessors) {
+		if (section->loading) KernelPanic("CCSpaceAccess - Active section %x with no accessors is loading.", section);
+		activeSectionManager.lruList.InsertEnd(&section->listItem);
+	}
+
+	KMutexRelease(&activeSectionManager.mutex);
+}
+
+void CCWriteSectionPrepare(CCActiveSection *section) {
+	KMutexAssertLocked(&activeSectionManager.mutex);
+	if (!section->modified) KernelPanic("CCWriteSectionPrepare - Unmodified section %x on modified list.\n", section);
+	if (section->accessors) KernelPanic("CCWriteSectionPrepare - Section %x with accessors on modified list.\n", section);
+	if (section->writing) KernelPanic("CCWriteSectionPrepare - Section %x already being written.\n", section);
+	activeSectionManager.modifiedList.Remove(&section->listItem);
+	section->writing = true;
+	section->modified = false;
+	section->flush = false;
+	KEventReset(&section->writeCompleteEvent);
+	section->accessors = 1;
+	if (!activeSectionManager.modifiedList.count) KEventReset(&activeSectionManager.modifiedNonEmpty);
+	if (activeSectionManager.modifiedList.count < CC_MODIFIED_GETTING_FULL) KEventReset(&activeSectionManager.modifiedGettingFull);
+	KEventSet(&activeSectionManager.modifiedNonFull, true);
+}
+
+void CCActiveSectionReturnToLists(CCActiveSection *section, bool writeBack) {
+	bool waitNonFull = false;
+
+	if (section->flush) {
+		writeBack = true;
+	}
+
+	while (true) {
+		// If modified, wait for the modified list to be below a certain size.
+
+		if (section->modified && waitNonFull) {
+			KEventWait(&activeSectionManager.modifiedNonFull);
+		}
+
+		// Decrement the accessors count.
+
+		KMutexAcquire(&activeSectionManager.mutex);
+		EsDefer(KMutexRelease(&activeSectionManager.mutex));
+
+		if (!section->accessors) KernelPanic("CCSpaceAccess - Active section %x has no accessors.\n", section);
+
+		if (section->accessors == 1) {
+			if (section->loading) KernelPanic("CCSpaceAccess - Active section %x with no accessors is loading.", section);
+
+			// If nobody is accessing the section, put it at the end of the LRU list.
+
+			if (section->modified) {
+				if (activeSectionManager.modifiedList.count > CC_MAX_MODIFIED) {
+					waitNonFull = true;
+					continue;
+				}
+
+				if (activeSectionManager.modifiedList.count == CC_MAX_MODIFIED) {
+					KEventReset(&activeSectionManager.modifiedNonFull);
+				}
+
+				if (activeSectionManager.modifiedList.count >= CC_MODIFIED_GETTING_FULL) {
+					KEventSet(&activeSectionManager.modifiedGettingFull, true);
+				}
+
+				KEventSet(&activeSectionManager.modifiedNonEmpty, true);
+
+				activeSectionManager.modifiedList.InsertEnd(&section->listItem);
+			} else {
+				activeSectionManager.lruList.InsertEnd(&section->listItem);
+			}
+		}
+
+		section->accessors--;
+
+		if (writeBack && !section->accessors && section->modified) {
+			CCWriteSectionPrepare(section);
+		} else {
+			writeBack = false;
+		}
+
+		break;
+	}
+
+	if (writeBack) {
+		CCWriteSection(section);
+	}
+}
+
+
+EsError CCSpaceAccess(CCSpace *cache, K_USER_BUFFER void *_buffer, EsFileOffset offset, EsFileOffset count, uint32_t flags, 
+        MMSpace *mapSpace = nullptr, unsigned mapFlags = ES_FLAGS_DEFAULT) {
+
+    // TODO Reading in multiple active sections at the same time - will this give better performance on AHCI/NVMe?
+    // 	- Each active section needs to be separately committed.
+    // TODO Read-ahead.
+
+    // Commit CC_ACTIVE_SECTION_SIZE bytes, since we require an active section to be active at a time.
+
+    if (!MMCommit(CC_ACTIVE_SECTION_SIZE, true)) {
+        return ES_ERROR_INSUFFICIENT_RESOURCES;
+    }
+
+    EsDefer(MMDecommit(CC_ACTIVE_SECTION_SIZE, true));
+
+    K_USER_BUFFER uint8_t *buffer = (uint8_t *) _buffer;
+
+    EsFileOffset firstSection = RoundDown(offset, CC_ACTIVE_SECTION_SIZE),
+                 lastSection = RoundUp(offset + count, CC_ACTIVE_SECTION_SIZE);
+
+    uintptr_t guessedActiveSectionIndex = 0;
+
+    bool writeBack = (flags & CC_ACCESS_WRITE_BACK) && (~flags & CC_ACCESS_PRECISE);
+    bool preciseWriteBack = (flags & CC_ACCESS_WRITE_BACK) && (flags & CC_ACCESS_PRECISE);
+
+    for (EsFileOffset sectionOffset = firstSection; sectionOffset < lastSection; sectionOffset += CC_ACTIVE_SECTION_SIZE) {
+        if (MM_AVAILABLE_PAGES() < MM_CRITICAL_AVAILABLE_PAGES_THRESHOLD && !GetCurrentThread()->isPageGenerator) {
+            KernelLog(LOG_ERROR, "Memory", "waiting for non-critical state", "File cache read on non-generator thread, waiting for more available pages.\n");
+            KEventWait(&pmm.availableNotCritical);
+        }
+
+        EsFileOffset start = sectionOffset < offset ? offset - sectionOffset : 0;
+        EsFileOffset   end = sectionOffset + CC_ACTIVE_SECTION_SIZE > offset + count ? offset + count - sectionOffset : CC_ACTIVE_SECTION_SIZE;
+
+        EsFileOffset pageStart = RoundDown(start, (EsFileOffset) K_PAGE_SIZE) / K_PAGE_SIZE;
+        EsFileOffset   pageEnd =   RoundUp(end,   (EsFileOffset) K_PAGE_SIZE) / K_PAGE_SIZE;
+
+        // Find the section in the active sections list.
+
+        KMutexAcquire(&cache->activeSectionsMutex);
+
+        bool found = false;
+        uintptr_t index = 0;
+
+        if (guessedActiveSectionIndex < cache->activeSections.Length()
+                && cache->activeSections[guessedActiveSectionIndex].offset == sectionOffset) {
+            index = guessedActiveSectionIndex;
+            found = true;
+        }
+
+        if (!found && cache->activeSections.Length()) {
+            intptr_t low = 0, high = cache->activeSections.Length() - 1;
+
+            while (low <= high) {
+                intptr_t i = low + (high - low) / 2;
+
+                if (cache->activeSections[i].offset < sectionOffset) {
+                    low = i + 1;
+                } else if (cache->activeSections[i].offset > sectionOffset) {
+                    high = i - 1;
+                } else {
+                    index = i;
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found) {
+                index = low;
+                if (high + 1 != low) KernelPanic("CCSpaceAccess - Bad binary search.\n");
+            }
+        }
+
+        if (found) {
+            guessedActiveSectionIndex = index + 1;
+        }
+
+        KMutexAcquire(&activeSectionManager.mutex);
+
+        CCActiveSection *section;
+
+        // Replace active section in list if it has been used for something else.
+
+        bool replace = false;
+
+        if (found) {
+            CCActiveSection *section = activeSectionManager.sections + cache->activeSections[index].index;
+
+            if (section->cache != cache || section->offset != sectionOffset) {
+                replace = true, found = false;
+            }
+        }
+
+        if (!found) {
+            // Allocate a new active section.
+
+            if (!activeSectionManager.lruList.count) {
+                KMutexRelease(&activeSectionManager.mutex);
+                KMutexRelease(&cache->activeSectionsMutex);
+                return ES_ERROR_INSUFFICIENT_RESOURCES;
+            }
+
+            section = activeSectionManager.lruList.firstItem->thisItem;
+
+            // Add it to the file cache's list of active sections.
+
+            CCActiveSectionReference reference = { .offset = sectionOffset, .index = (uintptr_t) (section - activeSectionManager.sections) };
+
+            if (replace) {
+                cache->activeSections[index] = reference;
+            } else {
+                if (!cache->activeSections.Insert(reference, index)) {
+                    KMutexRelease(&activeSectionManager.mutex);
+                    KMutexRelease(&cache->activeSectionsMutex);
+                    return ES_ERROR_INSUFFICIENT_RESOURCES;
+                }
+            }
+
+            if (section->cache) {
+                // Dereference pages.
+
+                if (section->accessors) {
+                    KernelPanic("CCSpaceAccess - Attempting to dereference active section %x with %d accessors.\n", 
+                            section, section->accessors);
+                }
+
+                CCDereferenceActiveSection(section);
+
+                // Uncover the section's previous contents.
+
+                KMutexAcquire(&section->cache->cachedSectionsMutex);
+                CCSpaceUncover(section->cache, section->offset, section->offset + CC_ACTIVE_SECTION_SIZE);
+                KMutexRelease(&section->cache->cachedSectionsMutex);
+
+                section->cache = nullptr;
+            }
+
+            // Make sure there are cached sections covering the region of the active section.
+
+            KMutexAcquire(&cache->cachedSectionsMutex);
+
+            if (!CCSpaceCover(cache, sectionOffset, sectionOffset + CC_ACTIVE_SECTION_SIZE)) {
+                KMutexRelease(&cache->cachedSectionsMutex);
+                cache->activeSections.Delete(index);
+                KMutexRelease(&activeSectionManager.mutex);
+                KMutexRelease(&cache->activeSectionsMutex);
+                return ES_ERROR_INSUFFICIENT_RESOURCES;
+            }
+
+            KMutexRelease(&cache->cachedSectionsMutex);
+
+            // Remove it from the LRU list.
+
+            activeSectionManager.lruList.Remove(activeSectionManager.lruList.firstItem);
+
+            // Setup the section.
+
+            if (section->accessors) KernelPanic("CCSpaceAccess - Active section %x in the LRU list had accessors.\n", section);
+            if (section->loading) KernelPanic("CCSpaceAccess - Active section %x in the LRU list was loading.\n", section);
+
+            section->accessors = 1;
+            section->offset = sectionOffset;
+            section->cache = cache;
+
+#if 0
+            {
+                Node *node = EsContainerOf(Node, file.cache, cache);
+                EsPrint("active section %d: %s, %x\n", reference.index, node->nameBytes, node->nameBuffer, section->offset);
+            }
+#endif
+
+#ifdef DEBUG_BUILD
+            for (uintptr_t i = 1; i < cache->activeSections.Length(); i++) {
+                if (cache->activeSections[i - 1].offset >= cache->activeSections[i].offset) {
+                    KernelPanic("CCSpaceAccess - Active sections list in cache %x unordered.\n", cache);
+                }
+            }
+#endif
+        } else {
+            // Remove the active section from the LRU/modified list, if present, 
+            // and increment the accessors count.
+            // Don't bother keeping track of its place in the modified list.
+
+            section = activeSectionManager.sections + cache->activeSections[index].index;
+
+            if (!section->accessors) {
+                if (section->writing) KernelPanic("CCSpaceAccess - Active section %x in list is being written.\n", section);
+                section->listItem.RemoveFromList();
+            } else if (section->listItem.list) {
+                KernelPanic("CCSpaceAccess - Active section %x in list had accessors (2).\n", section);
+            }
+
+            section->accessors++;
+        }
+
+        KMutexRelease(&activeSectionManager.mutex);
+        KMutexRelease(&cache->activeSectionsMutex);
+
+        if ((flags & CC_ACCESS_WRITE) && section->writing) {
+            // If writing, wait for any in progress write-behinds to complete.
+            // Note that, once this event is set, a new write can't be started until accessors is 0.
+
+            KEventWait(&section->writeCompleteEvent);
+        }
+
+        uint8_t *sectionBase = activeSectionManager.baseAddress + (section - activeSectionManager.sections) * CC_ACTIVE_SECTION_SIZE;
+
+        // Check if all the pages are already referenced (and hence loaded and mapped).
+
+        bool allReferenced = true;
+
+        for (uintptr_t i = pageStart; i < pageEnd; i++) {
+            if (~section->referencedPages[i >> 3] & (1 << (i & 7))) {
+                allReferenced = false;
+                break;
+            }
+        }
+
+        uint8_t alreadyWritten[CC_ACTIVE_SECTION_SIZE / K_PAGE_SIZE / 8] = {};
+
+        if (allReferenced) {
+            goto copy;
+        }
+
+        while (true) {
+            KMutexAcquire(&cache->cachedSectionsMutex);
+
+            // Find the first cached section covering this active section.
+
+            CCCachedSection *cachedSection = CCFindCachedSectionContaining(cache, sectionOffset);
+
+            if (!cachedSection) {
+                KernelPanic("CCSpaceAccess - Active section %x not covered.\n", section);
+            }
+
+            // Find where the requested region is located.
+
+            uintptr_t pagesToSkip = pageStart + (sectionOffset - cachedSection->offset) / K_PAGE_SIZE,
+                      pageInCachedSectionIndex = 0;
+
+            while (pagesToSkip) {
+                if (pagesToSkip >= cachedSection->pageCount) {
+                    pagesToSkip -= cachedSection->pageCount;
+                    cachedSection++;
+                } else {
+                    pageInCachedSectionIndex = pagesToSkip;
+                    pagesToSkip = 0;
+                }
+            }
+
+            if (pageInCachedSectionIndex >= cachedSection->pageCount 
+                    || cachedSection >= cache->cachedSections.array + cache->cachedSections.Length()) {
+                KernelPanic("CCSpaceAccess - Invalid requested region search result.\n");
+            }
+
+            // Reference all loaded pages, and record the ones we need to load.
+
+            uintptr_t *pagesToLoad[CC_ACTIVE_SECTION_SIZE / K_PAGE_SIZE];
+            uintptr_t loadCount = 0;
+
+            for (uintptr_t i = pageStart; i < pageEnd; i++) {
+                if (cachedSection == cache->cachedSections.array + cache->cachedSections.Length()) {
+                    KernelPanic("CCSpaceAccess - Not enough cached sections.\n");
+                }
+
+                KMutexAcquire(&pmm.pageFrameMutex);
+
+                uintptr_t entry = cachedSection->data[pageInCachedSectionIndex];
+                pagesToLoad[i] = nullptr;
+
+                if ((entry & MM_SHARED_ENTRY_PRESENT) && (~section->referencedPages[i >> 3] & (1 << (i & 7)))) {
+                    MMPageFrame *frame = pmm.pageFrames + (entry >> K_PAGE_BITS);
+
+                    if (frame->state == MMPageFrame::STANDBY) {
+                        // The page was mapped out from all MMSpaces, and therefore was placed on the standby list.
+                        // Mark the page as active before we map it.
+                        MMPhysicalActivatePages(entry / K_PAGE_SIZE, 1, ES_FLAGS_DEFAULT);
+                        frame->cacheReference = cachedSection->data + pageInCachedSectionIndex;
+                    } else if (frame->state != MMPageFrame::ACTIVE) {
+                        KernelPanic("CCSpaceAccess - Page frame %x was neither standby nor active.\n", frame);
+                    } else if (!frame->active.references) {
+                        KernelPanic("CCSpaceAccess - Active page frame %x had no references.\n", frame);
+                    }
+
+                    frame->active.references++;
+                    MMArchMapPage(kernelMMSpace, entry & ~(K_PAGE_SIZE - 1), (uintptr_t) sectionBase + i * K_PAGE_SIZE, MM_MAP_PAGE_FRAME_LOCK_ACQUIRED);
+
+                    __sync_synchronize();
+                    section->referencedPages[i >> 3] |= 1 << (i & 7);
+                    section->referencedPageCount++;
+                } else if (~entry & MM_SHARED_ENTRY_PRESENT) {
+                    if (section->referencedPages[i >> 3] & (1 << (i & 7))) {
+                        KernelPanic("CCSpaceAccess - Referenced page was not present.\n");
+                    }
+
+                    pagesToLoad[i] = cachedSection->data + pageInCachedSectionIndex;
+                    loadCount++;
+                }
+
+                KMutexRelease(&pmm.pageFrameMutex);
+
+                pageInCachedSectionIndex++;
+
+                if (pageInCachedSectionIndex == cachedSection->pageCount) {
+                    pageInCachedSectionIndex = 0;
+                    cachedSection++;
+                }
+            }
+
+            if (!loadCount) {
+                KMutexRelease(&cache->cachedSectionsMutex);
+                goto copy;
+            }
+
+            // If another thread is already trying to load pages into the active section,
+            // then wait for it to complete.
+
+            bool loadCollision = section->loading;
+
+            if (!loadCollision) {
+                section->loading = true;
+                KEventReset(&section->loadCompleteEvent);
+            }
+
+            KMutexRelease(&cache->cachedSectionsMutex);
+
+            if (loadCollision) {
+                KEventWait(&section->loadCompleteEvent);
+                continue;
+            }
+
+            // Allocate, reference and map physical pages.
+
+            uintptr_t pageFrames[CC_ACTIVE_SECTION_SIZE / K_PAGE_SIZE];
+
+            for (uintptr_t i = pageStart; i < pageEnd; i++) {
+                if (!pagesToLoad[i]) {
+                    continue;
+                }
+
+                pageFrames[i] = MMPhysicalAllocate(ES_FLAGS_DEFAULT);
+
+                MMPageFrame *frame = pmm.pageFrames + (pageFrames[i] >> K_PAGE_BITS);
+                frame->active.references = 1;
+                frame->cacheReference = pagesToLoad[i];
+
+                MMArchMapPage(kernelMMSpace, pageFrames[i], (uintptr_t) sectionBase + i * K_PAGE_SIZE, ES_FLAGS_DEFAULT);
+            }
+
+            // Read from the cache's backing store.
+
+            EsError error = ES_SUCCESS;
+
+            if ((flags & CC_ACCESS_WRITE) && (~flags & CC_ACCESS_USER_BUFFER_MAPPED)) {
+                bool loadedStart = false;
+
+                if (error == ES_SUCCESS && (start & (K_PAGE_SIZE - 1)) && pagesToLoad[pageStart]) {
+                    // Left side of the accessed region is not page aligned, so we need to load in the page.
+
+                    error = cache->callbacks->readInto(cache, sectionBase + pageStart * K_PAGE_SIZE, 
+                            section->offset + pageStart * K_PAGE_SIZE, K_PAGE_SIZE);
+                    loadedStart = true;
+                }
+
+                if (error == ES_SUCCESS && (end & (K_PAGE_SIZE - 1)) && !(pageStart == pageEnd - 1 && loadedStart) && pagesToLoad[pageEnd - 1]) {
+                    // Right side of the accessed region is not page aligned, so we need to load in the page.
+
+                    error = cache->callbacks->readInto(cache, sectionBase + (pageEnd - 1) * K_PAGE_SIZE, 
+                            section->offset + (pageEnd - 1) * K_PAGE_SIZE, K_PAGE_SIZE);
+                }
+
+                K_USER_BUFFER uint8_t *buffer2 = buffer;
+
+                // Initialise the rest of the contents HERE, before referencing the pages.
+                // The user buffer cannot be mapped otherwise we could deadlock while reading from it,
+                // as we have marked the active section in the loading state.
+
+                for (uintptr_t i = pageStart; i < pageEnd; i++) {
+                    uintptr_t left = i == pageStart ? (start & (K_PAGE_SIZE - 1)) : 0;
+                    uintptr_t right = i == pageEnd - 1 ? (end & (K_PAGE_SIZE - 1)) : K_PAGE_SIZE;
+                    if (!right) right = K_PAGE_SIZE;
+
+                    if (pagesToLoad[i]) {
+                        EsMemoryCopy(sectionBase + i * K_PAGE_SIZE + left, buffer2, right - left);
+                        alreadyWritten[i >> 3] |= 1 << (i & 7);
+                    }
+
+                    buffer2 += right - left;
+                }
+
+                if (buffer + (end - start) != buffer2) {
+                    KernelPanic("CCSpaceAccess - Incorrect page left/right calculation.\n");
+                }
+            } else {
+                for (uintptr_t i = pageStart; i < pageEnd; i++) {
+                    uintptr_t from = i, count = 0;
+
+                    while (i != pageEnd && pagesToLoad[i]) {
+                        count++, i++;
+                    }
+
+                    if (!count) continue;
+
+                    error = cache->callbacks->readInto(cache, sectionBase + from * K_PAGE_SIZE, 
+                            section->offset + from * K_PAGE_SIZE, count * K_PAGE_SIZE);
+
+                    if (error != ES_SUCCESS) {
+                        break;
+                    }
+                }
+            }
+
+            if (error != ES_SUCCESS) {
+                // Free and unmap the pages we allocated if there was an error.
+
+                for (uintptr_t i = pageStart; i < pageEnd; i++) {
+                    if (!pagesToLoad[i]) continue;
+                    MMArchUnmapPages(kernelMMSpace, (uintptr_t) sectionBase + i * K_PAGE_SIZE, 1, ES_FLAGS_DEFAULT);
+                    MMPhysicalFree(pageFrames[i], false, 1);
+                }
+            }
+
+            KMutexAcquire(&cache->cachedSectionsMutex);
+
+            // Write the pages to the cached sections, and mark them as referenced.
+
+            if (error == ES_SUCCESS) {
+                for (uintptr_t i = pageStart; i < pageEnd; i++) {
+                    if (pagesToLoad[i]) {
+                        *pagesToLoad[i] = pageFrames[i] | MM_SHARED_ENTRY_PRESENT;
+                        section->referencedPages[i >> 3] |= 1 << (i & 7);
+                        section->referencedPageCount++;
+                    }
+                }
+            }
+
+            // Return active section to normal state, and set the load complete event.
+
+            section->loading = false;
+            KEventSet(&section->loadCompleteEvent);
+
+            KMutexRelease(&cache->cachedSectionsMutex);
+
+            if (error != ES_SUCCESS) {
+                return error;
+            }
+
+            break;
+        }
+
+copy:;
+
+     if (GetLocalStorage()->spinlockCount) {
+         KernelPanic("CCSpaceAccess - Spinlocks acquired.\n");
+     }
+
+     // Copy into/from the user's buffer.
+
+     if (buffer) {
+         if (flags & CC_ACCESS_MAP) {
+             if ((start & (K_PAGE_SIZE - 1)) || (end & (K_PAGE_SIZE - 1)) || ((uintptr_t) buffer & (K_PAGE_SIZE - 1))) {
+                 KernelPanic("CCSpaceAccess - Passed READ_MAP flag, but start/end/buffer misaligned.\n");
+             }
+
+             for (uintptr_t i = start; i < end; i += K_PAGE_SIZE) {
+                 uintptr_t physicalAddress = MMArchTranslateAddress(kernelMMSpace, (uintptr_t) sectionBase + i, false);
+                 KMutexAcquire(&pmm.pageFrameMutex);
+                 MMPageFrame *frame = &pmm.pageFrames[physicalAddress / K_PAGE_SIZE];
+
+                 if (frame->state != MMPageFrame::ACTIVE || !frame->active.references) {
+                     KernelPanic("CCSpaceAccess - Bad active frame %x; removed while still in use by the active section.\n", frame);
+                 }
+
+                 frame->active.references++;
+
+                 if (!MMArchMapPage(mapSpace, physicalAddress, (uintptr_t) buffer, 
+                             mapFlags | MM_MAP_PAGE_IGNORE_IF_MAPPED /* since this isn't locked */
+                             | MM_MAP_PAGE_FRAME_LOCK_ACQUIRED)) {
+                     // The page was already mapped.
+                     // Don't need to check if this goes to zero, because the page frame mutex is still acquired.
+                     frame->active.references--;
+                 }
+
+                 KMutexRelease(&pmm.pageFrameMutex);
+                 buffer += K_PAGE_SIZE;
+             }
+         } else if (flags & CC_ACCESS_READ) {
+             EsMemoryCopy(buffer, sectionBase + start, end - start);
+             buffer += end - start;
+         } else if (flags & CC_ACCESS_WRITE) {
+             for (uintptr_t i = pageStart; i < pageEnd; i++) {
+                 uintptr_t left = i == pageStart ? (start & (K_PAGE_SIZE - 1)) : 0;
+                 uintptr_t right = i == pageEnd - 1 ? (end & (K_PAGE_SIZE - 1)) : K_PAGE_SIZE;
+                 if (!right) right = K_PAGE_SIZE;
+
+                 if (~alreadyWritten[i >> 3] & (1 << (i & 7))) {
+                     EsMemoryCopy(sectionBase + i * K_PAGE_SIZE + left, buffer, right - left);
+                 }
+
+                 buffer += right - left;
+
+                 if (!preciseWriteBack) {
+                     __sync_fetch_and_or(section->modifiedPages + (i >> 3), 1 << (i & 7));
+                 }
+             }
+
+             if (!preciseWriteBack) {
+                 section->modified = true;
+             } else {
+                 uint8_t *sectionBase = activeSectionManager.baseAddress + (section - activeSectionManager.sections) * CC_ACTIVE_SECTION_SIZE;
+                 EsError error = section->cache->callbacks->writeFrom(section->cache, sectionBase + start, section->offset + start, end - start);
+
+                 if (error != ES_SUCCESS) {
+                     CCActiveSectionReturnToLists(section, writeBack);
+                     return error;
+                 }
+             }
+         }
+     }
+
+     CCActiveSectionReturnToLists(section, writeBack);
+    }
+
+    return ES_SUCCESS;
+
+}
+
+
+bool MMHandlePageFault(MMSpace *space, uintptr_t address, unsigned faultFlags) {
+	// EsPrint("HandlePageFault: %x/%x/%x\n", space, address, faultFlags);
+
+	address &= ~(K_PAGE_SIZE - 1);
+
+	bool lockAcquired = faultFlags & MM_HANDLE_PAGE_FAULT_LOCK_ACQUIRED;
+	MMRegion *region;
+
+	if (!lockAcquired && MM_AVAILABLE_PAGES() < MM_CRITICAL_AVAILABLE_PAGES_THRESHOLD && GetCurrentThread() && !GetCurrentThread()->isPageGenerator) {
+		KernelLog(LOG_ERROR, "Memory", "waiting for non-critical state", "Page fault on non-generator thread, waiting for more available pages.\n");
+		KEventWait(&pmm.availableNotCritical);
+	}
+
+	{
+		if (!lockAcquired) KMutexAcquire(&space->reserveMutex);
+		else KMutexAssertLocked(&space->reserveMutex);
+		EsDefer(if (!lockAcquired) KMutexRelease(&space->reserveMutex));
+
+		// Find the region, and pin it (so it can't be freed).
+		region = MMFindRegion(space, address);
+		if (!region) return false;
+		if (!KWriterLockTake(&region->data.pin, K_LOCK_SHARED, true /* poll */)) return false;
+	}
+
+	EsDefer(KWriterLockReturn(&region->data.pin, K_LOCK_SHARED));
+	KMutexAcquire(&region->data.mapMutex);
+	EsDefer(KMutexRelease(&region->data.mapMutex));
+
+	if (MMArchTranslateAddress(space, address, faultFlags & MM_HANDLE_PAGE_FAULT_WRITE)) {
+		// Spurious page fault.
+		return true;
+	}
+
+	bool copyOnWrite = false, markModified = false;
+
+	if (faultFlags & MM_HANDLE_PAGE_FAULT_WRITE) {
+		if (region->flags & MM_REGION_COPY_ON_WRITE) {
+			// This is copy-on-write page that needs to be copied.
+			copyOnWrite = true;
+		} else if (region->flags & MM_REGION_READ_ONLY) {
+			// The page was read-only.
+			KernelLog(LOG_ERROR, "Memory", "read only page fault", "MMHandlePageFault - Page was read only.\n");
+			return false;
+		} else {
+			// We mapped the page as read-only so we could track whether it has been written to.
+			// It has now been written to.
+			markModified = true;
+		}
+	}
+
+	uintptr_t offsetIntoRegion = address - region->baseAddress;
+	uint64_t needZeroPages = 0;
+	bool zeroPage = true;
+
+	if (space->user) {
+		needZeroPages = MM_PHYSICAL_ALLOCATE_ZEROED;
+		zeroPage = false;
+	}
+
+	unsigned flags = ES_FLAGS_DEFAULT;
+
+	if (space->user) flags |= MM_MAP_PAGE_USER;
+	if (region->flags & MM_REGION_NOT_CACHEABLE) flags |= MM_MAP_PAGE_NOT_CACHEABLE;
+	if (region->flags & MM_REGION_WRITE_COMBINING) flags |= MM_MAP_PAGE_WRITE_COMBINING;
+	if (!markModified && !(region->flags & MM_REGION_FIXED) && (region->flags & MM_REGION_FILE)) flags |= MM_MAP_PAGE_READ_ONLY;
+
+	if (region->flags & MM_REGION_PHYSICAL) {
+		MMArchMapPage(space, region->data.physical.offset + address - region->baseAddress, address, flags);
+		return true;
+	} else if (region->flags & MM_REGION_SHARED) {
+		MMSharedRegion *sharedRegion = region->data.shared.region;
+
+		if (!sharedRegion->handles) {
+			KernelPanic("MMHandlePageFault - Shared region has no handles.\n");
+		}
+
+		KMutexAcquire(&sharedRegion->mutex);
+
+		uintptr_t offset = address - region->baseAddress + region->data.shared.offset;
+
+		if (offset >= sharedRegion->sizeBytes) {
+			KMutexRelease(&sharedRegion->mutex);
+			KernelLog(LOG_ERROR, "Memory", "outside shared size", "MMHandlePageFault - Attempting to access shared memory past end of region.\n");
+			return false;
+		}
+
+		uintptr_t *entry = (uintptr_t *) sharedRegion->data + (offset / K_PAGE_SIZE);
+
+		if (*entry & MM_SHARED_ENTRY_PRESENT) zeroPage = false;
+		else *entry = MMPhysicalAllocate(needZeroPages) | MM_SHARED_ENTRY_PRESENT;
+
+		MMArchMapPage(space, *entry & ~(K_PAGE_SIZE - 1), address, flags);
+		if (zeroPage) EsMemoryZero((void *) address, K_PAGE_SIZE); 
+		KMutexRelease(&sharedRegion->mutex);
+		return true;
+	} else if (region->flags & MM_REGION_FILE) {
+		if (address >= region->baseAddress + (region->pageCount << K_PAGE_BITS) - region->data.file.zeroedBytes) {
+			// EsPrint("%x:%d\n", address, needZeroPages);
+			MMArchMapPage(space, MMPhysicalAllocate(needZeroPages), address, (flags & ~MM_MAP_PAGE_READ_ONLY) | MM_MAP_PAGE_COPIED);
+			if (zeroPage) EsMemoryZero((void *) address, K_PAGE_SIZE); 
+			return true;
+		}
+
+		if (copyOnWrite) {
+			doCopyOnWrite:;
+			uintptr_t existingTranslation = MMArchTranslateAddress(space, address);
+
+			if (existingTranslation) {
+				// We need to use PMCopy, because as soon as the page is mapped for the user,
+				// other threads can access it.
+				uintptr_t page = MMPhysicalAllocate(ES_FLAGS_DEFAULT);
+				PMCopy(page, (void *) address, 1);
+				MMArchUnmapPages(space, address, 1, MM_UNMAP_PAGES_BALANCE_FILE);
+				MMArchMapPage(space, page, address, (flags & ~MM_MAP_PAGE_READ_ONLY) | MM_MAP_PAGE_COPIED);
+				return true;
+			} else {
+				// EsPrint("Write to unmapped, %x.\n", address);
+			}
+		}
+
+		KMutexRelease(&region->data.mapMutex);
+
+		size_t pagesToRead = 16;
+
+		if (region->pageCount - (offsetIntoRegion + region->data.file.zeroedBytes) / K_PAGE_SIZE < pagesToRead) {
+			pagesToRead = region->pageCount - (offsetIntoRegion + region->data.file.zeroedBytes) / K_PAGE_SIZE;
+		}
+
+		EsError error = CCSpaceAccess(&region->data.file.node->cache, (void *) address, 
+				offsetIntoRegion + region->data.file.offset, pagesToRead * K_PAGE_SIZE, 
+				CC_ACCESS_MAP, space, flags);
+
+		KMutexAcquire(&region->data.mapMutex);
+
+		if (error != ES_SUCCESS) {
+			KernelLog(LOG_ERROR, "Memory", "mapped file read error", "MMHandlePageFault - Could not read from file %x. Error: %d.\n", 
+					region->data.file.node, error);
+			return false;
+		}
+
+		if (copyOnWrite) {
+			goto doCopyOnWrite;
+		}
+
+		return true;
+	} else if (region->flags & MM_REGION_NORMAL) {
+		if (!(region->flags & MM_REGION_NO_COMMIT_TRACKING)) {
+			if (!region->data.normal.commit.Contains(offsetIntoRegion >> K_PAGE_BITS)) {
+				KernelLog(LOG_ERROR, "Memory", "outside commit range", "MMHandlePageFault - Attempting to access uncommitted memory in reserved region.\n");
+				return false;
+			}
+		}
+
+		MMArchMapPage(space, MMPhysicalAllocate(needZeroPages), address, flags);
+		if (zeroPage) EsMemoryZero((void *) address, K_PAGE_SIZE); 
+		return true;
+	} else if (region->flags & MM_REGION_GUARD) {
+		KernelLog(LOG_ERROR, "Memory", "guard page hit", "MMHandlePageFault - Guard page hit!\n");
+		return false;
+	} else {
+		KernelLog(LOG_ERROR, "Memory", "cannot fault in region", "MMHandlePageFault - Unsupported region type (flags: %x).\n", region->flags);
+		return false;
+	}
+}
+
+
+
+
 
 
 
@@ -3455,140 +6189,11 @@ void FSUnmountFileSystem(uintptr_t argument) {
 	KEventSet(&fs.fileSystemUnmounted, true);
 }
 
-#define CC_ACTIVE_SECTION_SIZE                    ((EsFileOffset) 262144)
-
-struct CCActiveSectionReference {
-	EsFileOffset offset; // Offset into the file; multiple of CC_ACTIVE_SECTION_SIZE.
-	uintptr_t index; // Index of the active section.
-};
-
-struct CCActiveSection {
-	KEvent loadCompleteEvent, writeCompleteEvent; 
-	LinkedItem<CCActiveSection> listItem; // Either in the LRU list, or the modified list. If accessors > 0, it should not be in a list.
-
-	EsFileOffset offset;
-	struct CCSpace *cache;
-
-	size_t accessors;
-	volatile bool loading, writing, modified, flush;
-
-	uint16_t referencedPageCount; 
-	uint8_t referencedPages[CC_ACTIVE_SECTION_SIZE / K_PAGE_SIZE / 8]; // If accessors > 0, then pages cannot be dereferenced.
-
-	uint8_t modifiedPages[CC_ACTIVE_SECTION_SIZE / K_PAGE_SIZE / 8];
-};
-
-struct MMActiveSectionManager {
-	CCActiveSection *sections;
-	size_t sectionCount;
-	uint8_t *baseAddress;
-	KMutex mutex;
-	LinkedList<CCActiveSection> lruList;
-	LinkedList<CCActiveSection> modifiedList;
-	KEvent modifiedNonEmpty, modifiedNonFull, modifiedGettingFull;
-	Thread *writeBackThread;
-};
-
-MMActiveSectionManager activeSectionManager;
-
-#define CC_MAX_MODIFIED                           (67108864 / CC_ACTIVE_SECTION_SIZE)
-#define CC_MODIFIED_GETTING_FULL                  (CC_MAX_MODIFIED * 2 / 3)
-
-void CCDereferenceActiveSection(CCActiveSection *section, uintptr_t startingPage = 0) {
-	KMutexAssertLocked(&activeSectionManager.mutex);
-
-	if (!startingPage) {
-		MMArchUnmapPages(kernelMMSpace, 
-				(uintptr_t) activeSectionManager.baseAddress + (section - activeSectionManager.sections) * CC_ACTIVE_SECTION_SIZE, 
-				CC_ACTIVE_SECTION_SIZE / K_PAGE_SIZE, MM_UNMAP_PAGES_BALANCE_FILE);
-		EsMemoryZero(section->referencedPages, sizeof(section->referencedPages));
-		EsMemoryZero(section->modifiedPages, sizeof(section->modifiedPages));
-		section->referencedPageCount = 0;
-	} else {
-		MMArchUnmapPages(kernelMMSpace, 
-				(uintptr_t) activeSectionManager.baseAddress 
-					+ (section - activeSectionManager.sections) * CC_ACTIVE_SECTION_SIZE 
-					+ startingPage * K_PAGE_SIZE, 
-				(CC_ACTIVE_SECTION_SIZE / K_PAGE_SIZE - startingPage), MM_UNMAP_PAGES_BALANCE_FILE);
-
-		for (uintptr_t i = startingPage; i < CC_ACTIVE_SECTION_SIZE / K_PAGE_SIZE; i++) {
-			if (section->referencedPages[i >> 3] & (1 << (i & 7))) {
-				section->referencedPages[i >> 3] &= ~(1 << (i & 7));
-				section->modifiedPages[i >> 3] &= ~(1 << (i & 7));
-				section->referencedPageCount--;
-			}
-		}
-	}
-}
 
 
-void CCWriteSectionPrepare(CCActiveSection *section) {
-	KMutexAssertLocked(&activeSectionManager.mutex);
-	if (!section->modified) KernelPanic("CCWriteSectionPrepare - Unmodified section %x on modified list.\n", section);
-	if (section->accessors) KernelPanic("CCWriteSectionPrepare - Section %x with accessors on modified list.\n", section);
-	if (section->writing) KernelPanic("CCWriteSectionPrepare - Section %x already being written.\n", section);
-	activeSectionManager.modifiedList.Remove(&section->listItem);
-	section->writing = true;
-	section->modified = false;
-	section->flush = false;
-	KEventReset(&section->writeCompleteEvent);
-	section->accessors = 1;
-	if (!activeSectionManager.modifiedList.count) KEventReset(&activeSectionManager.modifiedNonEmpty);
-	if (activeSectionManager.modifiedList.count < CC_MODIFIED_GETTING_FULL) KEventReset(&activeSectionManager.modifiedGettingFull);
-	KEventSet(&activeSectionManager.modifiedNonFull, true);
-}
-
-struct CCSpaceCallbacks {
-	EsError (*readInto)(CCSpace *fileCache, void *buffer, EsFileOffset offset, EsFileOffset count);
-	EsError (*writeFrom)(CCSpace *fileCache, const void *buffer, EsFileOffset offset, EsFileOffset count);
-};
 
 
-void CCWriteSection(CCActiveSection *section) {
-	// Write any modified pages to the backing store.
 
-	uint8_t *sectionBase = activeSectionManager.baseAddress + (section - activeSectionManager.sections) * CC_ACTIVE_SECTION_SIZE;
-	EsError error = ES_SUCCESS;
-
-	for (uintptr_t i = 0; i < CC_ACTIVE_SECTION_SIZE / K_PAGE_SIZE; i++) {
-		uintptr_t from = i, count = 0;
-
-		while (i != CC_ACTIVE_SECTION_SIZE / K_PAGE_SIZE 
-				&& (section->modifiedPages[i >> 3] & (1 << (i & 7)))) {
-			count++, i++;
-		}
-
-		if (!count) continue;
-
-		error = section->cache->callbacks->writeFrom(section->cache, sectionBase + from * K_PAGE_SIZE, 
-				section->offset + from * K_PAGE_SIZE, count * K_PAGE_SIZE);
-
-		if (error != ES_SUCCESS) {
-			break;
-		}
-	}
-
-	// Return the active section.
-
-	KMutexAcquire(&activeSectionManager.mutex);
-
-	if (!section->accessors) KernelPanic("CCWriteSection - Section %x has no accessors while being written.\n", section);
-	if (section->modified) KernelPanic("CCWriteSection - Section %x was modified while being written.\n", section);
-
-	section->accessors--;
-	section->writing = false;
-	EsMemoryZero(section->modifiedPages, sizeof(section->modifiedPages));
-	__sync_synchronize();
-	KEventSet(&section->writeCompleteEvent);
-	KEventSet(&section->cache->writeComplete, true);
-
-	if (!section->accessors) {
-		if (section->loading) KernelPanic("CCSpaceAccess - Active section %x with no accessors is loading.", section);
-		activeSectionManager.lruList.InsertEnd(&section->listItem);
-	}
-
-	KMutexRelease(&activeSectionManager.mutex);
-}
 
 
 
@@ -3974,24 +6579,6 @@ KMutex objectHandleCountChange;
 
 
 
-void EsMemoryCopy(void *_destination, const void *_source, size_t bytes) {
-	// TODO Prevent this from being optimised out in the kernel.
-
-	if (!bytes) {
-		return;
-	}
-
-	uint8_t *destination = (uint8_t *) _destination;
-	uint8_t *source = (uint8_t *) _source;
-
-	while (bytes >= 1) {
-		((uint8_t *) destination)[0] = ((uint8_t *) source)[0];
-
-		source += 1;
-		destination += 1;
-		bytes -= 1;
-	}
-}
 
 bool MMCommit(uint64_t bytes, bool fixed) {
 	if (bytes & (K_PAGE_SIZE - 1)) KernelPanic("MMCommit - Expected multiple of K_PAGE_SIZE bytes.\n");
@@ -5542,6 +8129,45 @@ void PMZero(uintptr_t *pages, size_t pageCount, bool contiguous) {
 	KMutexRelease(&pmm.pmManipulationLock);
 }
 
+
+void PMCopy(uintptr_t page, void *_source, size_t pageCount) {
+	uint8_t *source = (uint8_t *) _source;
+	KMutexAcquire(&pmm.pmManipulationLock);
+
+	repeat:;
+	size_t doCount = pageCount > PHYSICAL_MEMORY_MANIPULATION_REGION_PAGES ? PHYSICAL_MEMORY_MANIPULATION_REGION_PAGES : pageCount;
+	pageCount -= doCount;
+
+	{
+		MMSpace *vas = coreMMSpace;
+		void *region = pmm.pmManipulationRegion;
+
+		for (uintptr_t i = 0; i < doCount; i++) {
+			MMArchMapPage(vas, page + K_PAGE_SIZE * i, (uintptr_t) region + K_PAGE_SIZE * i, 
+					MM_MAP_PAGE_OVERWRITE | MM_MAP_PAGE_NO_NEW_TABLES);
+		}
+
+		KSpinlockAcquire(&pmm.pmManipulationProcessorLock);
+
+		for (uintptr_t i = 0; i < doCount; i++) {
+			ProcessorInvalidatePage((uintptr_t) region + i * K_PAGE_SIZE);
+		}
+
+		EsMemoryCopy(region, source, doCount * K_PAGE_SIZE);
+
+		KSpinlockRelease(&pmm.pmManipulationProcessorLock);
+	}
+
+	if (pageCount) {
+		page += PHYSICAL_MEMORY_MANIPULATION_REGION_PAGES * K_PAGE_SIZE;
+		source += PHYSICAL_MEMORY_MANIPULATION_REGION_PAGES * K_PAGE_SIZE;
+		goto repeat;
+	}
+
+	KMutexRelease(&pmm.pmManipulationLock);
+}
+
+
 void MMPhysicalInsertZeroedPage(uintptr_t page) {
 	if (GetCurrentThread() != pmm.zeroPageThread) {
 		KernelPanic("MMPhysicalInsertZeroedPage - Inserting a zeroed page not on the MMZeroPageThread.\n");
@@ -5998,9 +8624,12 @@ struct ACPI {
 
 ACPI acpi;
 
+size_t KGetCPUCount() {
+	return acpi.processorCount;
+}
 
-extern "C"
-{
+CPULocalStorage *KGetCPULocal(uintptr_t index) {
+	return acpi.processors[index].local;
 }
 
 struct InterruptContext {
@@ -6012,6 +8641,39 @@ struct InterruptContext {
 	uint64_t interruptNumber, errorCode;
 	uint64_t rip, cs, flags, rsp, ss;
 };
+
+InterruptContext *ArchInitialiseThread(uintptr_t kernelStack, uintptr_t kernelStackSize, Thread *thread, 
+		uintptr_t startAddress, uintptr_t argument1, uintptr_t argument2,
+		bool userland, uintptr_t stack, uintptr_t userStackSize) {
+	InterruptContext *context = ((InterruptContext *) (kernelStack + kernelStackSize - 8)) - 1;
+	thread->kernelStack = kernelStack + kernelStackSize - 8;
+	
+	// Terminate the thread when the outermost function exists.
+	*((uintptr_t *) (kernelStack + kernelStackSize - 8)) = (uintptr_t) &_KThreadTerminate;
+
+	context->fxsave[32] = 0x80;
+	context->fxsave[33] = 0x1F;
+
+	if (userland) {
+		context->cs = 0x5B;
+		context->ds = 0x63;
+		context->ss = 0x63;
+	} else {
+		context->cs = 0x48;
+		context->ds = 0x50;
+		context->ss = 0x50;
+	}
+
+	context->_check = 0x123456789ABCDEF; // Stack corruption detection.
+	context->flags = 1 << 9; // Interrupt flag
+	context->rip = startAddress;
+	context->rsp = stack + userStackSize - 8; // The stack should be 16-byte aligned before the call instruction.
+	context->rdi = argument1;
+	context->rsi = argument2;
+
+	return context;
+}
+
 
 struct MSIHandler {
 	KIRQHandler callback;
@@ -6071,10 +8733,100 @@ const char *const exceptionInformation[] = {
 #define INTERRUPT_VECTOR_MSI_START (0x70)
 #define INTERRUPT_VECTOR_MSI_COUNT (0x40)
 
+volatile uintptr_t tlbShootdownVirtualAddress;
+volatile size_t tlbShootdownPageCount;
 
 typedef void (*CallFunctionOnAllProcessorsCallbackFunction)();
 volatile CallFunctionOnAllProcessorsCallbackFunction callFunctionOnAllProcessorsCallback;
 volatile uintptr_t callFunctionOnAllProcessorsRemaining;
+//
+// Spinlock since some drivers need to access it in IRQs (e.g. ACPICA).
+KSpinlock pciConfigSpinlock; 
+
+KSpinlock ipiLock;
+uint32_t LapicReadRegister(uint32_t reg) {
+	return acpi.lapicAddress[reg];
+}
+
+void LapicWriteRegister(uint32_t reg, uint32_t value) {
+	acpi.lapicAddress[reg] = value;
+}
+
+void LapicNextTimer(size_t ms) {
+	LapicWriteRegister(0x320 >> 2, TIMER_INTERRUPT | (1 << 17)); 
+	LapicWriteRegister(0x380 >> 2, acpi.lapicTicksPerMs * ms); 
+}
+
+void LapicEndOfInterrupt() {
+	LapicWriteRegister(0xB0 >> 2, 0);
+}
+
+size_t ProcessorSendIPI(uintptr_t interrupt, bool nmi = false, int processorID = -1) {
+	// It's possible that another CPU is trying to send an IPI at the same time we want to send the panic IPI.
+	// TODO What should we do in this case?
+	if (interrupt != KERNEL_PANIC_IPI) KSpinlockAssertLocked(&ipiLock);
+
+	// Note: We send IPIs at a special priority that ProcessorDisableInterrupts doesn't mask.
+
+	size_t ignored = 0;
+
+	for (uintptr_t i = 0; i < acpi.processorCount; i++) {
+		ArchCPU *processor = acpi.processors + i;
+
+		if (processorID != -1) {
+			if (processorID != processor->kernelProcessorID) {
+				ignored++;
+				continue;
+			}
+		} else {
+			if (processor == GetLocalStorage()->archCPU || !processor->local || !processor->local->schedulerReady) {
+				ignored++;
+				continue;
+			}
+		}
+
+		uint32_t destination = acpi.processors[i].apicID << 24;
+		uint32_t command = interrupt | (1 << 14) | (nmi ? 0x400 : 0);
+		LapicWriteRegister(0x310 >> 2, destination);
+		LapicWriteRegister(0x300 >> 2, command); 
+
+		// Wait for the interrupt to be sent.
+		while (LapicReadRegister(0x300 >> 2) & (1 << 12));
+	}
+
+	return ignored;
+}
+
+void ArchCallFunctionOnAllProcessors(CallFunctionOnAllProcessorsCallbackFunction callback, bool includingThisProcessor) {
+	KSpinlockAssertLocked(&ipiLock);
+
+	if (KGetCPUCount() > 1) {
+		callFunctionOnAllProcessorsCallback = callback;
+		callFunctionOnAllProcessorsRemaining = KGetCPUCount();
+		size_t ignored = ProcessorSendIPI(CALL_FUNCTION_ON_ALL_PROCESSORS_IPI);
+		__sync_fetch_and_sub(&callFunctionOnAllProcessorsRemaining, ignored);
+		while (callFunctionOnAllProcessorsRemaining);
+		static volatile size_t totalIgnored = 0;
+		totalIgnored += ignored;
+	}
+
+	if (includingThisProcessor) callback();
+}
+
+#define INVALIDATE_ALL_PAGES_THRESHOLD (1024)
+
+void TLBShootdownCallback() {
+	uintptr_t page = tlbShootdownVirtualAddress;
+
+	if (tlbShootdownPageCount > INVALIDATE_ALL_PAGES_THRESHOLD) { 
+		ProcessorInvalidateAllPages();
+	} else {
+		for (uintptr_t i = 0; i < tlbShootdownPageCount; i++, page += K_PAGE_SIZE) {
+			ProcessorInvalidatePage(page);
+		}
+	}
+}
+
 
 uint8_t pciIRQLines[0x100 /* slots */][4 /* pins */];
 
@@ -6095,27 +8847,7 @@ EsUniqueIdentifier installationID; // The identifier of this OS installation, gi
 uint32_t bootloaderID;
 uintptr_t bootloaderInformationOffset;
 
-// Spinlock since some drivers need to access it in IRQs (e.g. ACPICA).
-KSpinlock pciConfigSpinlock; 
 
-KSpinlock ipiLock;
-
-uint32_t LapicReadRegister(uint32_t reg) {
-	return acpi.lapicAddress[reg];
-}
-
-void LapicWriteRegister(uint32_t reg, uint32_t value) {
-	acpi.lapicAddress[reg] = value;
-}
-
-void LapicNextTimer(size_t ms) {
-	LapicWriteRegister(0x320 >> 2, TIMER_INTERRUPT | (1 << 17)); 
-	LapicWriteRegister(0x380 >> 2, acpi.lapicTicksPerMs * ms); 
-}
-
-void LapicEndOfInterrupt() {
-	LapicWriteRegister(0xB0 >> 2, 0);
-}
 
 
 // Recursive page table mapping in slot 0x1FE, so that the top 2GB are available for mcmodel kernel.
@@ -6388,6 +9120,26 @@ bool MMArchMapPage(MMSpace *space, uintptr_t physicalAddress, uintptr_t virtualA
 	return true;
 }
 
+uintptr_t MMArchTranslateAddress(MMSpace *, uintptr_t virtualAddress, bool writeAccess) {
+	// TODO This mutex will be necessary if we ever remove page tables.
+	// space->data.mutex.Acquire();
+	// EsDefer(space->data.mutex.Release());
+
+#ifdef ES_ARCH_X86_64
+	virtualAddress &= 0x0000FFFFFFFFF000;
+	if ((PAGE_TABLE_L4[virtualAddress >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 3)] & 1) == 0) return 0;
+	if ((PAGE_TABLE_L3[virtualAddress >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 2)] & 1) == 0) return 0;
+#endif
+	if ((PAGE_TABLE_L2[virtualAddress >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 1)] & 1) == 0) return 0;
+	uintptr_t physicalAddress = PAGE_TABLE_L1[virtualAddress >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 0)];
+	if (writeAccess && !(physicalAddress & 2)) return 0;
+#ifdef ES_ARCH_X86_64
+	return (physicalAddress & 1) ? (physicalAddress & 0x0000FFFFFFFFF000) : 0;
+#else
+	return (physicalAddress & 1) ? (physicalAddress & 0xFFFFF000) : 0;
+#endif
+}
+
 bool MMArchHandlePageFault(uintptr_t address, uint32_t flags) {
 	address &= ~(K_PAGE_SIZE - 1);
 	bool forSupervisor = flags & MM_HANDLE_PAGE_FAULT_FOR_SUPERVISOR;
@@ -6480,6 +9232,1506 @@ bool PostContextSwitch(InterruptContext *context, MMSpace *oldAddressSpace) {
 
 	return newThread;
 }
+
+struct NewProcessorStorage {
+	struct CPULocalStorage *local;
+	uint32_t *gdt;
+};
+
+void SetupProcessor2(NewProcessorStorage *storage) {
+	// Setup the local interrupts for the current processor.
+		
+	for (uintptr_t i = 0; i < acpi.lapicNMICount; i++) {
+		if (acpi.lapicNMIs[i].processor == 0xFF
+				|| acpi.lapicNMIs[i].processor == storage->local->archCPU->processorID) {
+			uint32_t registerIndex = (0x350 + (acpi.lapicNMIs[i].lintIndex << 4)) >> 2;
+			uint32_t value = 2 | (1 << 10); // NMI exception interrupt vector.
+			if (acpi.lapicNMIs[i].activeLow) value |= 1 << 13;
+			if (acpi.lapicNMIs[i].levelTriggered) value |= 1 << 15;
+			LapicWriteRegister(registerIndex, value);
+		}
+	}
+
+	LapicWriteRegister(0x350 >> 2, LapicReadRegister(0x350 >> 2) & ~(1 << 16));
+	LapicWriteRegister(0x360 >> 2, LapicReadRegister(0x360 >> 2) & ~(1 << 16));
+	LapicWriteRegister(0x080 >> 2, 0);
+	if (LapicReadRegister(0x30 >> 2) & 0x80000000) LapicWriteRegister(0x410 >> 2, 0);
+	LapicEndOfInterrupt();
+
+	// Configure the LAPIC's timer.
+
+	LapicWriteRegister(0x3E0 >> 2, 2); // Divisor = 16
+
+	// Create the processor's local storage.
+
+	ProcessorSetLocalStorage(storage->local);
+
+	// Setup a GDT and TSS for the processor.
+
+#ifdef ES_ARCH_X86_64
+	uint32_t *gdt = storage->gdt;
+	void *bootstrapGDT = (void *) (((uint64_t *) ((uint16_t *) processorGDTR + 1))[0]);
+	EsMemoryCopy(gdt, bootstrapGDT, 2048);
+	uint32_t *tss = (uint32_t *) ((uint8_t *) storage->gdt + 2048);
+	storage->local->archCPU->kernelStack = (void **) (tss + 1);
+	ProcessorInstallTSS(gdt, tss);
+#endif
+}
+
+
+bool debugKeyPressed;
+
+
+void DriversDumpStateRecurse(KDevice *device) {
+	if (device->dumpState) {
+		device->dumpState(device);
+	}
+
+	for (uintptr_t i = 0; i < device->children.Length(); i++) {
+		DriversDumpStateRecurse(device->children[i]);
+	}
+}
+
+void DriversDumpState() {
+	KMutexAcquire(&deviceTreeMutex);
+	DriversDumpStateRecurse(deviceTreeRoot);
+	KMutexRelease(&deviceTreeMutex);
+}
+
+struct KGraphicsTarget : KDevice {
+	size_t screenWidth, screenHeight;
+	bool reducedColors; // Set to true if using less than 15 bit color.
+
+	void (*updateScreen)(K_USER_BUFFER const uint8_t *source, uint32_t sourceWidth, uint32_t sourceHeight, uint32_t sourceStride, 
+			uint32_t destinationX, uint32_t destinationY);
+	void (*debugPutBlock)(uintptr_t x, uintptr_t y, bool toggle);
+	void (*debugClearScreen)();
+};
+
+struct Graphics {
+    KGraphicsTarget *target;
+    size_t width, height; 
+	Surface frameBuffer;
+	bool debuggerActive;
+	size_t totalSurfaceBytes;
+};
+
+Graphics graphics;
+size_t debugRows, debugColumns, debugCurrentRow, debugCurrentColumn;
+bool printToDebugger = false;
+uintptr_t terminalPosition = 80;
+
+#define KERNEL_LOG_SIZE (262144)
+char kernelLog[KERNEL_LOG_SIZE];
+uintptr_t kernelLogPosition;
+
+KSpinlock terminalLock; 
+KSpinlock printLock;
+#define VGA_FONT_WIDTH (9)
+#define VGA_FONT_HEIGHT (16)
+
+const uint64_t vgaFont[] = {
+	0x0000000000000000UL, 0x0000000000000000UL, 0xBD8181A5817E0000UL, 0x000000007E818199UL, 0xC3FFFFDBFF7E0000UL, 0x000000007EFFFFE7UL, 0x7F7F7F3600000000UL, 0x00000000081C3E7FUL, 
+	0x7F3E1C0800000000UL, 0x0000000000081C3EUL, 0xE7E73C3C18000000UL, 0x000000003C1818E7UL, 0xFFFF7E3C18000000UL, 0x000000003C18187EUL, 0x3C18000000000000UL, 0x000000000000183CUL, 
+	0xC3E7FFFFFFFFFFFFUL, 0xFFFFFFFFFFFFE7C3UL, 0x42663C0000000000UL, 0x00000000003C6642UL, 0xBD99C3FFFFFFFFFFUL, 0xFFFFFFFFFFC399BDUL, 0x331E4C5870780000UL, 0x000000001E333333UL, 
+	0x3C666666663C0000UL, 0x0000000018187E18UL, 0x0C0C0CFCCCFC0000UL, 0x00000000070F0E0CUL, 0xC6C6C6FEC6FE0000UL, 0x0000000367E7E6C6UL, 0xE73CDB1818000000UL, 0x000000001818DB3CUL, 
+	0x1F7F1F0F07030100UL, 0x000000000103070FUL, 0x7C7F7C7870604000UL, 0x0000000040607078UL, 0x1818187E3C180000UL, 0x0000000000183C7EUL, 0x6666666666660000UL, 0x0000000066660066UL, 
+	0xD8DEDBDBDBFE0000UL, 0x00000000D8D8D8D8UL, 0x6363361C06633E00UL, 0x0000003E63301C36UL, 0x0000000000000000UL, 0x000000007F7F7F7FUL, 0x1818187E3C180000UL, 0x000000007E183C7EUL, 
+	0x1818187E3C180000UL, 0x0000000018181818UL, 0x1818181818180000UL, 0x00000000183C7E18UL, 0x7F30180000000000UL, 0x0000000000001830UL, 0x7F060C0000000000UL, 0x0000000000000C06UL, 
+	0x0303000000000000UL, 0x0000000000007F03UL, 0xFF66240000000000UL, 0x0000000000002466UL, 0x3E1C1C0800000000UL, 0x00000000007F7F3EUL, 0x3E3E7F7F00000000UL, 0x0000000000081C1CUL, 
+	0x0000000000000000UL, 0x0000000000000000UL, 0x18183C3C3C180000UL, 0x0000000018180018UL, 0x0000002466666600UL, 0x0000000000000000UL, 0x36367F3636000000UL, 0x0000000036367F36UL, 
+	0x603E0343633E1818UL, 0x000018183E636160UL, 0x1830634300000000UL, 0x000000006163060CUL, 0x3B6E1C36361C0000UL, 0x000000006E333333UL, 0x000000060C0C0C00UL, 0x0000000000000000UL, 
+	0x0C0C0C0C18300000UL, 0x0000000030180C0CUL, 0x30303030180C0000UL, 0x000000000C183030UL, 0xFF3C660000000000UL, 0x000000000000663CUL, 0x7E18180000000000UL, 0x0000000000001818UL, 
+	0x0000000000000000UL, 0x0000000C18181800UL, 0x7F00000000000000UL, 0x0000000000000000UL, 0x0000000000000000UL, 0x0000000018180000UL, 0x1830604000000000UL, 0x000000000103060CUL, 
+	0xDBDBC3C3663C0000UL, 0x000000003C66C3C3UL, 0x1818181E1C180000UL, 0x000000007E181818UL, 0x0C183060633E0000UL, 0x000000007F630306UL, 0x603C6060633E0000UL, 0x000000003E636060UL, 
+	0x7F33363C38300000UL, 0x0000000078303030UL, 0x603F0303037F0000UL, 0x000000003E636060UL, 0x633F0303061C0000UL, 0x000000003E636363UL, 0x18306060637F0000UL, 0x000000000C0C0C0CUL, 
+	0x633E6363633E0000UL, 0x000000003E636363UL, 0x607E6363633E0000UL, 0x000000001E306060UL, 0x0000181800000000UL, 0x0000000000181800UL, 0x0000181800000000UL, 0x000000000C181800UL, 
+	0x060C183060000000UL, 0x000000006030180CUL, 0x00007E0000000000UL, 0x000000000000007EUL, 0x6030180C06000000UL, 0x00000000060C1830UL, 0x18183063633E0000UL, 0x0000000018180018UL, 
+	0x7B7B63633E000000UL, 0x000000003E033B7BUL, 0x7F6363361C080000UL, 0x0000000063636363UL, 0x663E6666663F0000UL, 0x000000003F666666UL, 0x03030343663C0000UL, 0x000000003C664303UL, 
+	0x66666666361F0000UL, 0x000000001F366666UL, 0x161E1646667F0000UL, 0x000000007F664606UL, 0x161E1646667F0000UL, 0x000000000F060606UL, 0x7B030343663C0000UL, 0x000000005C666363UL, 
+	0x637F636363630000UL, 0x0000000063636363UL, 0x18181818183C0000UL, 0x000000003C181818UL, 0x3030303030780000UL, 0x000000001E333333UL, 0x1E1E366666670000UL, 0x0000000067666636UL, 
+	0x06060606060F0000UL, 0x000000007F664606UL, 0xC3DBFFFFE7C30000UL, 0x00000000C3C3C3C3UL, 0x737B7F6F67630000UL, 0x0000000063636363UL, 0x63636363633E0000UL, 0x000000003E636363UL, 
+	0x063E6666663F0000UL, 0x000000000F060606UL, 0x63636363633E0000UL, 0x000070303E7B6B63UL, 0x363E6666663F0000UL, 0x0000000067666666UL, 0x301C0663633E0000UL, 0x000000003E636360UL, 
+	0x18181899DBFF0000UL, 0x000000003C181818UL, 0x6363636363630000UL, 0x000000003E636363UL, 0xC3C3C3C3C3C30000UL, 0x00000000183C66C3UL, 0xDBC3C3C3C3C30000UL, 0x000000006666FFDBUL, 
+	0x18183C66C3C30000UL, 0x00000000C3C3663CUL, 0x183C66C3C3C30000UL, 0x000000003C181818UL, 0x0C183061C3FF0000UL, 0x00000000FFC38306UL, 0x0C0C0C0C0C3C0000UL, 0x000000003C0C0C0CUL, 
+	0x1C0E070301000000UL, 0x0000000040607038UL, 0x30303030303C0000UL, 0x000000003C303030UL, 0x0000000063361C08UL, 0x0000000000000000UL, 0x0000000000000000UL, 0x0000FF0000000000UL, 
+	0x0000000000180C0CUL, 0x0000000000000000UL, 0x3E301E0000000000UL, 0x000000006E333333UL, 0x66361E0606070000UL, 0x000000003E666666UL, 0x03633E0000000000UL, 0x000000003E630303UL, 
+	0x33363C3030380000UL, 0x000000006E333333UL, 0x7F633E0000000000UL, 0x000000003E630303UL, 0x060F0626361C0000UL, 0x000000000F060606UL, 0x33336E0000000000UL, 0x001E33303E333333UL, 
+	0x666E360606070000UL, 0x0000000067666666UL, 0x18181C0018180000UL, 0x000000003C181818UL, 0x6060700060600000UL, 0x003C666660606060UL, 0x1E36660606070000UL, 0x000000006766361EUL, 
+	0x18181818181C0000UL, 0x000000003C181818UL, 0xDBFF670000000000UL, 0x00000000DBDBDBDBUL, 0x66663B0000000000UL, 0x0000000066666666UL, 0x63633E0000000000UL, 0x000000003E636363UL, 
+	0x66663B0000000000UL, 0x000F06063E666666UL, 0x33336E0000000000UL, 0x007830303E333333UL, 0x666E3B0000000000UL, 0x000000000F060606UL, 0x06633E0000000000UL, 0x000000003E63301CUL, 
+	0x0C0C3F0C0C080000UL, 0x00000000386C0C0CUL, 0x3333330000000000UL, 0x000000006E333333UL, 0xC3C3C30000000000UL, 0x00000000183C66C3UL, 0xC3C3C30000000000UL, 0x0000000066FFDBDBUL, 
+	0x3C66C30000000000UL, 0x00000000C3663C18UL, 0x6363630000000000UL, 0x001F30607E636363UL, 0x18337F0000000000UL, 0x000000007F63060CUL, 0x180E181818700000UL, 0x0000000070181818UL, 
+	0x1800181818180000UL, 0x0000000018181818UL, 0x18701818180E0000UL, 0x000000000E181818UL, 0x000000003B6E0000UL, 0x0000000000000000UL, 0x63361C0800000000UL, 0x00000000007F6363UL, 
+};
+
+typedef void (*FormatCallback)(int character, void *data);
+
+#define UTF8_LENGTH_CHAR(character, value) { \
+	char first = *(character); \
+ \
+	if (!(first & 0x80)) \
+		value = 1; \
+	else if ((first & 0xE0) == 0xC0) \
+		value = 2; \
+	else if ((first & 0xF0) == 0xE0) \
+		value = 3; \
+  	else if ((first & 0xF8) == 0xF0) \
+		value = 4; \
+	else if ((first & 0xFC) == 0xF8) \
+		value = 5; \
+	else if ((first & 0xFE) == 0xFC) \
+		value = 6; \
+	else \
+		value = 0; \
+}
+
+#define ES_STRING_FORMAT_SIMPLE		(1 << 0)
+
+
+#define DEFINE_INTERFACE_STRING(name, text) static const char *interfaceString_ ## name = text;
+#define INTERFACE_STRING(name) interfaceString_ ## name, -1
+
+#define ELLIPSIS "…"
+#define HYPHENATION_POINT "‧"
+#define OPEN_SPEECH "\u201C"
+#define CLOSE_SPEECH "\u201D"
+#define SYSTEM_BRAND_SHORT "Essence"
+
+// Common.
+
+DEFINE_INTERFACE_STRING(CommonErrorTitle, "Error");
+
+DEFINE_INTERFACE_STRING(CommonOK, "OK");
+DEFINE_INTERFACE_STRING(CommonCancel, "Cancel");
+
+DEFINE_INTERFACE_STRING(CommonUndo, "Undo");
+DEFINE_INTERFACE_STRING(CommonRedo, "Redo");
+DEFINE_INTERFACE_STRING(CommonClipboardCut, "Cut");
+DEFINE_INTERFACE_STRING(CommonClipboardCopy, "Copy");
+DEFINE_INTERFACE_STRING(CommonClipboardPaste, "Paste");
+DEFINE_INTERFACE_STRING(CommonSelectionSelectAll, "Select all");
+DEFINE_INTERFACE_STRING(CommonSelectionDelete, "Delete");
+
+DEFINE_INTERFACE_STRING(CommonFormatPopup, "Format");
+DEFINE_INTERFACE_STRING(CommonFormatSize, "Text size:");
+DEFINE_INTERFACE_STRING(CommonFormatLanguage, "Language:");
+DEFINE_INTERFACE_STRING(CommonFormatPlainText, "Plain text");
+
+DEFINE_INTERFACE_STRING(CommonFileMenu, "File");
+DEFINE_INTERFACE_STRING(CommonFileSave, "Save");
+DEFINE_INTERFACE_STRING(CommonFileShare, "Share");
+DEFINE_INTERFACE_STRING(CommonFileMakeCopy, "Make a copy");
+DEFINE_INTERFACE_STRING(CommonFileVersionHistory, "Version history" ELLIPSIS);
+DEFINE_INTERFACE_STRING(CommonFileShowInFileManager, "Show in File Manager" ELLIPSIS);
+DEFINE_INTERFACE_STRING(CommonFileMenuFileSize, "Size:");
+DEFINE_INTERFACE_STRING(CommonFileMenuFileLocation, "Where:");
+DEFINE_INTERFACE_STRING(CommonFileUnchanged, "(All changes saved.)");
+
+DEFINE_INTERFACE_STRING(CommonZoomIn, "Zoom in");
+DEFINE_INTERFACE_STRING(CommonZoomOut, "Zoom out");
+
+DEFINE_INTERFACE_STRING(CommonSearchOpen, "Search");
+DEFINE_INTERFACE_STRING(CommonSearchNoMatches, "No matches found.");
+DEFINE_INTERFACE_STRING(CommonSearchNext, "Find next");
+DEFINE_INTERFACE_STRING(CommonSearchPrevious, "Find previous");
+DEFINE_INTERFACE_STRING(CommonSearchPrompt, "Search for:");
+DEFINE_INTERFACE_STRING(CommonSearchPrompt2, "Enter text to search for.");
+
+DEFINE_INTERFACE_STRING(CommonItemFolder, "Folder");
+DEFINE_INTERFACE_STRING(CommonItemFile, "File");
+
+DEFINE_INTERFACE_STRING(CommonSortAscending, "Sort ascending");
+DEFINE_INTERFACE_STRING(CommonSortDescending, "Sort descending");
+
+DEFINE_INTERFACE_STRING(CommonDriveHDD, "Hard disk");
+DEFINE_INTERFACE_STRING(CommonDriveSSD, "SSD");
+DEFINE_INTERFACE_STRING(CommonDriveCDROM, "CD-ROM");
+DEFINE_INTERFACE_STRING(CommonDriveUSBMassStorage, "USB drive");
+
+DEFINE_INTERFACE_STRING(CommonSystemBrand, SYSTEM_BRAND_SHORT " Alpha v0.1");
+
+DEFINE_INTERFACE_STRING(CommonListViewType, "List view");
+DEFINE_INTERFACE_STRING(CommonListViewTypeThumbnails, "Thumbnails");
+DEFINE_INTERFACE_STRING(CommonListViewTypeTiles, "Tiles");
+DEFINE_INTERFACE_STRING(CommonListViewTypeDetails, "Details");
+
+DEFINE_INTERFACE_STRING(CommonAnnouncementCopied, "Copied");
+DEFINE_INTERFACE_STRING(CommonAnnouncementCut, "Cut");
+DEFINE_INTERFACE_STRING(CommonAnnouncementTextCopied, "Text copied");
+DEFINE_INTERFACE_STRING(CommonAnnouncementCopyErrorResources, "There's not enough space to copy this");
+DEFINE_INTERFACE_STRING(CommonAnnouncementCopyErrorOther, "Could not copy");
+DEFINE_INTERFACE_STRING(CommonAnnouncementPasteErrorOther, "Could not paste");
+
+DEFINE_INTERFACE_STRING(CommonEmpty, "empty");
+
+DEFINE_INTERFACE_STRING(CommonUnitPercent, "%");
+DEFINE_INTERFACE_STRING(CommonUnitBytes, " B");
+DEFINE_INTERFACE_STRING(CommonUnitKilobytes, " KB");
+DEFINE_INTERFACE_STRING(CommonUnitMegabytes, " MB");
+DEFINE_INTERFACE_STRING(CommonUnitGigabytes, " GB");
+DEFINE_INTERFACE_STRING(CommonUnitMilliseconds, " ms");
+
+// Desktop.
+
+DEFINE_INTERFACE_STRING(DesktopNewTabTitle, "New Tab");
+DEFINE_INTERFACE_STRING(DesktopShutdownTitle, "Shut Down");
+DEFINE_INTERFACE_STRING(DesktopShutdownAction, "Shut down");
+DEFINE_INTERFACE_STRING(DesktopRestartAction, "Restart");
+DEFINE_INTERFACE_STRING(DesktopForceQuit, "Force quit");
+DEFINE_INTERFACE_STRING(DesktopCrashedApplication, "The application has crashed. If you're a developer, more information is available in System Monitor.");
+DEFINE_INTERFACE_STRING(DesktopNoSuchApplication, "The requested application could not found. It may have been uninstalled.");
+DEFINE_INTERFACE_STRING(DesktopApplicationStartupError, "The requested application could not be started. Your system may be low on resources, or the application files may have been corrupted.");
+DEFINE_INTERFACE_STRING(DesktopNotResponding, "The application is not responding.\nIf you choose to force quit, any unsaved data may be lost.");
+DEFINE_INTERFACE_STRING(DesktopConfirmShutdown, "Are you sure you want to turn off your computer? All applications will be closed.");
+
+DEFINE_INTERFACE_STRING(DesktopCloseTab, "Close tab");
+DEFINE_INTERFACE_STRING(DesktopMoveTabToNewWindow, "Move tab to new window");
+DEFINE_INTERFACE_STRING(DesktopMoveTabToNewWindowSplitLeft, "Move tab to left of screen");
+DEFINE_INTERFACE_STRING(DesktopMoveTabToNewWindowSplitRight, "Move tab to right of screen");
+DEFINE_INTERFACE_STRING(DesktopInspectUI, "Inspect UI");
+DEFINE_INTERFACE_STRING(DesktopCloseWindow, "Close window");
+DEFINE_INTERFACE_STRING(DesktopCloseAllTabs, "Close all tabs");
+DEFINE_INTERFACE_STRING(DesktopMaximiseWindow, "Fill screen");
+DEFINE_INTERFACE_STRING(DesktopRestoreWindow, "Restore position");
+DEFINE_INTERFACE_STRING(DesktopMinimiseWindow, "Hide");
+DEFINE_INTERFACE_STRING(DesktopCenterWindow, "Center in screen");
+DEFINE_INTERFACE_STRING(DesktopSnapWindowLeft, "Move to left side");
+DEFINE_INTERFACE_STRING(DesktopSnapWindowRight, "Move to right side");
+
+DEFINE_INTERFACE_STRING(DesktopSettingsApplication, "Settings");
+DEFINE_INTERFACE_STRING(DesktopSettingsTitle, "Settings");
+DEFINE_INTERFACE_STRING(DesktopSettingsBackButton, "All settings");
+DEFINE_INTERFACE_STRING(DesktopSettingsUndoButton, "Undo changes");
+DEFINE_INTERFACE_STRING(DesktopSettingsAccessibility, "Accessibility");
+DEFINE_INTERFACE_STRING(DesktopSettingsApplications, "Applications");
+DEFINE_INTERFACE_STRING(DesktopSettingsDateAndTime, "Date and time");
+DEFINE_INTERFACE_STRING(DesktopSettingsDevices, "Devices");
+DEFINE_INTERFACE_STRING(DesktopSettingsDisplay, "Display");
+DEFINE_INTERFACE_STRING(DesktopSettingsKeyboard, "Keyboard");
+DEFINE_INTERFACE_STRING(DesktopSettingsLocalisation, "Localisation");
+DEFINE_INTERFACE_STRING(DesktopSettingsMouse, "Mouse");
+DEFINE_INTERFACE_STRING(DesktopSettingsNetwork, "Network");
+DEFINE_INTERFACE_STRING(DesktopSettingsPower, "Power");
+DEFINE_INTERFACE_STRING(DesktopSettingsSound, "Sound");
+DEFINE_INTERFACE_STRING(DesktopSettingsTheme, "Theme");
+
+DEFINE_INTERFACE_STRING(DesktopSettingsKeyboardKeyRepeatDelay, "Key repeat delay:");
+DEFINE_INTERFACE_STRING(DesktopSettingsKeyboardKeyRepeatRate, "Key repeat rate:");
+DEFINE_INTERFACE_STRING(DesktopSettingsKeyboardCaretBlinkRate, "Caret blink rate:");
+DEFINE_INTERFACE_STRING(DesktopSettingsKeyboardTestTextboxIntroduction, "Try your settings in the textbox below:");
+DEFINE_INTERFACE_STRING(DesktopSettingsKeyboardUseSmartQuotes, "Use smart quotes when typing");
+DEFINE_INTERFACE_STRING(DesktopSettingsKeyboardLayout, "Keyboard layout:");
+
+DEFINE_INTERFACE_STRING(DesktopSettingsMouseDoubleClickSpeed, "Double click time:");
+DEFINE_INTERFACE_STRING(DesktopSettingsMouseSpeed, "Cursor movement speed:");
+DEFINE_INTERFACE_STRING(DesktopSettingsMouseCursorTrails, "Cursor trail count:");
+DEFINE_INTERFACE_STRING(DesktopSettingsMouseLinesPerScrollNotch, "Lines to scroll per wheel notch:");
+DEFINE_INTERFACE_STRING(DesktopSettingsMouseSwapLeftAndRightButtons, "Swap left and right buttons");
+DEFINE_INTERFACE_STRING(DesktopSettingsMouseShowShadow, "Show shadow below cursor");
+DEFINE_INTERFACE_STRING(DesktopSettingsMouseLocateCursorOnCtrl, "Highlight cursor location when Ctrl is pressed");
+DEFINE_INTERFACE_STRING(DesktopSettingsMouseTestDoubleClickIntroduction, "Double click the circle below to try your setting. If it does not change color, increase the double click time.");
+DEFINE_INTERFACE_STRING(DesktopSettingsMouseUseAcceleration, "Move cursor faster when mouse is moved quickly");
+DEFINE_INTERFACE_STRING(DesktopSettingsMouseSlowOnAlt, "Move cursor slower when Alt is held");
+DEFINE_INTERFACE_STRING(DesktopSettingsMouseSpeedSlow, "Slow");
+DEFINE_INTERFACE_STRING(DesktopSettingsMouseSpeedFast, "Fast");
+DEFINE_INTERFACE_STRING(DesktopSettingsMouseCursorTrailsNone, "None");
+DEFINE_INTERFACE_STRING(DesktopSettingsMouseCursorTrailsMany, "Many");
+
+DEFINE_INTERFACE_STRING(DesktopSettingsDisplayUIScale, "Interface scale:");
+
+DEFINE_INTERFACE_STRING(DesktopSettingsThemeWindowColor, "Window color:");
+DEFINE_INTERFACE_STRING(DesktopSettingsThemeEnableHoverState, "Highlight the item the cursor is over");
+DEFINE_INTERFACE_STRING(DesktopSettingsThemeEnableAnimations, "Animate the user interface");
+DEFINE_INTERFACE_STRING(DesktopSettingsThemeWallpaper, "Wallpaper");
+
+// File operations.
+
+DEFINE_INTERFACE_STRING(FileCannotSave, "The document was not saved.");
+DEFINE_INTERFACE_STRING(FileCannotOpen, "The file could not be opened.");
+DEFINE_INTERFACE_STRING(FileCannotRename, "The file could not be renamed.");
+
+DEFINE_INTERFACE_STRING(FileRenameSuccess, "Renamed");
+
+DEFINE_INTERFACE_STRING(FileSaveErrorFileDeleted, "Another application deleted the file.");
+DEFINE_INTERFACE_STRING(FileSaveErrorCorrupt, "The file has been corrupted, and it cannot be modified.");
+DEFINE_INTERFACE_STRING(FileSaveErrorDrive, "The drive containing the file was unable to modify it.");
+DEFINE_INTERFACE_STRING(FileSaveErrorTooLarge, "The drive does not support files large enough to store this document.");
+DEFINE_INTERFACE_STRING(FileSaveErrorConcurrentAccess, "Another application is modifying the file.");
+DEFINE_INTERFACE_STRING(FileSaveErrorDriveFull, "The drive is full. Try deleting some files to free up space.");
+DEFINE_INTERFACE_STRING(FileSaveErrorResourcesLow, "The system is low on resources. Close some applcations and try again.");
+DEFINE_INTERFACE_STRING(FileSaveErrorAlreadyExists, "There is already a file called " OPEN_SPEECH "%s" CLOSE_SPEECH " in this folder.");
+DEFINE_INTERFACE_STRING(FileSaveErrorTooManyFiles, "Too many files already have the same name.");
+DEFINE_INTERFACE_STRING(FileSaveErrorUnknown, "An unknown error occurred. Please try again later.");
+
+DEFINE_INTERFACE_STRING(FileLoadErrorCorrupt, "The file has been corrupted, and it cannot be opened.");
+DEFINE_INTERFACE_STRING(FileLoadErrorDrive, "The drive containing the file was unable to access its contents.");
+DEFINE_INTERFACE_STRING(FileLoadErrorResourcesLow, "The system is low on resources. Close some applcations and try again.");
+DEFINE_INTERFACE_STRING(FileLoadErrorUnknown, "An unknown error occurred. Please try again later.");
+
+DEFINE_INTERFACE_STRING(FileCloseWithModificationsTitle, "Do you want to save this document?");
+DEFINE_INTERFACE_STRING(FileCloseWithModificationsContent, "You need to save your changes to " OPEN_SPEECH "%s" CLOSE_SPEECH " before you can close it.");
+DEFINE_INTERFACE_STRING(FileCloseWithModificationsSave, "Save and close");
+DEFINE_INTERFACE_STRING(FileCloseWithModificationsDelete, "Discard");
+DEFINE_INTERFACE_STRING(FileCloseNewTitle, "Do you want to keep this document?");
+DEFINE_INTERFACE_STRING(FileCloseNewContent, "You need to save it before you can close " OPEN_SPEECH "%s" CLOSE_SPEECH ".");
+DEFINE_INTERFACE_STRING(FileCloseNewName, "Name:");
+
+// Image Editor.
+
+DEFINE_INTERFACE_STRING(ImageEditorToolBrush, "Brush");
+DEFINE_INTERFACE_STRING(ImageEditorToolFill, "Fill");
+DEFINE_INTERFACE_STRING(ImageEditorToolRectangle, "Rectangle");
+DEFINE_INTERFACE_STRING(ImageEditorToolSelect, "Select");
+DEFINE_INTERFACE_STRING(ImageEditorToolText, "Text");
+
+DEFINE_INTERFACE_STRING(ImageEditorCanvasSize, "Canvas size");
+
+DEFINE_INTERFACE_STRING(ImageEditorPropertyWidth, "Width:");
+DEFINE_INTERFACE_STRING(ImageEditorPropertyHeight, "Height:");
+DEFINE_INTERFACE_STRING(ImageEditorPropertyColor, "Color:");
+DEFINE_INTERFACE_STRING(ImageEditorPropertyBrushSize, "Brush size:");
+
+DEFINE_INTERFACE_STRING(ImageEditorImageTransformations, "Transform image");
+DEFINE_INTERFACE_STRING(ImageEditorRotateLeft, "Rotate left");
+DEFINE_INTERFACE_STRING(ImageEditorRotateRight, "Rotate right");
+DEFINE_INTERFACE_STRING(ImageEditorFlipHorizontally, "Flip horizontally");
+DEFINE_INTERFACE_STRING(ImageEditorFlipVertically, "Flip vertically");
+
+DEFINE_INTERFACE_STRING(ImageEditorImage, "Image");
+DEFINE_INTERFACE_STRING(ImageEditorPickTool, "Pick tool");
+
+DEFINE_INTERFACE_STRING(ImageEditorUnsupportedFormat, "The image is in an unsupported format. Try opening it with another application.");
+
+DEFINE_INTERFACE_STRING(ImageEditorNewFileName, "untitled.png");
+DEFINE_INTERFACE_STRING(ImageEditorNewDocument, "New bitmap image");
+
+DEFINE_INTERFACE_STRING(ImageEditorTitle, "Image Editor");
+
+// Text Editor.
+
+DEFINE_INTERFACE_STRING(TextEditorTitle, "Text Editor");
+DEFINE_INTERFACE_STRING(TextEditorNewFileName, "untitled.txt");
+DEFINE_INTERFACE_STRING(TextEditorNewDocument, "New text document");
+
+// Markdown Viewer.
+
+DEFINE_INTERFACE_STRING(MarkdownViewerTitle, "Markdown Viewer");
+
+// POSIX.
+
+DEFINE_INTERFACE_STRING(POSIXUnavailable, "This application depends on the POSIX subsystem. To enable it, select \am]Flag.ENABLE_POSIX_SUBSYSTEM\a] in \am]config\a].");
+DEFINE_INTERFACE_STRING(POSIXTitle, "POSIX Application");
+
+// Font Book.
+
+DEFINE_INTERFACE_STRING(FontBookTitle, "Font Book");
+DEFINE_INTERFACE_STRING(FontBookTextSize, "Text size:");
+DEFINE_INTERFACE_STRING(FontBookPreviewText, "Preview text:");
+DEFINE_INTERFACE_STRING(FontBookVariants, "Variants");
+DEFINE_INTERFACE_STRING(FontBookPreviewTextDefault, "Looking for a change of mind.");
+DEFINE_INTERFACE_STRING(FontBookPreviewTextLongDefault, "Sphinx of black quartz, judge my vow.");
+DEFINE_INTERFACE_STRING(FontBookOpenFont, "Open");
+DEFINE_INTERFACE_STRING(FontBookNavigationBack, "Back to all fonts");
+DEFINE_INTERFACE_STRING(FontBookVariantNormal100, "Thin");
+DEFINE_INTERFACE_STRING(FontBookVariantNormal200, "Extra light");
+DEFINE_INTERFACE_STRING(FontBookVariantNormal300, "Light");
+DEFINE_INTERFACE_STRING(FontBookVariantNormal400, "Normal");
+DEFINE_INTERFACE_STRING(FontBookVariantNormal500, "Medium");
+DEFINE_INTERFACE_STRING(FontBookVariantNormal600, "Semi bold");
+DEFINE_INTERFACE_STRING(FontBookVariantNormal700, "Bold");
+DEFINE_INTERFACE_STRING(FontBookVariantNormal800, "Extra bold");
+DEFINE_INTERFACE_STRING(FontBookVariantNormal900, "Black");
+DEFINE_INTERFACE_STRING(FontBookVariantItalic100, "Thin (italic)");
+DEFINE_INTERFACE_STRING(FontBookVariantItalic200, "Extra light (italic)");
+DEFINE_INTERFACE_STRING(FontBookVariantItalic300, "Light (italic)");
+DEFINE_INTERFACE_STRING(FontBookVariantItalic400, "Normal (italic)");
+DEFINE_INTERFACE_STRING(FontBookVariantItalic500, "Medium (italic)");
+DEFINE_INTERFACE_STRING(FontBookVariantItalic600, "Semi bold (italic)");
+DEFINE_INTERFACE_STRING(FontBookVariantItalic700, "Bold (italic)");
+DEFINE_INTERFACE_STRING(FontBookVariantItalic800, "Extra bold (italic)");
+DEFINE_INTERFACE_STRING(FontBookVariantItalic900, "Black (italic)");
+
+// File Manager.
+
+DEFINE_INTERFACE_STRING(FileManagerOpenFolderError, "The folder could not be opened.");
+DEFINE_INTERFACE_STRING(FileManagerNewFolderError, "Could not create the folder.");
+DEFINE_INTERFACE_STRING(FileManagerRenameItemError, "The item could not be renamed.");
+DEFINE_INTERFACE_STRING(FileManagerUnknownError, "An unknown error occurred.");
+DEFINE_INTERFACE_STRING(FileManagerTitle, "File Manager");
+DEFINE_INTERFACE_STRING(FileManagerRootFolder, "Computer");
+DEFINE_INTERFACE_STRING(FileManagerColumnName, "Name");
+DEFINE_INTERFACE_STRING(FileManagerColumnType, "Type");
+DEFINE_INTERFACE_STRING(FileManagerColumnSize, "Size");
+DEFINE_INTERFACE_STRING(FileManagerOpenFolderTask, "Opening folder" ELLIPSIS);
+DEFINE_INTERFACE_STRING(FileManagerOpenFileError, "The file could not be opened.");
+DEFINE_INTERFACE_STRING(FileManagerNoRegisteredApplicationsForFile, "None of the applications installed on this computer can open this type of file.");
+DEFINE_INTERFACE_STRING(FileManagerFolderNamePrompt, "Folder name:");
+DEFINE_INTERFACE_STRING(FileManagerNewFolderAction, "Create");
+DEFINE_INTERFACE_STRING(FileManagerNewFolderTask, "Creating folder" ELLIPSIS);
+DEFINE_INTERFACE_STRING(FileManagerRenameTitle, "Rename");
+DEFINE_INTERFACE_STRING(FileManagerRenamePrompt, "Type the new name of the item:");
+DEFINE_INTERFACE_STRING(FileManagerRenameAction, "Rename");
+DEFINE_INTERFACE_STRING(FileManagerRenameTask, "Renaming item" ELLIPSIS);
+DEFINE_INTERFACE_STRING(FileManagerEmptyBookmarkView, "Drag folders here to bookmark them.");
+DEFINE_INTERFACE_STRING(FileManagerEmptyFolderView, "Drag items here to add them to the folder.");
+DEFINE_INTERFACE_STRING(FileManagerNewFolderToolbarItem, "New folder");
+DEFINE_INTERFACE_STRING(FileManagerNewFolderName, "New folder");
+DEFINE_INTERFACE_STRING(FileManagerGenericError, "The cause of the error could not be identified.");
+DEFINE_INTERFACE_STRING(FileManagerItemAlreadyExistsError, "The item already exists in the folder.");
+DEFINE_INTERFACE_STRING(FileManagerItemDoesNotExistError, "The item does not exist.");
+DEFINE_INTERFACE_STRING(FileManagerPermissionNotGrantedError, "You don't have permission to modify this folder.");
+DEFINE_INTERFACE_STRING(FileManagerOngoingTaskDescription, "This shouldn't take long.");
+DEFINE_INTERFACE_STRING(FileManagerPlacesDrives, "Drives");
+DEFINE_INTERFACE_STRING(FileManagerPlacesBookmarks, "Bookmarks");
+DEFINE_INTERFACE_STRING(FileManagerBookmarksAddHere, "Add bookmark here");
+DEFINE_INTERFACE_STRING(FileManagerBookmarksRemoveHere, "Remove bookmark here");
+DEFINE_INTERFACE_STRING(FileManagerDrivesPage, "Drives/");
+DEFINE_INTERFACE_STRING(FileManagerInvalidPath, "The current path does not lead to a folder. It may have been deleted or moved.");
+DEFINE_INTERFACE_STRING(FileManagerInvalidDrive, "The drive containing this folder was disconnected.");
+DEFINE_INTERFACE_STRING(FileManagerRefresh, "Refresh");
+DEFINE_INTERFACE_STRING(FileManagerListContextActions, "Actions");
+DEFINE_INTERFACE_STRING(FileManagerCopyTask, "Copying" ELLIPSIS);
+DEFINE_INTERFACE_STRING(FileManagerMoveTask, "Moving" ELLIPSIS);
+DEFINE_INTERFACE_STRING(FileManagerGoBack, "Go back");
+DEFINE_INTERFACE_STRING(FileManagerGoForwards, "Go forwards");
+DEFINE_INTERFACE_STRING(FileManagerGoUp, "Go to containing folder");
+DEFINE_INTERFACE_STRING(FileManagerFileOpenIn, "File is open in " OPEN_SPEECH "%s" CLOSE_SPEECH);
+
+// 2048.
+
+DEFINE_INTERFACE_STRING(Game2048Score, "Score:");
+DEFINE_INTERFACE_STRING(Game2048Instructions, "Use the \aw6]arrow-keys\a] to slide the tiles. When matching tiles touch, they \aw6]merge\a] into one. Try to create the number \aw6]2048\a]!");
+DEFINE_INTERFACE_STRING(Game2048GameOver, "Game over");
+DEFINE_INTERFACE_STRING(Game2048GameOverExplanation, "There are no valid moves left.");
+DEFINE_INTERFACE_STRING(Game2048NewGame, "New game");
+DEFINE_INTERFACE_STRING(Game2048HighScore, "High score: \aw6]%d\a]");
+DEFINE_INTERFACE_STRING(Game2048NewHighScore, "You reached a new high score!");
+
+// Installer.
+
+DEFINE_INTERFACE_STRING(InstallerTitle, "Install " SYSTEM_BRAND_SHORT);
+DEFINE_INTERFACE_STRING(InstallerDrivesList, "Select the drive to install on:");
+DEFINE_INTERFACE_STRING(InstallerDrivesSelectHint, "Choose a drive from the list on the left.");
+DEFINE_INTERFACE_STRING(InstallerDriveRemoved, "The drive was disconnected.");
+DEFINE_INTERFACE_STRING(InstallerDriveReadOnly, "This drive is read-only. You cannot install " SYSTEM_BRAND_SHORT " on this drive.");
+DEFINE_INTERFACE_STRING(InstallerDriveNotEnoughSpace, "This drive does not have enough space to install " SYSTEM_BRAND_SHORT ".");
+DEFINE_INTERFACE_STRING(InstallerDriveCouldNotRead, "The drive could not be accessed. It may not be working correctly.");
+DEFINE_INTERFACE_STRING(InstallerDriveAlreadyHasPartitions, "The drive already has data on it. You cannot install " SYSTEM_BRAND_SHORT " on this drive.");
+DEFINE_INTERFACE_STRING(InstallerDriveUnsupported, "This drive uses unsupported features. You cannot install " SYSTEM_BRAND_SHORT " on this drive.");
+DEFINE_INTERFACE_STRING(InstallerDriveOkay, SYSTEM_BRAND_SHORT " can be installed on this drive.");
+DEFINE_INTERFACE_STRING(InstallerInstall, "Install");
+DEFINE_INTERFACE_STRING(InstallerViewLicenses, "Licenses");
+DEFINE_INTERFACE_STRING(InstallerGoBack, "Back");
+DEFINE_INTERFACE_STRING(InstallerFinish, "Finish");
+DEFINE_INTERFACE_STRING(InstallerCustomizeOptions, "Customize your computer.");
+DEFINE_INTERFACE_STRING(InstallerCustomizeOptionsHint, "More options will be available in Settings.");
+DEFINE_INTERFACE_STRING(InstallerUserName, "User name:");
+DEFINE_INTERFACE_STRING(InstallerTime, "Current time:");
+DEFINE_INTERFACE_STRING(InstallerSystemFont, "System font:");
+DEFINE_INTERFACE_STRING(InstallerFontDefault, "Default");
+DEFINE_INTERFACE_STRING(InstallerProgressMessage, "Installing, please wait" ELLIPSIS "\nDo not turn off your computer.\nProgress: \aw6]");
+DEFINE_INTERFACE_STRING(InstallerCompleteFromOther, "Installation has completed successfully. Remove the installation disk, and restart your computer.");
+DEFINE_INTERFACE_STRING(InstallerCompleteFromUSB, "Installation has completed successfully. Disconnect the installation USB, and restart your computer.");
+DEFINE_INTERFACE_STRING(InstallerVolumeLabel, "Essence HD");
+DEFINE_INTERFACE_STRING(InstallerUseMBR, "Use legacy BIOS boot (select for older computers)");
+DEFINE_INTERFACE_STRING(InstallerFailedArchiveCRCError, "The installation data has been corrupted. Create a new installation USB or disk, and try again.");
+DEFINE_INTERFACE_STRING(InstallerFailedGeneric, "The installation could not complete. This likely means that the drive you selected is failing. Try installing on a different drive.");
+DEFINE_INTERFACE_STRING(InstallerFailedResources, "The installation could not complete. Your computer does not have enough memory to install " SYSTEM_BRAND_SHORT);
+DEFINE_INTERFACE_STRING(InstallerNotSupported, "Your computer does not meet the minimum system requirements to install " SYSTEM_BRAND_SHORT ". Remove the installer, and restart your computer.");
+
+// TODO System Monitor.
+
+
+
+void _FormatInteger(FormatCallback callback, void *callbackData, long value, int pad = 0, bool simple = false) {
+	char buffer[32];
+
+	if (value < 0) {
+		callback('-', callbackData);
+	} else if (value == 0) {
+		for (int i = 0; i < (pad ?: 1); i++) {
+			callback('0', callbackData);
+		}
+
+		return;
+	}
+
+	int bp = 0;
+
+	while (value) {
+		int digit = (value % 10);
+		if (digit < 0) digit = -digit;
+		buffer[bp++] = '0' + digit;
+		value /= 10;
+	}
+
+	int cr = bp % 3;
+
+	for (int i = 0; i < pad - bp; i++) {
+		callback('0', callbackData);
+	}
+
+	for (int i = bp - 1; i >= 0; i--, cr--) {
+		if (!cr && !pad) {
+			if (i != bp - 1 && !simple) callback(',', callbackData);
+			cr = 3;
+		}
+
+		callback(buffer[i], callbackData);
+	}
+}
+
+static int utf8_length_char(const char *character) {
+	int value;
+	UTF8_LENGTH_CHAR(character, value);
+	return value;
+}
+
+static int utf8_value(const char *character, int maximumLength, int *_length) {
+	if (!maximumLength) return 0;
+	int length;
+	char first = *character; 
+
+	if (!(first & 0x80)) 
+		length = 1; 
+	else if ((first & 0xE0) == 0xC0) 
+		length = 2; 
+	else if ((first & 0xF0) == 0xE0) 
+		length = 3; 
+	else if ((first & 0xF8) == 0xF0) 
+		length = 4; 
+	else if ((first & 0xFC) == 0xF8) 
+		length = 5; 
+	else if ((first & 0xFE) == 0xFC) 
+		length = 6; 
+	else 
+		length = 0; 
+
+	if (maximumLength < length) return 0;
+	if (_length) *_length = length;
+
+	if (length == 1)
+		return (int)first;
+	else if (length == 2)
+		return (((int)first & 0x1F) << 6) | (((int)character[1]) & 0x3F);
+	else if (length == 3)
+		return (((int)first & 0xF) << 12) | ((((int)character[1]) & 0x3F) << 6) | (((int)character[2]) & 0x3F);
+	else if (length == 4)
+		return (((int)first & 0x7) << 18) | ((((int)character[1]) & 0x3F) << 12) | ((((int)character[2]) & 0x3F) << 6) |
+		(((int)character[3]) & 0x3F);
+	else if (length == 5)
+		return (((int)first & 0x3) << 24) | ((((int)character[1]) & 0x3F) << 18) | ((((int)character[2]) & 0x3F) << 12) |
+		((((int)character[4]) & 0x3F) << 6) | (((int)character[5]) & 0x3F);
+	else if (length == 6)
+		return (((int)first & 0x1) << 30) | ((((int)character[1]) & 0x3F) << 24) | ((((int)character[2]) & 0x3F) << 18) |
+		((((int)character[4]) & 0x3F) << 12) | ((((int)character[5]) & 0x3F) << 6) | (((int)character[6]) & 0x3F);
+	else
+		return 0; // Invalid code point
+}
+
+static int utf8_value(const char *character) {
+	int length;
+	UTF8_LENGTH_CHAR(character, length);
+
+	char first = *character;
+
+	int value;
+
+	if (length == 1)
+		value = (int)first;
+	else if (length == 2)
+		value = (((int)first & 0x1F) << 6) | (((int)character[1]) & 0x3F);
+	else if (length == 3)
+		value = (((int)first & 0xF) << 12) | ((((int)character[1]) & 0x3F) << 6) | (((int)character[2]) & 0x3F);
+	else if (length == 4)
+		value = (((int)first & 0x7) << 18) | ((((int)character[1]) & 0x3F) << 12) | ((((int)character[2]) & 0x3F) << 6) |
+		(((int)character[3]) & 0x3F);
+	else if (length == 5)
+		value = (((int)first & 0x3) << 24) | ((((int)character[1]) & 0x3F) << 18) | ((((int)character[2]) & 0x3F) << 12) |
+		((((int)character[4]) & 0x3F) << 6) | (((int)character[5]) & 0x3F);
+	else if (length == 6)
+		value = (((int)first & 0x1) << 30) | ((((int)character[1]) & 0x3F) << 24) | ((((int)character[2]) & 0x3F) << 18) |
+		((((int)character[4]) & 0x3F) << 12) | ((((int)character[5]) & 0x3F) << 6) | (((int)character[6]) & 0x3F);
+	else
+		value = 0; // Invalid code point
+
+	return value;
+}
+
+static int utf8_encode(int value, char *buffer) {
+	if (value < (1 << 7)) {
+		if (buffer) {
+			buffer[0] = value & 0x7F;
+		}
+
+		return 1;
+	} else if (value < (1 << 11)) {
+		if (buffer) {
+			buffer[0] = 0xC0 | ((value >> 6) & 0x1F);
+			buffer[1] = 0x80 | (value & 0x3F);
+		}
+
+		return 2;
+	} else if (value < (1 << 16)) {
+		if (buffer) {
+			buffer[0] = 0xE0 | ((value >> 12) & 0xF);
+			buffer[1] = 0x80 | ((value >> 6) & 0x3F);
+			buffer[2] = 0x80 | (value & 0x3F);
+		}
+
+		return 3;
+	} else if (value < (1 << 21)) {
+		if (buffer) {
+			buffer[0] = 0xF0 | ((value >> 18) & 0x7);
+			buffer[1] = 0x80 | ((value >> 12) & 0x3F);
+			buffer[2] = 0x80 | ((value >> 6) & 0x3F);
+			buffer[3] = 0x80 | (value & 0x3F);
+		}
+
+		return 4;
+	}
+
+	return 0; // Cannot encode character
+}
+
+static char *utf8_advance(const char *string) {
+	int length;
+	UTF8_LENGTH_CHAR(string, length);
+
+	if (!length) // Invalid code point 
+		return NULL;
+
+	return (char *) string + length;
+}
+
+static char *utf8_retreat(const char *string) {
+	// Keep going backwards until we find a non continuation character
+	do string--;
+	while (((*string) & 0xC0) == 0x80);
+	return (char *) string;
+}
+
+static int utf8_length(char *string, int max_bytes) {
+	if (!string)
+		return 0;
+	if (!(*string))
+		return 0;
+
+	if (!max_bytes) return 0;
+
+	int length = 0;
+	char *limit = string + max_bytes;
+
+	while ((max_bytes == -1 || string < limit) && *string) {
+		if (!string) // Invalid code point
+			return -1;
+
+		length++;
+		string = utf8_advance(string);
+	}
+
+	return length;
+}
+
+void WriteCStringToCallback(FormatCallback callback, void *callbackData, const char *cString) {
+	while (cString && *cString) {
+		callback(utf8_value(cString), callbackData);
+		cString = utf8_advance(cString);
+	}
+}
+
+void _StringFormat(FormatCallback callback, void *callbackData, const char *format, va_list arguments) {
+	int c;
+	int pad = 0;
+	uint32_t flags = 0;
+
+	char buffer[32];
+	const char *hexChars = "0123456789ABCDEF";
+
+	while ((c = utf8_value((char *) format))) {
+		if (c == '%') {
+			repeat:;
+			format = utf8_advance((char *) format);
+			c = utf8_value((char *) format);
+
+			switch (c) {
+				case 'd': {
+					long value = va_arg(arguments, long);
+					_FormatInteger(callback, callbackData, value, pad, flags & ES_STRING_FORMAT_SIMPLE);
+				} break;
+
+				case 'i': {
+					int value = va_arg(arguments, int);
+					_FormatInteger(callback, callbackData, value, pad, flags & ES_STRING_FORMAT_SIMPLE);
+				} break;
+
+				case 'D': {
+					long value = va_arg(arguments, long);
+
+					if (value == 0) {
+						WriteCStringToCallback(callback, callbackData, interfaceString_CommonEmpty);
+					} else if (value < 1000) {
+						_FormatInteger(callback, callbackData, value, pad);
+						WriteCStringToCallback(callback, callbackData, interfaceString_CommonUnitBytes);
+					} else if (value < 1000000) {
+						_FormatInteger(callback, callbackData, value / 1000, pad);
+						callback('.', callbackData);
+						_FormatInteger(callback, callbackData, (value / 100) % 10, pad);
+						WriteCStringToCallback(callback, callbackData, interfaceString_CommonUnitKilobytes);
+					} else if (value < 1000000000) {
+						_FormatInteger(callback, callbackData, value / 1000000, pad);
+						callback('.', callbackData);
+						_FormatInteger(callback, callbackData, (value / 100000) % 10, pad);
+						WriteCStringToCallback(callback, callbackData, interfaceString_CommonUnitMegabytes);
+					} else {
+						_FormatInteger(callback, callbackData, value / 1000000000, pad);
+						callback('.', callbackData);
+						_FormatInteger(callback, callbackData, (value / 100000000) % 10, pad);
+						WriteCStringToCallback(callback, callbackData, interfaceString_CommonUnitGigabytes);
+					}
+				} break;
+
+				case 'R': {
+					EsRectangle value = va_arg(arguments, EsRectangle);
+					callback('{', callbackData);
+					_FormatInteger(callback, callbackData, value.l);
+					callback('-', callbackData);
+					callback('>', callbackData);
+					_FormatInteger(callback, callbackData, value.r);
+					callback(';', callbackData);
+					_FormatInteger(callback, callbackData, value.t);
+					callback('-', callbackData);
+					callback('>', callbackData);
+					_FormatInteger(callback, callbackData, value.b);
+					callback('}', callbackData);
+				} break;
+
+				case 'X': {
+					uintptr_t value = va_arg(arguments, uintptr_t);
+					callback(hexChars[(value & 0xF0) >> 4], callbackData);
+					callback(hexChars[(value & 0xF)], callbackData);
+				} break;
+
+				case 'W': {
+					uintptr_t value = va_arg(arguments, uintptr_t);
+					callback(hexChars[(value & 0xF000) >> 12], callbackData);
+					callback(hexChars[(value & 0xF00) >> 8], callbackData);
+					callback(hexChars[(value & 0xF0) >> 4], callbackData);
+					callback(hexChars[(value & 0xF)], callbackData);
+				} break;
+
+				case 'x': {
+					uintptr_t value = va_arg(arguments, uintptr_t);
+					bool simple = flags & ES_STRING_FORMAT_SIMPLE;
+					if (!simple) callback('0', callbackData);
+					if (!simple) callback('x', callbackData);
+					int bp = 0;
+					while (value) {
+						buffer[bp++] = hexChars[value % 16];
+						value /= 16;
+					}
+					int j = 0, k = 0;
+					for (int i = 0; i < 16 - bp; i++) {
+						callback('0', callbackData);
+						j++;k++;if (k != 16 && j == 4 && !simple) { callback('_',callbackData); } j&=3;
+					}
+					for (int i = bp - 1; i >= 0; i--) {
+						callback(buffer[i], callbackData);
+						j++;k++;if (k != 16 && j == 4 && !simple) { callback('_',callbackData); } j&=3;
+					}
+				} break;
+
+				case 'c': {
+					callback(va_arg(arguments, int), callbackData);
+				} break;
+
+				case '%': {
+					callback('%', callbackData);
+				} break;
+
+				case 's': {
+					size_t length = va_arg(arguments, size_t);
+					char *string = va_arg(arguments, char *);
+					char *position = string;
+
+					while (position < string + length) {
+						callback(utf8_value(position), callbackData);
+						position = utf8_advance(position);
+					}
+				} break;
+
+				case 'z': {
+					const char *string = va_arg(arguments, const char *);
+					if (!string) string = "[null]";
+					WriteCStringToCallback(callback, callbackData, string);
+				} break;
+
+				case 'F': {
+					double number = va_arg(arguments, double);
+
+					if (__builtin_isnan(number)) {
+						WriteCStringToCallback(callback, callbackData, "NaN");
+						break;
+					} else if (__builtin_isinf(number)) {
+						if (number < 0) callback('-', callbackData);
+						WriteCStringToCallback(callback, callbackData, "inf");
+						break;
+					}
+
+					if (number < 0) {
+						callback('-', callbackData);
+						number = -number;
+					}
+
+					int digits[32];
+					size_t digitCount = 0;
+					const size_t maximumDigits = 12;
+
+					int64_t integer = number;
+					number -= integer;
+					// number is now in the range [0,1).
+
+					while (number && digitCount <= maximumDigits) {
+						// Extract the fractional digits.
+						number *= 10;
+						int digit = number;
+						number -= digit;
+						digits[digitCount++] = digit;
+					}
+
+					if (digitCount > maximumDigits) {
+						if (digits[maximumDigits] >= 5) {
+							// Round up.
+							for (intptr_t i = digitCount - 2; i >= -1; i--) {
+								if (i == -1) { 
+									integer++;
+								} else {
+									digits[i]++;
+
+									if (digits[i] == 10) {
+										digits[i] = 0;
+									} else {
+										break;
+									}
+								}
+							}
+						}
+
+						// Hide the last digit.
+						digitCount = maximumDigits;
+					}
+
+					// Trim trailing zeroes.
+					while (digitCount) {
+						if (!digits[digitCount - 1]) {
+							digitCount--;
+						} else {
+							break;
+						}
+					}
+
+					// Integer digits.
+					_FormatInteger(callback, callbackData, integer, pad, flags & ES_STRING_FORMAT_SIMPLE);
+
+					// Decimal separator.
+					if (digitCount) {
+						callback('.', callbackData);
+					}
+
+					// Fractional digits.
+					for (uintptr_t i = 0; i < digitCount; i++) {
+						callback('0' + digits[i], callbackData);
+					}
+				} break;
+
+				case '*': {
+					pad = va_arg(arguments, int);
+					goto repeat;
+				} break;
+
+				case 'f': {
+					flags = va_arg(arguments, uint32_t);
+					goto repeat;
+				} break;
+			}
+
+			pad = 0;
+			flags = 0;
+		} else {
+			callback(c, callbackData);
+		}
+
+		format = utf8_advance((char *) format);
+	}
+}
+
+
+
+
+void StartDebugOutput() {
+	if (graphics.target && graphics.target->debugClearScreen && graphics.target->debugPutBlock && !printToDebugger) {
+		debugRows = (graphics.height - 1) / VGA_FONT_HEIGHT;
+		debugColumns = (graphics.width - 1) / VGA_FONT_WIDTH - 2;
+		debugCurrentRow = debugCurrentColumn = 0;
+		printToDebugger = true;
+		graphics.target->debugClearScreen();
+	}
+}
+
+void DebugWriteCharacter(uintptr_t character) {
+	if (!graphics.target || !graphics.target->debugPutBlock) return;
+
+	if (debugCurrentRow == debugRows) {
+		debugCurrentRow = 0;
+
+		// uint64_t start = ProcessorReadTimeStamp();
+		// uint64_t end = start + 3000 * KGetTimeStampTicksPerMs();
+		// while (ProcessorReadTimeStamp() < end);
+
+		graphics.target->debugClearScreen();
+	}
+
+	uintptr_t row = debugCurrentRow;
+	uintptr_t column = debugCurrentColumn;
+
+	if (character == '\n') {
+		debugCurrentRow++;
+		debugCurrentColumn = 0;
+		return;
+	}
+
+	if (character > 127) character = ' ';
+	if (row >= debugRows) return;
+	if (column >= debugColumns) return;
+
+	for (int j = 0; j < VGA_FONT_HEIGHT; j++) {
+		uint8_t byte = ((uint8_t *) vgaFont)[character * 16 + j];
+
+		for (int i = 0; i < 8; i++) {
+			uint8_t bit = byte & (1 << i);
+			if (bit) graphics.target->debugPutBlock((column + 1) * 9 + i, row * 16 + j, false);
+		}
+	}
+
+	debugCurrentColumn++;
+
+	if (debugCurrentColumn == debugColumns) {
+		debugCurrentRow++;
+		debugCurrentColumn = 4;
+	}
+}
+
+
+static void TerminalCallback(int character, void *) {
+	if (!character) return;
+
+	KSpinlockAcquire(&terminalLock);
+	EsDefer(KSpinlockRelease(&terminalLock));
+
+	if (sizeof(kernelLog)) {
+		kernelLog[kernelLogPosition] = character;
+		kernelLogPosition++;
+		if (kernelLogPosition == sizeof(kernelLog)) kernelLogPosition = 0;
+	}
+
+#ifdef VGA_TEXT_MODE
+	{
+		if (character == '\n') {
+			terminalPosition = terminalPosition - (terminalPosition % 80) + 80;
+		} else {
+			TERMINAL_ADDRESS[terminalPosition] = (uint16_t) character | 0x0700;
+			terminalPosition++;
+		}
+
+		if (terminalPosition >= 80 * 25) {
+			for (int i = 80; i < 80 * 25; i++) {
+				TERMINAL_ADDRESS[i - 80] = TERMINAL_ADDRESS[i];
+			}
+
+			for (int i = 80 * 24; i < 80 * 25; i++) {
+				TERMINAL_ADDRESS[i] = 0x700;
+			}
+
+			terminalPosition -= 80;
+
+			// uint64_t start = ProcessorReadTimeStamp();
+			// uint64_t end = start + 250 * KGetTimeStampTicksPerMs();
+			// while (ProcessorReadTimeStamp() < end);
+		}
+
+		{
+			ProcessorOut8(0x3D4, 0x0F);
+			ProcessorOut8(0x3D5, terminalPosition);
+			ProcessorOut8(0x3D4, 0x0E);
+			ProcessorOut8(0x3D5, terminalPosition >> 8);
+		}
+	}
+#endif
+
+	{
+		ProcessorDebugOutputByte((uint8_t) character);
+
+		if (character == '\n') {
+			ProcessorDebugOutputByte((uint8_t) 13);
+		}
+	}
+
+	if (printToDebugger) {
+		DebugWriteCharacter(character);
+		if (character == '\t') DebugWriteCharacter(' ');
+	}
+}
+
+void EsPrint(const char *format, ...) {
+	KSpinlockAcquire(&printLock);
+	EsDefer(KSpinlockRelease(&printLock));
+
+	va_list arguments;
+	va_start(arguments, format);
+	_StringFormat(TerminalCallback, (void *) 0x0700, format, arguments);
+	va_end(arguments);
+}
+
+
+
+void MMArchInvalidatePages(uintptr_t virtualAddressStart, uintptr_t pageCount) {
+	// This must be done with spinlock acquired, otherwise this processor could change.
+
+	// TODO Only send the IPI to the processors that are actually executing threads with the virtual address space.
+	// 	Currently we only support the kernel's virtual address space, so this'll apply to all processors.
+	// 	If we use Intel's PCID then we may have to send this to all processors anyway.
+	// 	And we'll probably also have to be careful with shared memory regions.
+	//	...actually I think we might not bother doing this.
+
+	KSpinlockAcquire(&ipiLock);
+	tlbShootdownVirtualAddress = virtualAddressStart;
+	tlbShootdownPageCount = pageCount;
+	ArchCallFunctionOnAllProcessors(TLBShootdownCallback, true);
+	KSpinlockRelease(&ipiLock);
+}
+
+
+bool MMUnmapFilePage(uintptr_t frameNumber) {
+	KMutexAssertLocked(&pmm.pageFrameMutex);
+	MMPageFrame *frame = pmm.pageFrames + frameNumber;
+
+	if (frame->state != MMPageFrame::ACTIVE || !frame->active.references) {
+		KernelPanic("MMUnmapFilePage - Corrupt page frame database (%d/%x).\n", frameNumber, frame);
+	}
+
+	// Decrease the reference count.
+	frame->active.references--;
+
+	if (frame->active.references) {
+		return false;
+	}
+
+	// If there are no more references, then the frame can be moved to the standby or modified list.
+
+	// EsPrint("Unmap file page: %x\n", frameNumber << K_PAGE_BITS);
+
+	frame->state = MMPageFrame::STANDBY;
+	pmm.countStandbyPages++;
+
+	if (*frame->cacheReference != ((frameNumber << K_PAGE_BITS) | MM_SHARED_ENTRY_PRESENT)) {
+		KernelPanic("MMUnmapFilePage - Corrupt shared reference back pointer in frame %x.\n", frame);
+	}
+
+	frame->list.next = pmm.firstStandbyPage;
+	frame->list.previous = &pmm.firstStandbyPage;
+	if (pmm.firstStandbyPage) pmm.pageFrames[pmm.firstStandbyPage].list.previous = &frame->list.next;
+	if (!pmm.lastStandbyPage) pmm.lastStandbyPage = frameNumber;
+	pmm.firstStandbyPage = frameNumber;
+
+	MMUpdateAvailablePageCount(true);
+
+	pmm.countActivePages--;
+	return true;
+}
+
+
+
+void MMArchUnmapPages(MMSpace *space, uintptr_t virtualAddressStart, uintptr_t pageCount, unsigned flags, size_t unmapMaximum, uintptr_t *resumePosition) {
+	// We can't let anyone use the unmapped pages until they've been invalidated on all processors.
+	// This also synchronises modified bit updating.
+	KMutexAcquire(&pmm.pageFrameMutex);
+	EsDefer(KMutexRelease(&pmm.pageFrameMutex));
+
+	KMutexAcquire(&space->data.mutex);
+	EsDefer(KMutexRelease(&space->data.mutex));
+
+#ifdef ES_ARCH_X86_64
+	uintptr_t tableBase = virtualAddressStart & 0x0000FFFFFFFFF000;
+#else
+	uintptr_t tableBase = virtualAddressStart & 0xFFFFF000;
+#endif
+	uintptr_t start = resumePosition ? *resumePosition : 0;
+
+	// TODO Freeing newly empty page tables.
+	// 	- What do we need to invalidate when we do this?
+
+	for (uintptr_t i = start; i < pageCount; i++) {
+		uintptr_t virtualAddress = (i << K_PAGE_BITS) + tableBase;
+
+#ifdef ES_ARCH_X86_64
+		if ((PAGE_TABLE_L4[virtualAddress >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 3)] & 1) == 0) {
+			i -= (virtualAddress >> K_PAGE_BITS) % (1 << (ENTRIES_PER_PAGE_TABLE_BITS * 3));
+			i += (1 << (ENTRIES_PER_PAGE_TABLE_BITS * 3));
+			continue;
+		}
+
+		if ((PAGE_TABLE_L3[virtualAddress >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 2)] & 1) == 0) {
+			i -= (virtualAddress >> K_PAGE_BITS) % (1 << (ENTRIES_PER_PAGE_TABLE_BITS * 2));
+			i += (1 << (ENTRIES_PER_PAGE_TABLE_BITS * 2));
+			continue;
+		}
+#endif
+
+		if ((PAGE_TABLE_L2[virtualAddress >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 1)] & 1) == 0) {
+			i -= (virtualAddress >> K_PAGE_BITS) % (1 << (ENTRIES_PER_PAGE_TABLE_BITS * 1));
+			i += (1 << (ENTRIES_PER_PAGE_TABLE_BITS * 1));
+			continue;
+		}
+
+		uintptr_t indexL1 = virtualAddress >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 0);
+
+		uintptr_t translation = PAGE_TABLE_L1[indexL1];
+
+		if (!(translation & 1)) {
+			// The page wasn't mapped.
+			continue;
+		}
+
+		bool copy = translation & (1 << 9);
+
+		if (copy && (flags & MM_UNMAP_PAGES_BALANCE_FILE) && (~flags & MM_UNMAP_PAGES_FREE_COPIED)) {
+			// Ignore copied pages when balancing file mappings.
+			continue;
+		}
+
+		if ((~translation & (1 << 5)) || (~translation & (1 << 6))) {
+			// See MMArchMapPage for a discussion of why these bits must be set.
+			KernelPanic("MMArchUnmapPages - Page found without accessed or dirty bit set (virtualAddress: %x, translation: %x).\n", 
+					virtualAddress, translation);
+		}
+
+		PAGE_TABLE_L1[indexL1] = 0;
+
+#ifdef ES_ARCH_X86_64
+		uintptr_t physicalAddress = translation & 0x0000FFFFFFFFF000;
+#else
+		uintptr_t physicalAddress = translation & 0xFFFFF000;
+#endif
+
+		if ((flags & MM_UNMAP_PAGES_FREE) || ((flags & MM_UNMAP_PAGES_FREE_COPIED) && copy)) {
+			MMPhysicalFree(physicalAddress, true);
+		} else if (flags & MM_UNMAP_PAGES_BALANCE_FILE) {
+			// It's safe to do this before page invalidation,
+			// because the page fault handler is synchronised with the same mutexes acquired above.
+
+			if (MMUnmapFilePage(physicalAddress >> K_PAGE_BITS)) {
+				if (resumePosition) {
+					if (!unmapMaximum--) {
+						*resumePosition = i;
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	MMArchInvalidatePages(virtualAddressStart, pageCount);
+}
+
+void MMPhysicalInsertFreePagesNext(uintptr_t page) {
+	MMPageFrame *frame = pmm.pageFrames + page;
+	frame->state = MMPageFrame::FREE;
+
+	{
+		frame->list.next = pmm.firstFreePage;
+		frame->list.previous = &pmm.firstFreePage;
+		if (pmm.firstFreePage) pmm.pageFrames[pmm.firstFreePage].list.previous = &frame->list.next;
+		pmm.firstFreePage = page;
+	}
+
+	pmm.freeOrZeroedPageBitset.Put(page);
+	pmm.countFreePages++;
+}
+
+
+void MMPhysicalFree(uintptr_t page, bool mutexAlreadyAcquired, size_t count) {
+	if (!page) KernelPanic("MMPhysicalFree - Invalid page.\n");
+	if (mutexAlreadyAcquired) KMutexAssertLocked(&pmm.pageFrameMutex);
+	else KMutexAcquire(&pmm.pageFrameMutex);
+	if (!pmm.pageFrameDatabaseInitialised) KernelPanic("MMPhysicalFree - PMM not yet initialised.\n");
+
+	page >>= K_PAGE_BITS;
+
+	MMPhysicalInsertFreePagesStart();
+
+	for (uintptr_t i = 0; i < count; i++, page++) {
+		MMPageFrame *frame = pmm.pageFrames + page;
+
+		if (frame->state == MMPageFrame::FREE) {
+			KernelPanic("MMPhysicalFree - Attempting to free a FREE page.\n");
+		}
+
+		if (pmm.commitFixedLimit) {
+			pmm.countActivePages--;
+		}
+
+		MMPhysicalInsertFreePagesNext(page);
+	}
+
+	MMPhysicalInsertFreePagesEnd();
+
+	if (!mutexAlreadyAcquired) KMutexRelease(&pmm.pageFrameMutex);
+}
+
+
+
+
+void KernelPanic(const char *format, ...) {
+	ProcessorDisableInterrupts();
+	ProcessorSendIPI(KERNEL_PANIC_IPI, true);
+
+	// Disable synchronisation objects. The panic IPI must be sent before this, 
+	// so other processors don't start getting "mutex not correctly acquired" panics.
+	scheduler.panic = true; 
+
+	if (debugKeyPressed) {
+		DriversDumpState();
+	}
+
+	StartDebugOutput();
+
+	EsPrint("\n--- System Error ---\n>> ");
+
+	va_list arguments;
+	va_start(arguments, format);
+	_StringFormat(TerminalCallback, (void *) 0x4F00, format, arguments);
+	va_end(arguments);
+
+	EsPrint("Current thread = %x\n", GetCurrentThread());
+	EsPrint("Trace: %x\n", __builtin_return_address(0));
+#ifdef ES_ARCH_X86_64
+	EsPrint("RSP: %x; RBP: %x\n", ProcessorGetRSP(), ProcessorGetRBP());
+#endif
+	// EsPrint("Memory: %x/%x\n", pmm.pagesAllocated, pmm.startPageCount);
+
+	{
+		EsPrint("Threads:\n");
+
+		LinkedItem<Thread> *item = scheduler.allThreads.firstItem;
+
+		while (item) {
+			Thread *thread = item->thisItem;
+
+#ifdef ES_ARCH_X86_64
+			EsPrint("%z %d %x @%x:%x ", (GetCurrentThread() == thread) ? "=>" : "  ", 
+					thread->id, thread, thread->interruptContext->rip, thread->interruptContext->rbp);
+#endif
+
+			if (thread->state == THREAD_WAITING_EVENT) {
+				EsPrint("WaitEvent(Count:%d, %x) ", thread->blocking.eventCount, thread->blocking.events[0]);
+			} else if (thread->state == THREAD_WAITING_MUTEX) {
+				EsPrint("WaitMutex(%x, Owner:%d) ", thread->blocking.mutex, thread->blocking.mutex->owner->id);
+			} else if (thread->state == THREAD_WAITING_WRITER_LOCK) {
+				EsPrint("WaitWriterLock(%x, %d) ", thread->blocking.writerLock, thread->blocking.writerLockType);
+			}
+
+			Process *process = thread->process;
+			EsPrint("%z:%z\n", process->cExecutableName, thread->cName);
+
+			item = item->nextItem;
+		}
+	}
+
+	for (uintptr_t i = 0; i < KGetCPUCount(); i++) {
+		CPULocalStorage *local = KGetCPULocal(i);
+
+		if (local->panicContext) {
+#ifdef ES_ARCH_X86_64
+			EsPrint("CPU %d LS %x RIP/RBP %x:%x TID %d\n", local->processorID, local,
+					local->panicContext->rip, local->panicContext->rbp,
+					local->currentThread ? local->currentThread->id : 0);
+#endif
+		}
+	}
+
+#ifdef POST_PANIC_DEBUGGING
+	uintptr_t kernelLogEnd = kernelLogPosition;
+	EsPrint("Press 'D' to enter debugger.\n");
+
+	while (true) {
+		int key = KWaitKey();
+		if (key == ES_SCANCODE_D) break;
+		if (key == -1) ProcessorHalt();
+	}
+
+	graphics.debuggerActive = true;
+
+	while (true) {
+#ifdef VGA_TEXT_MODE
+		for (uintptr_t i = 0; i < 80 * 25; i++) {
+			TERMINAL_ADDRESS[i] = 0x0700;
+		}
+
+		terminalPosition = 80;
+#else
+		graphics.target->debugClearScreen();
+
+		debugCurrentRow = debugCurrentColumn = 0;
+#endif
+
+
+		EsPrint("0 - view log\n1 - reset\n2 - view pmem\n3 - view vmem\n4 - stack trace\n");
+
+		int key = KWaitKey();
+
+		if (key == ES_SCANCODE_0) {
+			uintptr_t position = 0, nextPosition = 0;
+			uintptr_t x = 0, y = 0;
+
+#ifdef VGA_TEXT_MODE
+			for (uintptr_t i = 0; i < 80 * 25; i++) {
+				TERMINAL_ADDRESS[i] = 0x0700;
+			}
+#else
+			graphics.target->debugClearScreen();
+#endif
+
+			while (position < kernelLogEnd) {
+				char c = kernelLog[position];
+
+				if (c != '\n') {
+#ifdef VGA_TEXT_MODE
+					TERMINAL_ADDRESS[x + y * 80] = c | 0x0700;
+#else
+					debugCurrentRow = y, debugCurrentColumn = x;
+					DebugWriteCharacter(c);
+#endif
+				}
+
+				x++;
+
+				if (x == 
+#ifdef VGA_TEXT_MODE
+						80 
+#else
+						debugColumns
+#endif
+						|| c == '\n') {
+					x = 0;
+					y++;
+
+					if (y == 1) {
+						nextPosition = position;
+					}
+				}
+
+				if (y == 
+#ifdef VGA_TEXT_MODE
+						25
+#else
+						debugRows
+#endif
+						) {
+					while (true) {
+						int key = KWaitKey();
+
+						if (key == ES_SCANCODE_SPACE || key == ES_SCANCODE_DOWN_ARROW) {
+							position = nextPosition;
+							break;
+						} else if (key == ES_SCANCODE_UP_ARROW) {
+							position = nextPosition;
+							if (position < 240) position = 0;
+							else position -= 240;
+							break;
+						}
+					}
+
+#ifdef VGA_TEXT_MODE
+					for (uintptr_t i = 0; i < 80 * 25; i++) {
+						TERMINAL_ADDRESS[i] = 0x0700;
+					}
+#else
+					graphics.target->debugClearScreen();
+#endif
+
+					y = 0;
+				}
+
+				position++;
+			}
+
+			KWaitKey();
+		} else if (key == ES_SCANCODE_1) {
+			ProcessorReset();
+		} else if (key == ES_SCANCODE_2) {
+			EsPrint("Enter address: ");
+			uintptr_t address = DebugReadNumber();
+			uintptr_t offset = address & (K_PAGE_SIZE - 1);
+			MMRemapPhysical(kernelMMSpace, pmm.pmManipulationRegion, address - offset);
+			uintptr_t *data = (uintptr_t *) ((uint8_t *) pmm.pmManipulationRegion + offset);
+
+			for (uintptr_t i = 0; i < 8 && (offset + 8 * sizeof(uintptr_t) < K_PAGE_SIZE); i++) {
+				EsPrint("\n%x - %x\n", address + 8 * sizeof(uintptr_t), data[i]);
+			}
+
+			while (KWaitKey() != ES_SCANCODE_ENTER);
+		} else if (key == ES_SCANCODE_3) {
+			EsPrint("Enter address: ");
+			uintptr_t address = DebugReadNumber();
+			uintptr_t offset = address & (K_PAGE_SIZE - 1);
+			uintptr_t *data = (uintptr_t *) address;
+
+			for (uintptr_t i = 0; i < 8 && (offset + i * sizeof(uintptr_t) < K_PAGE_SIZE); i++) {
+				EsPrint("\n%x - %x", address + i * sizeof(uintptr_t), data[i]);
+			}
+
+			while (KWaitKey() != ES_SCANCODE_ENTER);
+		} else if (key == ES_SCANCODE_4) {
+			EsPrint("Enter RBP: ");
+			uintptr_t address = DebugReadNumber();
+
+			while (address) {
+				EsPrint("\n%x", ((uintptr_t *) address)[1]);
+				address = ((uintptr_t *) address)[0];
+			}
+
+			while (KWaitKey() != ES_SCANCODE_ENTER);
+		}
+	}
+#endif
+
+	ProcessorHalt();
+}
+
+void __KernelLog(const char *format, ...) {
+	va_list arguments;
+	va_start(arguments, format);
+	_StringFormat(TerminalCallback, nullptr, format, arguments);
+	va_end(arguments);
+}
+
+
+void KernelLog(KLogLevel level, const char *subsystem, const char *event, const char *format, ...) {
+	if (level == LOG_VERBOSE) return;
+	(void) event;
+
+	KSpinlockAcquire(&printLock);
+	EsDefer(KSpinlockRelease(&printLock));
+
+	__KernelLog("[%z:%z] ", level == LOG_INFO ? "Info" : level == LOG_ERROR ? "**Error**" : level == LOG_VERBOSE ? "Verbose" : "", subsystem);
+
+	va_list arguments;
+	va_start(arguments, format);
+	_StringFormat(TerminalCallback, nullptr, format, arguments);
+	va_end(arguments);
+}
+
 
 uintptr_t Syscall(uintptr_t argument0, uintptr_t argument1, uintptr_t argument2, uintptr_t returnAddress, uintptr_t argument3, uintptr_t argument4, uintptr_t *userStackPointer) {
     (void)argument0;
