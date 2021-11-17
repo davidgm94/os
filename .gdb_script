@@ -2,7 +2,8 @@ set disassembly-flavor intel
 symbol-file zig-cache/kernel.elf
 b CPU_stop
 b panic
+b kernel_init
 target remote localhost:1234
 
-b drivers.acpi.ACPI.parse_tables
+b kernel.scheduler.Thread.create
 c

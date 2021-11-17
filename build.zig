@@ -57,11 +57,11 @@ fn nasm_compile_elf_object(builder: *Builder, executable: *std.build.LibExeObjSt
     executable.step.dependOn(&nasm_command.step);
 }
 
+const build_zig = false;
+
 fn build_kernel(b: *Builder) *std.build.LibExeObjStep
 {
-    const kernel = b.addExecutable(kernel_output_file, kernel_source_file);
-    const c_flags = &[_][:0]const u8{ "-g", };
-    kernel.addCSourceFile("src/kernel/extern.c", c_flags);
+    const kernel = if (build_zig) b.addExecutable(kernel_output_file, kernel_source_file) else b.addExecutable(kernel_output_file, null);
     kernel.red_zone = false;
     kernel.code_model = .kernel;
     kernel.disable_stack_probing = true;
@@ -90,7 +90,25 @@ fn build_kernel(b: *Builder) *std.build.LibExeObjStep
             .cpu_features_sub = disabled_features,
             .cpu_features_add = enabled_features,
         });
-    nasm_compile_elf_object(b, kernel, "src/kernel/x86.S", "zig-cache/kernel_x86.o");
+
+    if (!build_zig)
+    {
+        const c_source_files = [_][]const u8
+        {
+            "src/kernel.cpp",
+        };
+
+        const c_flags = [_][]const u8
+        {
+            "-ffreestanding",
+            "-fno-exceptions",
+            "-Wall",
+            "-Wextra",
+        };
+        kernel.addCSourceFiles(c_source_files[0..], c_flags[0..]);
+    }
+
+    nasm_compile_elf_object(b, kernel, if (build_zig) "src/kernel/x86.S" else "src/x86_64.S", "zig-cache/kernel_x86.o");
     kernel.setMainPkgPath("src");
     kernel.setLinkerScriptPath(FileSource.relative(kernel_linker_script_path));
     kernel.setOutputDir(build_cache_dir);
