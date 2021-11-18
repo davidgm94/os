@@ -9,6 +9,9 @@
 #include <stddef.h>
 #include <stdarg.h>
 
+typedef uint64_t uint64_t_unaligned __attribute__((aligned(1)));
+typedef uint32_t uint32_t_unaligned __attribute__((aligned(1)));
+
 typedef int64_t EsListViewIndex;
 typedef uintptr_t EsHandle;
 typedef uint64_t EsObjectID;
@@ -95,13 +98,13 @@ uint8_t EsMemorySumBytes(uint8_t *source, size_t bytes) {
 		return 0;
 	}
 
-	uint8_t total = 0;
+	uint64_t total = 0;
 
 	for (uintptr_t i = 0; i < bytes; i++) {
 		total += source[i];
 	}
 
-	return total;
+	return (uint8_t)total;
 }
 
 int EsMemoryCompare(const void *a, const void *b, size_t bytes) {
@@ -9049,7 +9052,7 @@ struct RootSystemDescriptorPointer {
 	uint8_t reserved[3];
 };
 
-struct ACPIDescriptorTable {
+struct _ACPIDescriptorTable {
 #define ACPI_DESCRIPTOR_TABLE_HEADER_LENGTH (36)
 	uint32_t signature;
 	uint32_t length;
@@ -9059,17 +9062,19 @@ struct ACPIDescriptorTable {
 	uint32_t creatorID;
 	uint32_t creatorRevision;
 };
+typedef _ACPIDescriptorTable ACPIDescriptorTable __attribute__((aligned(1)));
 
-struct MultipleAPICDescriptionTable {
+struct _MultipleAPICDescriptionTable {
 	uint32_t lapicAddress; 
 	uint32_t flags;
 };
+typedef _MultipleAPICDescriptionTable MultipleAPICDescriptionTable __attribute__((aligned(1)));
 
 struct ArchCPU {
 	uint8_t processorID, kernelProcessorID;
 	uint8_t apicID;
 	bool bootProcessor;
-	void **kernelStack;
+	uint64_t_unaligned *kernelStack;
 	CPULocalStorage *local;
 };
 
@@ -9229,13 +9234,11 @@ uintptr_t ArchFindRootSystemDescriptorPointer() {
 }
 
 
-
-
 void ACPIParseTables() {
 	acpi.rsdp = (RootSystemDescriptorPointer *) MMMapPhysical(kernelMMSpace, ArchFindRootSystemDescriptorPointer(), 16384, ES_FLAGS_DEFAULT);
 
-	ACPIDescriptorTable *madtHeader = nullptr;
-	ACPIDescriptorTable *sdt = nullptr; 
+	ACPIDescriptorTable* madtHeader = nullptr;
+	ACPIDescriptorTable* sdt = nullptr; 
 	bool isXSDT = false;
 
 	if (acpi.rsdp) {
@@ -9273,9 +9276,11 @@ void ACPIParseTables() {
 		uintptr_t address;
 
 		if (isXSDT) {
-			address = ((uint64_t *) tableListAddress)[i];
+            uint64_t_unaligned* ptr = (uint64_t*) tableListAddress;
+			address = ptr[i];
 		} else {
-			address = ((uint32_t *) tableListAddress)[i];
+            uint32_t_unaligned* ptr = (uint32_t*) tableListAddress;
+			address = ptr[i];
 		}
 
 		ACPIDescriptorTable *header = (ACPIDescriptorTable *) MMMapPhysical(kernelMMSpace, address, sizeof(ACPIDescriptorTable), ES_FLAGS_DEFAULT);
@@ -9359,16 +9364,16 @@ void ACPIParseTables() {
 			case 1: {
 				// An I/O APIC.
 				acpi.ioApics[acpi.ioapicCount].id = data[2];
-				acpi.ioApics[acpi.ioapicCount].address = (uint32_t volatile *) ACPIMapPhysicalMemory(((uint32_t *) data)[1], 0x10000);
+				acpi.ioApics[acpi.ioapicCount].address = (uint32_t volatile *) ACPIMapPhysicalMemory(((uint32_t_unaligned *) data)[1], 0x10000);
 				ACPIIoApicReadRegister(&acpi.ioApics[acpi.ioapicCount], 0); // Make sure it's mapped.
-				acpi.ioApics[acpi.ioapicCount].gsiBase = ((uint32_t *) data)[2];
+				acpi.ioApics[acpi.ioapicCount].gsiBase = ((uint32_t_unaligned *) data)[2];
 				acpi.ioapicCount++;
 			} break;
 
 			case 2: {
 				// An interrupt source override structure.
 				acpi.interruptOverrides[acpi.interruptOverrideCount].sourceIRQ = data[3];
-				acpi.interruptOverrides[acpi.interruptOverrideCount].gsiNumber = ((uint32_t *) data)[1];
+				acpi.interruptOverrides[acpi.interruptOverrideCount].gsiNumber = ((uint32_t_unaligned *) data)[1];
 				acpi.interruptOverrides[acpi.interruptOverrideCount].activeLow = (data[8] & 2) ? true : false;
 				acpi.interruptOverrides[acpi.interruptOverrideCount].levelTriggered = (data[8] & 8) ? true : false;
 				KernelLog(LOG_INFO, "ACPI", "interrupt override", "ACPIInitialise - Source IRQ %d is mapped to GSI %d%z%z.\n",
@@ -10301,18 +10306,36 @@ void MMArchInitialise() {
 }
 
 
+
 bool MMArchCommitPageTables(MMSpace *space, MMRegion *region) {
 	KMutexAssertLocked(&space->reserveMutex);
 
 	MMArchVAS *data = &space->data;
 
-	uintptr_t base = region->baseAddress - (space == coreMMSpace ? MM_CORE_SPACE_START : 0);
+	uintptr_t base = (region->baseAddress - (space == coreMMSpace ? MM_CORE_SPACE_START : 0)) & 0x7FFFFFFFF000;
 	uintptr_t end = base + (region->pageCount << K_PAGE_BITS);
 	uintptr_t needed = 0;
 
+	for (uintptr_t i = base; i < end; i += 1L << (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 3)) {
+		uintptr_t indexL4 = i >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 3);
+		if (!(data->l3Commit[indexL4 >> 3] & (1 << (indexL4 & 7)))) needed++;
+		i = indexL4 << (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 3);
+	}
+
+	for (uintptr_t i = base; i < end; i += 1L << (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 2)) {
+		uintptr_t indexL3 = i >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 2);
+		if (!(data->l2Commit[indexL3 >> 3] & (1 << (indexL3 & 7)))) needed++;
+		i = indexL3 << (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 2);
+	}
+
+	uintptr_t previousIndexL2I = -1;
+
 	for (uintptr_t i = base; i < end; i += 1L << (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 1)) {
 		uintptr_t indexL2 = i >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 1);
-		if (!(data->l1Commit[indexL2 >> 3] & (1 << (indexL2 & 7)))) needed++;
+		uintptr_t indexL2I = indexL2 >> 15;
+		if (!(data->l1CommitCommit[indexL2I >> 3] & (1 << (indexL2I & 7)))) needed += previousIndexL2I != indexL2I ? 2 : 1;
+		else if (!(data->l1Commit[indexL2 >> 3] & (1 << (indexL2 & 7)))) needed++;
+		previousIndexL2I = indexL2I;
 		i = indexL2 << (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 1);
 	}
 
@@ -10324,8 +10347,22 @@ bool MMArchCommitPageTables(MMSpace *space, MMRegion *region) {
 		data->pageTablesCommitted += needed;
 	}
 
+	for (uintptr_t i = base; i < end; i += 1L << (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 3)) {
+		uintptr_t indexL4 = i >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 3);
+		data->l3Commit[indexL4 >> 3] |= (1 << (indexL4 & 7));
+		i = indexL4 << (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 3);
+	}
+
+	for (uintptr_t i = base; i < end; i += 1L << (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 2)) {
+		uintptr_t indexL3 = i >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 2);
+		data->l2Commit[indexL3 >> 3] |= (1 << (indexL3 & 7));
+		i = indexL3 << (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 2);
+	}
+
 	for (uintptr_t i = base; i < end; i += 1L << (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 1)) {
 		uintptr_t indexL2 = i >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 1);
+		uintptr_t indexL2I = indexL2 >> 15;
+		data->l1CommitCommit[indexL2I >> 3] |= (1 << (indexL2I & 7));
 		data->l1Commit[indexL2 >> 3] |= (1 << (indexL2 & 7));
 		i = indexL2 << (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 1);
 	}
@@ -10597,6 +10634,7 @@ uintptr_t MMArchTranslateAddress(MMSpace *, uintptr_t virtualAddress, bool write
 }
 
 bool MMArchHandlePageFault(uintptr_t address, uint32_t flags) {
+	// EsPrint("Fault %x\n", address);
 	address &= ~(K_PAGE_SIZE - 1);
 	bool forSupervisor = flags & MM_HANDLE_PAGE_FAULT_FOR_SUPERVISOR;
 
@@ -10604,7 +10642,12 @@ bool MMArchHandlePageFault(uintptr_t address, uint32_t flags) {
 		KernelPanic("MMArchHandlePageFault - Page fault with interrupts disabled.\n");
 	}
 
-	if (address >= MM_CORE_REGIONS_START && address < MM_CORE_REGIONS_START + MM_CORE_REGIONS_COUNT * sizeof(MMRegion) && forSupervisor) {
+	if (address < K_PAGE_SIZE) {
+	} else if (address >= LOW_MEMORY_MAP_START && address < LOW_MEMORY_MAP_START + LOW_MEMORY_LIMIT && forSupervisor) {
+		// We want to access a physical page within the first 4GB.
+		MMArchMapPage(kernelMMSpace, address - LOW_MEMORY_MAP_START, address, MM_MAP_PAGE_COMMIT_TABLES_NOW);
+		return true;
+	} else if (address >= MM_CORE_REGIONS_START && address < MM_CORE_REGIONS_START + MM_CORE_REGIONS_COUNT * sizeof(MMRegion) && forSupervisor) {
 		// This is where coreMMSpace stores its regions.
 		// Allocate physical memory and map it.
 		MMArchMapPage(kernelMMSpace, MMPhysicalAllocate(MM_PHYSICAL_ALLOCATE_ZEROED), address, MM_MAP_PAGE_COMMIT_TABLES_NOW);
@@ -10615,9 +10658,11 @@ bool MMArchHandlePageFault(uintptr_t address, uint32_t flags) {
 		return MMHandlePageFault(kernelMMSpace, address, flags);
 	} else if (address >= MM_MODULES_START && address < MM_MODULES_START + MM_MODULES_SIZE && forSupervisor) {
 		return MMHandlePageFault(kernelMMSpace, address, flags);
-	} else if (address >= K_PAGE_SIZE) {
+	} else {
 		Thread *thread = GetCurrentThread();
-		return MMHandlePageFault(thread->temporaryAddressSpace ?: thread->process->vmm, address, flags);
+		MMSpace *space = thread->temporaryAddressSpace;
+		if (!space) space = thread->process->vmm;
+		return MMHandlePageFault(space, address, flags);
 	}
 
 	return false;
@@ -10645,8 +10690,7 @@ bool PostContextSwitch(InterruptContext *context, MMSpace *oldAddressSpace) {
 
 #ifdef ES_ARCH_X86_64
 	CPULocalStorage *local = GetLocalStorage();
-	void *kernelStack = (void *) currentThread->kernelStack;
-	*local->archCPU->kernelStack = kernelStack;
+	*local->archCPU->kernelStack = currentThread->kernelStack;
 #endif
 
 	bool newThread = currentThread->cpuTimeSlices == 1;
@@ -10754,10 +10798,10 @@ void SetupProcessor2(NewProcessorStorage *storage) {
 
 #ifdef ES_ARCH_X86_64
 	uint32_t *gdt = storage->gdt;
-	void *bootstrapGDT = (void *) (((uint64_t *) ((uint16_t *) processorGDTR + 1))[0]);
+	void *bootstrapGDT = (void *) (((uint64_t_unaligned *) ((uint16_t *) processorGDTR + 1))[0]);
 	EsMemoryCopy(gdt, bootstrapGDT, 2048);
 	uint32_t *tss = (uint32_t *) ((uint8_t *) storage->gdt + 2048);
-	storage->local->archCPU->kernelStack = (void **) (tss + 1);
+	storage->local->archCPU->kernelStack = (uint64_t_unaligned *) (tss + 1);
 	ProcessorInstallTSS(gdt, tss);
 #endif
 }
@@ -12487,8 +12531,11 @@ void InterruptHandler(InterruptContext *context) {
 	}
 }
 
-extern "C" void KernelMain(uintptr_t)
+extern "C" void KernelMain(uintptr_t a)
 {
+    auto reached_here = a + 1;
+    a-= 1;
+    auto result = reached_here + a;
 }
 
 extern "C" void KernelInitialise()
