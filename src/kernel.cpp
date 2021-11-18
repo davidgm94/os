@@ -16,6 +16,41 @@ typedef uint64_t EsFileOffset;
 typedef intptr_t EsError;
 typedef uint8_t EsNodeType;
 typedef int64_t EsFileOffsetDifference;
+typedef uint64_t _EsLongConstant;
+
+enum KernelObjectType : uint32_t {
+	COULD_NOT_RESOLVE_HANDLE	= 0x00000000,
+	KERNEL_OBJECT_NONE		= 0x80000000,
+
+	KERNEL_OBJECT_PROCESS 		= 0x00000001, // A process.
+	KERNEL_OBJECT_THREAD		= 0x00000002, // A thread.
+	KERNEL_OBJECT_WINDOW		= 0x00000004, // A window.
+	KERNEL_OBJECT_SHMEM		= 0x00000008, // A region of shared memory.
+	KERNEL_OBJECT_NODE		= 0x00000010, // A file system node (file or directory).
+	KERNEL_OBJECT_EVENT		= 0x00000020, // A synchronisation event.
+	KERNEL_OBJECT_CONSTANT_BUFFER	= 0x00000040, // A buffer of unmodifiable data stored in the kernel's address space.
+#ifdef ENABLE_POSIX_SUBSYSTEM
+	KERNEL_OBJECT_POSIX_FD		= 0x00000100, // A POSIX file descriptor, used in the POSIX subsystem.
+#endif
+	KERNEL_OBJECT_PIPE		= 0x00000200, // A pipe through which data can be sent between processes, blocking when full or empty.
+	KERNEL_OBJECT_EMBEDDED_WINDOW	= 0x00000400, // An embedded window object, referencing its container Window.
+	KERNEL_OBJECT_CONNECTION	= 0x00004000, // A network connection.
+	KERNEL_OBJECT_DEVICE		= 0x00008000, // A device.
+};
+
+
+#define ES_PERMISSION_NETWORKING				(1 << 0)
+#define ES_PERMISSION_PROCESS_CREATE			(1 << 1)
+#define ES_PERMISSION_PROCESS_OPEN			(1 << 2)
+#define ES_PERMISSION_SCREEN_MODIFY			(1 << 3)	
+#define ES_PERMISSION_SHUTDOWN				(1 << 4)
+#define ES_PERMISSION_TAKE_SYSTEM_SNAPSHOT		(1 << 5)
+#define ES_PERMISSION_GET_VOLUME_INFORMATION		(1 << 6)
+#define ES_PERMISSION_WINDOW_MANAGER			(1 << 7)
+#define ES_PERMISSION_POSIX_SUBSYSTEM			(1 << 8)
+#define ES_PERMISSION_ALL				((_EsLongConstant) (-1))
+#define ES_PERMISSION_INHERIT				((_EsLongConstant) (1) << 63)
+
 
 #define EsLiteral(x) (char *) x, EsCStringLength((char *) x)
 #define EsAssert(x) do { if (!(x)) { EsAssertionFailure(__FILE__, __LINE__); } } while (0)
@@ -43,6 +78,7 @@ extern MMSpace _kernelMMSpace, _coreMMSpace;
 #define CC_ACCESS_USER_BUFFER_MAPPED (1 << 5) // Set if the user buffer is memory-mapped to mirror this or another cache.
 
 
+void CloseHandleToObject(void *object, KernelObjectType type, uint32_t flags = 0);
 void *MMStandardAllocate(MMSpace *space, size_t bytes, uint32_t flags, void *baseAddress = nullptr, bool commitAll = true);
 bool MMFree(MMSpace *space, void *address, size_t expectedSize = 0, bool userOnly = false);
 
@@ -52,6 +88,20 @@ void EsMemoryFill(void *from, void *to, uint8_t byte) {
 	uint8_t *a = (uint8_t *) from;
 	uint8_t *b = (uint8_t *) to;
 	while (a != b) *a = byte, a++;
+}
+
+uint8_t EsMemorySumBytes(uint8_t *source, size_t bytes) {
+	if (!bytes) {
+		return 0;
+	}
+
+	uint8_t total = 0;
+
+	for (uintptr_t i = 0; i < bytes; i++) {
+		total += source[i];
+	}
+
+	return total;
 }
 
 int EsMemoryCompare(const void *a, const void *b, size_t bytes) {
@@ -103,6 +153,29 @@ void EsMemoryCopy(void *_destination, const void *_source, size_t bytes) {
 	}
 }
 
+void *EsCRTmemcpy(void *dest, const void *src, size_t n) {
+	uint8_t *dest8 = (uint8_t *) dest;
+	const uint8_t *src8 = (const uint8_t *) src;
+	for (uintptr_t i = 0; i < n; i++) {
+		dest8[i] = src8[i];
+	}
+	return dest;
+}
+
+
+size_t EsCRTstrlen(const char *s) {
+	size_t n = 0;
+	while (s[n]) n++;
+	return n;
+}
+
+char *EsCRTstrcpy(char *dest, const char *src) {
+	size_t stringLength = EsCRTstrlen(src);
+	EsCRTmemcpy(dest, src, stringLength + 1);
+	return dest;
+}
+
+
 
 
 #define ES_MEMORY_OPEN_FAIL_IF_FOUND     (0x1000)
@@ -118,25 +191,6 @@ enum KLogLevel {
 	LOG_ERROR,
 };
 
-enum KernelObjectType : uint32_t {
-	COULD_NOT_RESOLVE_HANDLE	= 0x00000000,
-	KERNEL_OBJECT_NONE		= 0x80000000,
-
-	KERNEL_OBJECT_PROCESS 		= 0x00000001, // A process.
-	KERNEL_OBJECT_THREAD		= 0x00000002, // A thread.
-	KERNEL_OBJECT_WINDOW		= 0x00000004, // A window.
-	KERNEL_OBJECT_SHMEM		= 0x00000008, // A region of shared memory.
-	KERNEL_OBJECT_NODE		= 0x00000010, // A file system node (file or directory).
-	KERNEL_OBJECT_EVENT		= 0x00000020, // A synchronisation event.
-	KERNEL_OBJECT_CONSTANT_BUFFER	= 0x00000040, // A buffer of unmodifiable data stored in the kernel's address space.
-#ifdef ENABLE_POSIX_SUBSYSTEM
-	KERNEL_OBJECT_POSIX_FD		= 0x00000100, // A POSIX file descriptor, used in the POSIX subsystem.
-#endif
-	KERNEL_OBJECT_PIPE		= 0x00000200, // A pipe through which data can be sent between processes, blocking when full or empty.
-	KERNEL_OBJECT_EMBEDDED_WINDOW	= 0x00000400, // An embedded window object, referencing its container Window.
-	KERNEL_OBJECT_CONNECTION	= 0x00004000, // A network connection.
-	KERNEL_OBJECT_DEVICE		= 0x00008000, // A device.
-};
 
 
 struct ConstantBuffer {
@@ -3613,7 +3667,30 @@ struct HandleTable {
 #define RESOLVE_HANDLE_NORMAL (2)
 	uint8_t ResolveHandle(Handle *outHandle, EsHandle inHandle, KernelObjectType typeMask); 
 
-	void Destroy(); 
+
+    void Destroy() {
+	KMutexAcquire(&lock);
+	EsDefer(KMutexRelease(&lock));
+
+	if (destroyed) {
+		return;
+	}
+
+	destroyed = true;
+	HandleTableL1 *l1 = &l1r;
+
+	for (uintptr_t i = 0; i < HANDLE_TABLE_L1_ENTRIES; i++) {
+		if (!l1->u[i]) continue;
+
+		for (uintptr_t k = 0; k < HANDLE_TABLE_L2_ENTRIES; k++) {
+			Handle *handle = &l1->t[i]->t[k];
+			if (handle->object) CloseHandleToObject(handle->object, handle->type, handle->flags);
+		}
+
+		EsHeapFree(l1->t[i], 0, K_FIXED);
+	}
+}
+
 };
 
 struct Process {
@@ -3845,6 +3922,176 @@ struct Scheduler {
 #endif
 };
 Scheduler scheduler;
+
+void KTimerSet(KTimer *timer, uint64_t triggerInMs, KAsyncTaskCallback _callback, EsGeneric _argument) {
+	KSpinlockAcquire(&scheduler.activeTimersSpinlock);
+
+	// Reset the timer state.
+
+	if (timer->item.list) {
+		scheduler.activeTimers.Remove(&timer->item);
+	}
+
+	KEventReset(&timer->event);
+
+	// Set the timer information.
+
+	timer->triggerTimeMs = triggerInMs + scheduler.timeMs;
+	timer->callback = _callback;
+	timer->argument = _argument;
+	timer->item.thisItem = timer;
+
+	// Add the timer to the list of active timers, keeping the list sorted by trigger time.
+
+	LinkedItem<KTimer> *_timer = scheduler.activeTimers.firstItem;
+
+	while (_timer) {
+		KTimer *timer2 = _timer->thisItem;
+		LinkedItem<KTimer> *next = _timer->nextItem;
+
+		if (timer2->triggerTimeMs > timer->triggerTimeMs) {
+			break; // Insert before this timer.
+		}
+
+		_timer = next;
+	}
+
+	if (_timer) {
+		scheduler.activeTimers.InsertBefore(&timer->item, _timer);
+	} else {
+		scheduler.activeTimers.InsertEnd(&timer->item);
+	}
+
+	KSpinlockRelease(&scheduler.activeTimersSpinlock);
+}
+
+void KTimerRemove(KTimer *timer) {
+	KSpinlockAcquire(&scheduler.activeTimersSpinlock);
+
+	if (timer->callback) {
+		KernelPanic("KTimer::Remove - Timers with callbacks cannot be removed.\n");
+	}
+
+	if (timer->item.list) {
+		scheduler.activeTimers.Remove(&timer->item);
+	}
+
+	KSpinlockRelease(&scheduler.activeTimersSpinlock);
+}
+
+
+
+bool KEventSet(KEvent *event, bool maybeAlreadySet) {
+	if (event->state && !maybeAlreadySet) {
+		KernelLog(LOG_ERROR, "Synchronisation", "event already set", "KEventSet - Attempt to set a event that had already been set\n");
+	}
+
+	KSpinlockAcquire(&scheduler.dispatchSpinlock);
+	volatile bool unblockedThreads = false;
+
+	if (!event->state) {
+		event->state = true;
+
+		if (scheduler.started) {
+			if (event->blockedThreads.count) {
+				unblockedThreads = true;
+			}
+
+			// If this is a manually reset event, unblock all the waiting threads.
+			scheduler.NotifyObject(&event->blockedThreads, !event->autoReset);
+		}
+	}
+
+	KSpinlockRelease(&scheduler.dispatchSpinlock);
+	return unblockedThreads;
+}
+
+void KEventReset(KEvent *event) {
+	if (event->blockedThreads.firstItem && event->state) {
+		// TODO Is it possible for this to happen?
+		KernelLog(LOG_ERROR, "Synchronisation", "reset event with threads blocking", 
+				"KEvent::Reset - Attempt to reset a event while threads are blocking on the event\n");
+	}
+
+	event->state = false;
+}
+
+bool KEventPoll(KEvent *event) {
+	if (event->autoReset) {
+		return __sync_val_compare_and_swap(&event->state, true, false);
+	} else {
+		return event->state;
+	}
+}
+
+uintptr_t KEventWaitMultiple(KEvent **events, size_t count) {
+	if (count > ES_MAX_WAIT_COUNT) {
+		KernelPanic("KEventWaitMultiple - count (%d) > ES_MAX_WAIT_COUNT (%d)\n", count, ES_MAX_WAIT_COUNT);
+	} else if (!count) {
+		KernelPanic("KEventWaitMultiple - Count is 0.\n");
+	} else if (!ProcessorAreInterruptsEnabled()) {
+		KernelPanic("KEventWaitMultiple - Interrupts disabled.\n");
+	}
+
+	Thread *thread = GetCurrentThread();
+	thread->blocking.eventCount = count;
+
+	LinkedItem<Thread> eventItems[count]; // Max size 16 * 32 = 512.
+	EsMemoryZero(eventItems, count * sizeof(LinkedItem<Thread>));
+	thread->blocking.eventItems = eventItems;
+	EsDefer(thread->blocking.eventItems = nullptr);
+
+	for (uintptr_t i = 0; i < count; i++) {
+		eventItems[i].thisItem = thread;
+		thread->blocking.events[i] = events[i];
+	}
+
+	while (!thread->terminating || thread->terminatableState != THREAD_USER_BLOCK_REQUEST) {
+		thread->state = THREAD_WAITING_EVENT;
+
+		for (uintptr_t i = 0; i < count; i++) {
+			if (events[i]->autoReset) {
+				if (events[i]->state) {
+					thread->state = THREAD_ACTIVE;
+
+					if (__sync_val_compare_and_swap(&events[i]->state, true, false)) {
+						return i;
+					}
+
+					thread->state = THREAD_WAITING_EVENT;
+				}
+			} else {
+				if (events[i]->state) {
+					thread->state = THREAD_ACTIVE;
+					return i;
+				}
+			}
+		}
+
+		ProcessorFakeTimerInterrupt();
+	}
+
+	return -1; // Exited from termination.
+}
+
+
+bool KEventWait(KEvent *_this, uint64_t timeoutMs) {
+	KEvent *events[2];
+	events[0] = _this;
+
+	if (timeoutMs == (uint64_t) ES_WAIT_NO_TIMEOUT) {
+		int index = KEventWaitMultiple(events, 1);
+		return index == 0;
+	} else {
+		KTimer timer = {};
+		KTimerSet(&timer, timeoutMs);
+		events[1] = &timer.event;
+		int index = KEventWaitMultiple(events, 2);
+		KTimerRemove(&timer);
+		return index == 0;
+	}
+}
+
 
 
 void KSpinlockAcquire(KSpinlock *spinlock) {
@@ -4521,56 +4768,13 @@ Thread *ThreadSpawn(const char *cName, uintptr_t startAddress, uintptr_t argumen
 	return nullptr;
 }
 
-
-uintptr_t KEventWaitMultiple(KEvent **events, size_t count) {
-	if (count > ES_MAX_WAIT_COUNT) {
-		KernelPanic("KEventWaitMultiple - count (%d) > ES_MAX_WAIT_COUNT (%d)\n", count, ES_MAX_WAIT_COUNT);
-	} else if (!count) {
-		KernelPanic("KEventWaitMultiple - Count is 0.\n");
-	} else if (!ProcessorAreInterruptsEnabled()) {
-		KernelPanic("KEventWaitMultiple - Interrupts disabled.\n");
-	}
-
-	Thread *thread = GetCurrentThread();
-	thread->blocking.eventCount = count;
-
-	LinkedItem<Thread> eventItems[count]; // Max size 16 * 32 = 512.
-	EsMemoryZero(eventItems, count * sizeof(LinkedItem<Thread>));
-	thread->blocking.eventItems = eventItems;
-	EsDefer(thread->blocking.eventItems = nullptr);
-
-	for (uintptr_t i = 0; i < count; i++) {
-		eventItems[i].thisItem = thread;
-		thread->blocking.events[i] = events[i];
-	}
-
-	while (!thread->terminating || thread->terminatableState != THREAD_USER_BLOCK_REQUEST) {
-		thread->state = THREAD_WAITING_EVENT;
-
-		for (uintptr_t i = 0; i < count; i++) {
-			if (events[i]->autoReset) {
-				if (events[i]->state) {
-					thread->state = THREAD_ACTIVE;
-
-					if (__sync_val_compare_and_swap(&events[i]->state, true, false)) {
-						return i;
-					}
-
-					thread->state = THREAD_WAITING_EVENT;
-				}
-			} else {
-				if (events[i]->state) {
-					thread->state = THREAD_ACTIVE;
-					return i;
-				}
-			}
-		}
-
-		ProcessorFakeTimerInterrupt();
-	}
-
-	return -1; // Exited from termination.
+bool KThreadCreate(const char *cName, void (*startAddress)(uintptr_t), uintptr_t argument) {
+	return ThreadSpawn(cName, (uintptr_t) startAddress, argument) ? true : false;
 }
+
+
+
+
 
 
 
@@ -4662,6 +4866,173 @@ struct Bitset {
 #endif
 };
 
+void Bitset::Initialise(size_t count, bool mapAll) {
+	singleCount = (count + 31) & ~31;
+	groupCount = singleCount / BITSET_GROUP_SIZE + 1;
+
+	singleUsage = (uint32_t *) MMStandardAllocate(kernelMMSpace, (singleCount >> 3) + (groupCount * 2), mapAll ? MM_REGION_FIXED : 0);
+	groupUsage = (uint16_t *) singleUsage + (singleCount >> 4);
+}
+
+void Bitset::PutAll() {
+	for (uintptr_t i = 0; i < singleCount; i += 32) {
+		groupUsage[i / BITSET_GROUP_SIZE] += 32;
+		singleUsage[i / 32] |= 0xFFFFFFFF;
+	}
+}
+
+uintptr_t Bitset::Get(size_t count, uintptr_t align, uintptr_t below) {
+#ifdef DEBUG_BUILD
+	if (modCheck) KernelPanic("Bitset::Allocate - Concurrent modification.\n");
+	modCheck = true; EsDefer({modCheck = false;});
+#endif
+
+	uintptr_t returnValue = (uintptr_t) -1;
+
+	if (below) {
+		if (below < count) goto done;
+		below -= count;
+	}
+
+	if (count == 1 && align == 1) {
+		for (uintptr_t i = 0; i < groupCount; i++) {
+			if (groupUsage[i]) {
+				for (uintptr_t j = 0; j < BITSET_GROUP_SIZE; j++) {
+					uintptr_t index = i * BITSET_GROUP_SIZE + j;
+					if (below && index >= below) goto done;
+
+					if (singleUsage[index >> 5] & (1 << (index & 31))) {
+						singleUsage[index >> 5] &= ~(1 << (index & 31));
+						groupUsage[i]--;
+						returnValue = index;
+						goto done;
+					}
+				}
+			}
+		}
+	} else if (count == 16 && align == 16) {
+		for (uintptr_t i = 0; i < groupCount; i++) {
+			if (groupUsage[i] >= 16) {
+				for (uintptr_t j = 0; j < BITSET_GROUP_SIZE; j += 16) {
+					uintptr_t index = i * BITSET_GROUP_SIZE + j;
+					if (below && index >= below) goto done;
+
+					if (((uint16_t *) singleUsage)[index >> 4] == (uint16_t) (-1)) {
+						((uint16_t *) singleUsage)[index >> 4] = 0;
+						groupUsage[i] -= 16;
+						returnValue = index;
+						goto done;
+					}
+				}
+			}
+		}
+	} else if (count == 32 && align == 32) {
+		for (uintptr_t i = 0; i < groupCount; i++) {
+			if (groupUsage[i] >= 32) {
+				for (uintptr_t j = 0; j < BITSET_GROUP_SIZE; j += 32) {
+					uintptr_t index = i * BITSET_GROUP_SIZE + j;
+					if (below && index >= below) goto done;
+
+					if (singleUsage[index >> 5] == (uint32_t) (-1)) {
+						singleUsage[index >> 5] = 0;
+						groupUsage[i] -= 32;
+						returnValue = index;
+						goto done;
+					}
+				}
+			}
+		}
+	} else {
+		// TODO Optimise this?
+
+		size_t found = 0;
+		uintptr_t start = 0;
+
+		for (uintptr_t i = 0; i < groupCount; i++) {
+			if (!groupUsage[i]) {
+				found = 0;
+				continue;
+			}
+
+			for (uintptr_t j = 0; j < BITSET_GROUP_SIZE; j++) {
+				uintptr_t index = i * BITSET_GROUP_SIZE + j;
+
+				if (singleUsage[index >> 5] & (1 << (index & 31))) {
+					if (!found) {
+						if (index >= below && below) goto done;
+						if (index  % align)          continue;
+
+						start = index;
+					}
+
+					found++;
+				} else {
+					found = 0;
+				}
+
+				if (found == count) {
+					returnValue = start;
+
+					for (uintptr_t i = 0; i < count; i++) {
+						uintptr_t index = start + i;
+						singleUsage[index >> 5] &= ~(1 << (index & 31));
+					}
+
+					goto done;
+				}
+			}
+		}
+	}
+
+	done:;
+	return returnValue;
+}
+
+bool Bitset::Read(uintptr_t index) {
+	// We don't want to set modCheck, 
+	// since we allow other bits to be modified while this bit is being read,
+	// and we allow multiple readers of this bit.
+	return singleUsage[index >> 5] & (1 << (index & 31));
+}
+
+void Bitset::Take(uintptr_t index) {
+#ifdef DEBUG_BUILD
+	if (modCheck) KernelPanic("Bitset::Take - Concurrent modification.\n");
+	modCheck = true; EsDefer({modCheck = false;});
+#endif
+
+	uintptr_t group = index / BITSET_GROUP_SIZE;
+
+#ifdef DEBUG_BUILD
+	if (!(singleUsage[index >> 5] & (1 << (index & 31)))) {
+		KernelPanic("Bitset::Take - Attempting to take a entry that hasalready been taken.\n");
+	}
+#endif
+
+	groupUsage[group]--;
+	singleUsage[index >> 5] &= ~(1 << (index & 31));
+}
+
+void Bitset::Put(uintptr_t index) {
+#ifdef DEBUG_BUILD
+	if (modCheck) KernelPanic("Bitset::Put - Concurrent modification.\n");
+	modCheck = true; EsDefer({modCheck = false;});
+
+	if (index > singleCount) {
+		KernelPanic("Bitset::Put - Index greater than single code.\n");
+	}
+
+	if (singleUsage[index >> 5] & (1 << (index & 31))) {
+		KernelPanic("Bitset::Put - Duplicate entry.\n");
+	}
+#endif
+
+	{
+		singleUsage[index >> 5] |= 1 << (index & 31);
+		groupUsage[index / BITSET_GROUP_SIZE]++;
+	}
+}
+ 
 struct MMObjectCache {
 	KSpinlock lock; // Used instead of a mutex to keep accesses to the list lightweight.
 	SimpleList items;
@@ -6699,7 +7070,7 @@ MMSharedRegion *MMSharedCreateRegion(size_t sizeBytes, bool fixed = false, uintp
 }
 
 struct EmbeddedWindow {
-	void Destroy();
+	void Destroy() {};
 	void Close();
 	void SetEmbedOwner(Process *process);
 
@@ -6876,7 +7247,7 @@ WindowManager windowManager;
 struct Window {
 	void Update(EsRectangle *region, bool addToModifiedRegion);
 	bool UpdateDirect(K_USER_BUFFER void *bits, uintptr_t stride, EsRectangle region);
-	void Destroy(); 
+	void Destroy() {}; 
 	void Close();
 	bool Move(EsRectangle newBounds, uint32_t flags);
 	void SetEmbed(EmbeddedWindow *window);
@@ -6968,13 +7339,36 @@ struct NetConnection {
 	volatile uintptr_t handles;
 };
 
-NetConnection *NetConnectionOpen(EsAddress *address, size_t sendBufferBytes, size_t receiveBufferBytes, uint32_t flags);
-void NetConnectionClose(NetConnection *connection);
-void NetConnectionNotify(NetConnection *connection, uintptr_t sendWritePointer, uintptr_t receiveReadPointer);
-void NetConnectionDestroy(NetConnection *connection);
+// @TODO: implement
+NetConnection *NetConnectionOpen(EsAddress *address, size_t sendBufferBytes, size_t receiveBufferBytes, uint32_t flags)
+{
+    (void)address;
+    (void)sendBufferBytes;
+    (void)receiveBufferBytes;
+    (void)flags;
+    KernelPanic("Unimplemented");
+    return nullptr;
+}
+void NetConnectionClose(NetConnection *connection)
+{
+    (void)connection;
+    KernelPanic("Unimplemented");
+}
+void NetConnectionNotify(NetConnection *connection, uintptr_t sendWritePointer, uintptr_t receiveReadPointer)
+{
+    (void)connection;
+    (void)sendWritePointer;
+    (void)receiveReadPointer;
+    KernelPanic("Unimplemented");
+}
+void NetConnectionDestroy(NetConnection *connection)
+{
+    (void)connection;
+    KernelPanic("Unimplemented");
+}
 
 void ProcessRemove(Process *process);
-void CloseHandleToObject(void *object, KernelObjectType type, uint32_t flags = 0)
+void CloseHandleToObject(void *object, KernelObjectType type, uint32_t flags)
 {
 	switch (type) {
 		case KERNEL_OBJECT_PROCESS: {
@@ -7615,6 +8009,12 @@ void ThreadSetTemporaryAddressSpace(MMSpace *space) {
 	MMSpaceCloseReference(oldSpace);
 }
 
+void MMArchFreeVAS(MMSpace *space) {
+    (void)space;
+	// TODO.
+	KernelPanic("Unimplemented!\n");
+}
+
 void MMSpaceDestroy(MMSpace *space) {
 	LinkedItem<MMRegion> *item = space->usedRegionsNonGuard.firstItem;
 
@@ -7711,6 +8111,7 @@ void ProcessKill(Process *process) {
 
 MMRegion *MMReserve(MMSpace *space, size_t bytes, unsigned flags, uintptr_t forcedAddress = 0, bool generateGuardPages = false) {
 	// TODO Handling EsHeapAllocate failures.
+    (void)generateGuardPages;
 	
 	MMRegion *outputRegion = nullptr;
 	size_t pagesNeeded = ((bytes + K_PAGE_SIZE - 1) & ~(K_PAGE_SIZE - 1)) / K_PAGE_SIZE;
@@ -8128,6 +8529,101 @@ void PMZero(uintptr_t *pages, size_t pageCount, bool contiguous) {
 	// if (pageNumbers) EsPrint("w%d\n", pmm.pmManipulationLock.blockedThreads.count);
 	KMutexRelease(&pmm.pmManipulationLock);
 }
+
+alignas(K_PAGE_SIZE) uint8_t earlyZeroBuffer[K_PAGE_SIZE];
+
+uintptr_t MMPhysicalAllocate(unsigned flags, uintptr_t count, uintptr_t align, uintptr_t below) {
+	bool mutexAlreadyAcquired = flags & MM_PHYSICAL_ALLOCATE_LOCK_ACQUIRED;
+	if (!mutexAlreadyAcquired) KMutexAcquire(&pmm.pageFrameMutex);
+	else KMutexAssertLocked(&pmm.pageFrameMutex);
+	EsDefer(if (!mutexAlreadyAcquired) KMutexRelease(&pmm.pageFrameMutex););
+
+	intptr_t commitNow = count * K_PAGE_SIZE;
+
+	if (flags & MM_PHYSICAL_ALLOCATE_COMMIT_NOW) {
+		if (!MMCommit(commitNow, true)) return 0;
+	} else commitNow = 0;
+
+	bool simple = count == 1 && align == 1 && below == 0;
+
+	if (!pmm.pageFrameDatabaseInitialised) {
+		// Early page allocation before the page frame database is initialised.
+
+		if (!simple) {
+			KernelPanic("MMPhysicalAllocate - Non-simple allocation before initialisation of the page frame database.\n");
+		}
+
+		uintptr_t page = MMArchEarlyAllocatePage();
+
+		if (flags & MM_PHYSICAL_ALLOCATE_ZEROED) {
+			// TODO Hack!
+			MMArchMapPage(coreMMSpace, page, (uintptr_t) earlyZeroBuffer, 
+					MM_MAP_PAGE_OVERWRITE | MM_MAP_PAGE_NO_NEW_TABLES | MM_MAP_PAGE_FRAME_LOCK_ACQUIRED);
+			EsMemoryZero(earlyZeroBuffer, K_PAGE_SIZE);
+		}
+
+		return page;
+	} else if (!simple) {
+		// Slow path.
+		// TODO Use standby pages.
+
+		uintptr_t pages = pmm.freeOrZeroedPageBitset.Get(count, align, below);
+		if (pages == (uintptr_t) -1) goto fail;
+		MMPhysicalActivatePages(pages, count, flags);
+		uintptr_t address = pages << K_PAGE_BITS;
+		if (flags & MM_PHYSICAL_ALLOCATE_ZEROED) PMZero(&address, count, true);
+		return address;
+	} else {
+		uintptr_t page = 0;
+		bool notZeroed = false;
+
+		if (!page) page = pmm.firstZeroedPage;
+		if (!page) page = pmm.firstFreePage, notZeroed = true;
+		if (!page) page = pmm.lastStandbyPage, notZeroed = true;
+		if (!page) goto fail;
+
+		MMPageFrame *frame = pmm.pageFrames + page;
+
+		if (frame->state == MMPageFrame::ACTIVE) {
+			KernelPanic("MMPhysicalAllocate - Corrupt page frame database (2).\n");
+		}
+
+		if (frame->state == MMPageFrame::STANDBY) {
+			// EsPrint("Clear RT %x\n", frame);
+
+			if (*frame->cacheReference != ((page << K_PAGE_BITS) | MM_SHARED_ENTRY_PRESENT)) {
+				KernelPanic("MMPhysicalAllocate - Corrupt shared reference back pointer in frame %x.\n", frame);
+			}
+
+			// Clear the entry in the CCCachedSection that referenced this standby frame.
+			*frame->cacheReference = 0;
+
+			// TODO If the CCCachedSection is empty, remove it from its CCSpace.
+		} else {
+			pmm.freeOrZeroedPageBitset.Take(page);
+		}
+
+		MMPhysicalActivatePages(page, 1, flags);
+
+		// EsPrint("PAGE FRAME ALLOCATE: %x\n", page << K_PAGE_BITS);
+
+		uintptr_t address = page << K_PAGE_BITS;
+		if (notZeroed && (flags & MM_PHYSICAL_ALLOCATE_ZEROED)) PMZero(&address, 1, false);
+		// if (!notZeroed) PMCheckZeroed(address);
+		return address;
+	}
+
+	fail:;
+
+	if (!(flags & MM_PHYSICAL_ALLOCATE_CAN_FAIL)) {
+		EsPrint("Out of memory. Committed %d/%d fixed and %d pageable out of a maximum %d.\n", pmm.commitFixed, pmm.commitFixedLimit, pmm.commitPageable, pmm.commitLimit);
+		KernelPanic("MMPhysicalAllocate - Out of memory.\n");
+	}
+
+	MMDecommit(commitNow, true);
+	return 0;
+}
+
 
 
 void PMCopy(uintptr_t page, void *_source, size_t pageCount) {
@@ -8624,6 +9120,293 @@ struct ACPI {
 
 ACPI acpi;
 
+uint32_t ACPIIoApicReadRegister(ACPIIoApic *apic, uint32_t reg) {
+	apic->address[0] = reg; 
+	return apic->address[4];
+}
+
+void ACPIIoApicWriteRegister(ACPIIoApic *apic, uint32_t reg, uint32_t value) {
+	apic->address[0] = reg; 
+	apic->address[4] = value;
+}
+void ACPICheckTable(const ACPIDescriptorTable *table) {
+	if (!EsMemorySumBytes((uint8_t *) table, table->length)) {
+		return;
+	}
+
+	KernelPanic("ACPICheckTable - ACPI table with signature %s had invalid checksum: "
+			"length: %D, ID = %s, table = %s, OEM revision = %d, creator = %s, creator revision = %d.\n",
+			4, &table->signature, table->length, 8, &table->id, 8, &table->tableID, 
+			table->oemRevision, 4, &table->creatorID, table->creatorRevision);
+}
+
+void *MMMapPhysical(MMSpace *space, uintptr_t offset, size_t bytes, uint64_t caching) {
+	if (!space) space = kernelMMSpace;
+
+	uintptr_t offset2 = offset & (K_PAGE_SIZE - 1);
+	offset -= offset2;
+	if (offset2) bytes += K_PAGE_SIZE;
+
+	MMRegion *region;
+
+	{
+		KMutexAcquire(&space->reserveMutex);
+		EsDefer(KMutexRelease(&space->reserveMutex));
+
+		region = MMReserve(space, bytes, MM_REGION_PHYSICAL | MM_REGION_FIXED | caching);
+		if (!region) return nullptr;
+
+		region->data.physical.offset = offset;
+	}
+
+	for (uintptr_t i = 0; i < region->pageCount; i++) {
+		MMHandlePageFault(space, region->baseAddress + i * K_PAGE_SIZE, ES_FLAGS_DEFAULT);
+	}
+
+	return (uint8_t *) region->baseAddress + offset2;
+}
+
+
+
+void *ACPIMapPhysicalMemory(uintptr_t physicalAddress, size_t length) {
+	return MMMapPhysical(kernelMMSpace, physicalAddress, length, MM_REGION_NOT_CACHEABLE);
+}
+
+
+
+void *ACPIGetRSDP() {
+	return acpi.rsdp;
+}
+
+uint8_t ACPIGetCenturyRegisterIndex() {
+	return acpi.centuryRegisterIndex;
+}
+
+uintptr_t GetBootloaderInformationOffset();
+
+
+uintptr_t ArchFindRootSystemDescriptorPointer() {
+	uint64_t uefiRSDP = *((uint64_t *) (LOW_MEMORY_MAP_START + GetBootloaderInformationOffset() + 0x7FE8));
+
+	if (uefiRSDP) {
+		return uefiRSDP;
+	}
+
+	PhysicalMemoryRegion searchRegions[2];
+
+	searchRegions[0].baseAddress = (uintptr_t) (((uint16_t *) LOW_MEMORY_MAP_START)[0x40E] << 4) + LOW_MEMORY_MAP_START;
+	searchRegions[0].pageCount = 0x400;
+	searchRegions[1].baseAddress = (uintptr_t) 0xE0000 + LOW_MEMORY_MAP_START;
+	searchRegions[1].pageCount = 0x20000;
+
+	for (uintptr_t i = 0; i < 2; i++) {
+		for (uintptr_t address = searchRegions[i].baseAddress;
+				address < searchRegions[i].baseAddress + searchRegions[i].pageCount;
+				address += 16) {
+			RootSystemDescriptorPointer *rsdp = (RootSystemDescriptorPointer *) address;
+
+			if (rsdp->signature != SIGNATURE_RSDP) {
+				continue;
+			}
+
+			if (rsdp->revision == 0) {
+				if (EsMemorySumBytes((uint8_t *) rsdp, 20)) {
+					continue;
+				}
+
+				return (uintptr_t) rsdp - LOW_MEMORY_MAP_START;
+			} else if (rsdp->revision == 2) {
+				if (EsMemorySumBytes((uint8_t *) rsdp, sizeof(RootSystemDescriptorPointer))) {
+					continue;
+				}
+
+				return (uintptr_t) rsdp - LOW_MEMORY_MAP_START;
+			}
+		}
+	}
+
+	return 0;
+}
+
+
+
+
+void ACPIParseTables() {
+	acpi.rsdp = (RootSystemDescriptorPointer *) MMMapPhysical(kernelMMSpace, ArchFindRootSystemDescriptorPointer(), 16384, ES_FLAGS_DEFAULT);
+
+	ACPIDescriptorTable *madtHeader = nullptr;
+	ACPIDescriptorTable *sdt = nullptr; 
+	bool isXSDT = false;
+
+	if (acpi.rsdp) {
+		if (acpi.rsdp->revision == 2 && acpi.rsdp->xsdtAddress) {
+			isXSDT = true;
+			sdt = (ACPIDescriptorTable *) acpi.rsdp->xsdtAddress;
+		} else {
+			isXSDT = false;
+			sdt = (ACPIDescriptorTable *) (uintptr_t) acpi.rsdp->rsdtAddress;
+		}
+
+		sdt = (ACPIDescriptorTable *) MMMapPhysical(kernelMMSpace, (uintptr_t) sdt, 16384, ES_FLAGS_DEFAULT);
+	} else {
+		KernelPanic("ACPIInitialise - Could not find supported root system descriptor pointer.\nACPI support is required.\n");
+	}
+
+	if (((sdt->signature == SIGNATURE_XSDT && isXSDT) || (sdt->signature == SIGNATURE_RSDT && !isXSDT)) 
+			&& sdt->length < 16384 && !EsMemorySumBytes((uint8_t *) sdt, sdt->length)) {
+		// The SDT is valid.
+	} else {
+		KernelPanic("ACPIInitialise - Could not find a valid or supported system descriptor table.\nACPI support is required.\n");
+	}
+
+	size_t tablesCount = (sdt->length - sizeof(ACPIDescriptorTable)) >> (isXSDT ? 3 : 2);
+
+	if (tablesCount < 1) {
+		KernelPanic("ACPIInitialise - The system descriptor table contains an unsupported number of tables (%d).\n", tablesCount);
+	} 
+
+	uintptr_t tableListAddress = (uintptr_t) sdt + ACPI_DESCRIPTOR_TABLE_HEADER_LENGTH;
+
+	KernelLog(LOG_INFO, "ACPI", "table count", "ACPIInitialise - Found %d tables.\n", tablesCount);
+
+	for (uintptr_t i = 0; i < tablesCount; i++) {
+		uintptr_t address;
+
+		if (isXSDT) {
+			address = ((uint64_t *) tableListAddress)[i];
+		} else {
+			address = ((uint32_t *) tableListAddress)[i];
+		}
+
+		ACPIDescriptorTable *header = (ACPIDescriptorTable *) MMMapPhysical(kernelMMSpace, address, sizeof(ACPIDescriptorTable), ES_FLAGS_DEFAULT);
+
+		KernelLog(LOG_INFO, "ACPI", "table enumerated", "ACPIInitialise - Found ACPI table '%s'.\n", 4, &header->signature);
+
+		if (header->signature == SIGNATURE_MADT) {
+			madtHeader = (ACPIDescriptorTable *) MMMapPhysical(kernelMMSpace, address, header->length, ES_FLAGS_DEFAULT);
+			ACPICheckTable(madtHeader);
+		} else if (header->signature == SIGNATURE_FADT) {
+			ACPIDescriptorTable *fadt = (ACPIDescriptorTable *) MMMapPhysical(kernelMMSpace, address, header->length, ES_FLAGS_DEFAULT);
+			ACPICheckTable(fadt);
+			
+			if (header->length > 109) {
+				acpi.centuryRegisterIndex = ((uint8_t *) fadt)[108];
+				uint8_t bootArchitectureFlags = ((uint8_t *) fadt)[109];
+				acpi.ps2ControllerUnavailable = ~bootArchitectureFlags & (1 << 1);
+				acpi.vgaControllerUnavailable =  bootArchitectureFlags & (1 << 2);
+				KernelLog(LOG_INFO, "ACPI", "FADT", "PS/2 controller is %z; VGA controller is %z.\n",
+						acpi.ps2ControllerUnavailable ? "unavailble" : "present",
+						acpi.vgaControllerUnavailable ? "unavailble" : "present");
+			}
+
+			MMFree(kernelMMSpace, fadt);
+		} else if (header->signature == SIGNATURE_HPET) {
+			ACPIDescriptorTable *hpet = (ACPIDescriptorTable *) MMMapPhysical(kernelMMSpace, address, header->length, ES_FLAGS_DEFAULT);
+			ACPICheckTable(hpet);
+			
+			if (header->length > 52 && ((uint8_t *) header)[52] == 0) {
+				uint64_t baseAddress;
+				EsMemoryCopy(&baseAddress, (uint8_t *) header + 44, sizeof(uint64_t));
+				KernelLog(LOG_INFO, "ACPI", "HPET", "Found primary HPET with base address %x.\n", baseAddress);
+				acpi.hpetBaseAddress = (uint64_t *) MMMapPhysical(kernelMMSpace, baseAddress, 1024, ES_FLAGS_DEFAULT);
+
+				if (acpi.hpetBaseAddress) {
+					acpi.hpetBaseAddress[2] |= 1; // Start the main counter.
+
+					acpi.hpetPeriod = acpi.hpetBaseAddress[0] >> 32;
+					uint8_t revisionID = acpi.hpetBaseAddress[0] & 0xFF;
+					uint64_t initialCount = acpi.hpetBaseAddress[30];
+
+					KernelLog(LOG_INFO, "ACPI", "HPET", "HPET has period of %d fs, revision ID %d, and initial count %d.\n",
+							acpi.hpetPeriod, revisionID, initialCount);
+				}
+			}
+
+			MMFree(kernelMMSpace, hpet);
+		}
+
+		MMFree(kernelMMSpace, header);
+	}
+
+	MultipleAPICDescriptionTable *madt = (MultipleAPICDescriptionTable *) ((uint8_t *) madtHeader + ACPI_DESCRIPTOR_TABLE_HEADER_LENGTH);
+
+	if (!madt) {
+		KernelPanic("ACPIInitialise - Could not find the MADT table.\nThis is required to use the APIC.\n");
+	}
+
+	uintptr_t length = madtHeader->length - ACPI_DESCRIPTOR_TABLE_HEADER_LENGTH - sizeof(MultipleAPICDescriptionTable);
+	uintptr_t startLength = length;
+	uint8_t *data = (uint8_t *) (madt + 1);
+
+#ifdef ES_ARCH_X86_64
+	acpi.lapicAddress = (uint32_t volatile *) ACPIMapPhysicalMemory(madt->lapicAddress, 0x10000);
+#endif
+
+	while (length && length <= startLength) {
+		uint8_t entryType = data[0];
+		uint8_t entryLength = data[1];
+
+		switch (entryType) {
+			case 0: {
+				// A processor and its LAPIC.
+				if ((data[4] & 1) == 0) goto nextEntry;
+				ArchCPU *processor = acpi.processors + acpi.processorCount;
+				processor->processorID = data[2];
+				processor->apicID = data[3];
+				acpi.processorCount++;
+			} break;
+
+			case 1: {
+				// An I/O APIC.
+				acpi.ioApics[acpi.ioapicCount].id = data[2];
+				acpi.ioApics[acpi.ioapicCount].address = (uint32_t volatile *) ACPIMapPhysicalMemory(((uint32_t *) data)[1], 0x10000);
+				ACPIIoApicReadRegister(&acpi.ioApics[acpi.ioapicCount], 0); // Make sure it's mapped.
+				acpi.ioApics[acpi.ioapicCount].gsiBase = ((uint32_t *) data)[2];
+				acpi.ioapicCount++;
+			} break;
+
+			case 2: {
+				// An interrupt source override structure.
+				acpi.interruptOverrides[acpi.interruptOverrideCount].sourceIRQ = data[3];
+				acpi.interruptOverrides[acpi.interruptOverrideCount].gsiNumber = ((uint32_t *) data)[1];
+				acpi.interruptOverrides[acpi.interruptOverrideCount].activeLow = (data[8] & 2) ? true : false;
+				acpi.interruptOverrides[acpi.interruptOverrideCount].levelTriggered = (data[8] & 8) ? true : false;
+				KernelLog(LOG_INFO, "ACPI", "interrupt override", "ACPIInitialise - Source IRQ %d is mapped to GSI %d%z%z.\n",
+						acpi.interruptOverrides[acpi.interruptOverrideCount].sourceIRQ,
+						acpi.interruptOverrides[acpi.interruptOverrideCount].gsiNumber,
+						acpi.interruptOverrides[acpi.interruptOverrideCount].activeLow ? ", active low" : ", active high",
+						acpi.interruptOverrides[acpi.interruptOverrideCount].levelTriggered ? ", level triggered" : ", edge triggered");
+				acpi.interruptOverrideCount++;
+			} break;
+
+			case 4: {
+				// A non-maskable interrupt.
+				acpi.lapicNMIs[acpi.lapicNMICount].processor = data[2];
+				acpi.lapicNMIs[acpi.lapicNMICount].lintIndex = data[5];
+				acpi.lapicNMIs[acpi.lapicNMICount].activeLow = (data[3] & 2) ? true : false;
+				acpi.lapicNMIs[acpi.lapicNMICount].levelTriggered = (data[3] & 8) ? true : false;
+				acpi.lapicNMICount++;
+			} break;
+
+			default: {
+				KernelLog(LOG_ERROR, "ACPI", "unrecognised MADT entry", "ACPIInitialise - Found unknown entry of type %d in MADT\n", entryType);
+			} break;
+		}
+
+		nextEntry:
+		length -= entryLength;
+		data += entryLength;
+	}
+
+	if (acpi.processorCount > 256 || acpi.ioapicCount > 16 || acpi.interruptOverrideCount > 256 || acpi.lapicNMICount > 32) {
+		KernelPanic("ACPIInitialise - Invalid number of processors (%d/%d), \n"
+			    "                    I/O APICs (%d/%d), interrupt overrides (%d/%d)\n"
+			    "                    and LAPIC NMIs (%d/%d)\n", 
+			    acpi.processorCount, 256, acpi.ioapicCount, 16, acpi.interruptOverrideCount, 256, acpi.lapicNMICount, 32);
+	}
+}
+
+
 size_t KGetCPUCount() {
 	return acpi.processorCount;
 }
@@ -8847,7 +9630,9 @@ EsUniqueIdentifier installationID; // The identifier of this OS installation, gi
 uint32_t bootloaderID;
 uintptr_t bootloaderInformationOffset;
 
-
+uintptr_t GetBootloaderInformationOffset() {
+	return bootloaderInformationOffset;
+}
 
 
 // Recursive page table mapping in slot 0x1FE, so that the top 2GB are available for mcmodel kernel.
@@ -8857,6 +9642,10 @@ uintptr_t bootloaderInformationOffset;
 #define PAGE_TABLE_L1 ((volatile uint64_t *) 0xFFFFFF0000000000)
 #define ENTRIES_PER_PAGE_TABLE (512)
 #define ENTRIES_PER_PAGE_TABLE_BITS (9)
+
+
+
+uint8_t coreL1Commit[(0xFFFF800200000000 - 0xFFFF800100000000) >> (/* ENTRIES_PER_PAGE_TABLE_BITS */ 9 + K_PAGE_BITS + 3)];
 
 
 #define IO_PIC_1_COMMAND		(0x0020)
@@ -8899,6 +9688,673 @@ uintptr_t bootloaderInformationOffset;
 #define IO_COM_1			(0x03F8) // To 0x03FF.
 #define IO_PCI_CONFIG 			(0x0CF8)
 #define IO_PCI_DATA   			(0x0CFC)
+
+
+int8_t Scheduler::GetThreadEffectivePriority(Thread *thread) {
+	KSpinlockAssertLocked(&dispatchSpinlock);
+
+	for (int8_t i = 0; i < thread->priority; i++) {
+		if (thread->blockedThreadPriorities[i]) {
+			// A thread is blocking on a resource owned by this thread,
+			// and the blocking thread has a higher priority than this thread.
+			// Therefore, this thread should assume that higher priority,
+			// until it releases the resource.
+			return i;
+		}
+	}
+
+	return thread->priority;
+}
+
+void MMArchFinalizeVAS(MMSpace *space) {
+    (void)space;
+	// TODO.
+	KernelPanic("Unimplemented!\n");
+}
+
+void EarlyDelay1Ms() {
+	ProcessorOut8(IO_PIT_COMMAND, 0x30);
+	ProcessorOut8(IO_PIT_DATA, 0xA9);
+	ProcessorOut8(IO_PIT_DATA, 0x04);
+
+	while (true) {
+		ProcessorOut8(IO_PIT_COMMAND, 0xE2);
+
+		if (ProcessorIn8(IO_PIT_DATA) & (1 << 7)) {
+			break;
+		}
+	}
+}
+
+struct EsSpinlock {
+	volatile uint8_t state;
+};
+
+void EsSpinlockAcquire(EsSpinlock *spinlock) {
+	__sync_synchronize();
+	while (__sync_val_compare_and_swap(&spinlock->state, 0, 1));
+	__sync_synchronize();
+}
+
+void EsSpinlockRelease(EsSpinlock *spinlock) {
+	__sync_synchronize();
+
+	if (!spinlock->state) {
+		EsPanic("EsSpinlockRelease - Spinlock %x not acquired.\n", spinlock);
+	}
+
+	spinlock->state = 0;
+	__sync_synchronize();
+}
+
+
+struct RNGState {
+	uint64_t s[4];
+	EsSpinlock lock;
+};
+
+RNGState rngState;
+
+void EsRandomAddEntropy(uint64_t x) {
+	EsSpinlockAcquire(&rngState.lock);
+
+	for (uintptr_t i = 0; i < 4; i++) {
+		x += 0x9E3779B97F4A7C15;
+
+		uint64_t result = x;
+		result = (result ^ (result >> 30)) * 0xBF58476D1CE4E5B9;
+		result = (result ^ (result >> 27)) * 0x94D049BB133111EB;
+		rngState.s[i] ^= result ^ (result >> 31);
+	}
+
+	EsSpinlockRelease(&rngState.lock);
+}
+
+
+uint64_t timeStampTicksPerMs;
+
+struct NewProcessorStorage {
+	struct CPULocalStorage *local;
+	uint32_t *gdt;
+};
+
+NewProcessorStorage AllocateNewProcessorStorage(ArchCPU *archCPU) {
+	NewProcessorStorage storage = {};
+	storage.local = (CPULocalStorage *) EsHeapAllocate(sizeof(CPULocalStorage), true, K_FIXED);
+#ifdef ES_ARCH_X86_64
+	storage.gdt = (uint32_t *) MMMapPhysical(kernelMMSpace, MMPhysicalAllocate(MM_PHYSICAL_ALLOCATE_COMMIT_NOW), K_PAGE_SIZE, ES_FLAGS_DEFAULT);
+#endif
+	storage.local->archCPU = archCPU;
+	archCPU->local = storage.local;
+	scheduler.CreateProcessorThreads(storage.local);
+	archCPU->kernelProcessorID = storage.local->processorID;
+	return storage;
+}
+
+
+void ArchInitialise() {
+	ACPIParseTables();
+
+	uint8_t bootstrapLapicID = (LapicReadRegister(0x20 >> 2) >> 24); 
+
+	ArchCPU *currentCPU = nullptr;
+
+	for (uintptr_t i = 0; i < acpi.processorCount; i++) {
+		if (acpi.processors[i].apicID == bootstrapLapicID) {
+			// That's us!
+			currentCPU = acpi.processors + i;
+			currentCPU->bootProcessor = true;
+			break;
+		}
+	}
+
+	if (!currentCPU) {
+		KernelPanic("ArchInitialise - Could not find the bootstrap processor\n");
+	}
+
+	// Calibrate the LAPIC's timer and processor's timestamp counter.
+	ProcessorDisableInterrupts();
+	uint64_t start = ProcessorReadTimeStamp();
+	LapicWriteRegister(0x380 >> 2, (uint32_t) -1); 
+	for (int i = 0; i < 8; i++) EarlyDelay1Ms(); // Average over 8ms
+	acpi.lapicTicksPerMs = ((uint32_t) -1 - LapicReadRegister(0x390 >> 2)) >> 4;
+	EsRandomAddEntropy(LapicReadRegister(0x390 >> 2));
+	uint64_t end = ProcessorReadTimeStamp();
+	timeStampTicksPerMs = (end - start) >> 3;
+	ProcessorEnableInterrupts();
+	// EsPrint("timeStampTicksPerMs = %d\n", timeStampTicksPerMs);
+
+	// Finish processor initialisation.
+	// This sets up interrupts, the timer, CPULocalStorage, the GDT and TSS,
+	// and registers the processor with the scheduler.
+
+	NewProcessorStorage storage = AllocateNewProcessorStorage(currentCPU);
+	SetupProcessor2(&storage);
+}
+
+
+Process *ProcessSpawn(ProcessType processType) {
+	if (scheduler.shutdown) return nullptr;
+
+	Process *process = processType == PROCESS_KERNEL ? kernelProcess : (Process *) scheduler.processPool.Add(sizeof(Process));
+
+	if (!process) {
+		return nullptr;
+	}
+
+	process->vmm = processType == PROCESS_KERNEL ? kernelMMSpace : (MMSpace *) scheduler.mmSpacePool.Add(sizeof(MMSpace));
+
+	if (!process->vmm) {
+		scheduler.processPool.Remove(process);
+		return nullptr;
+	}
+
+	process->id = __sync_fetch_and_add(&scheduler.nextProcessID, 1);
+	process->vmm->referenceCount = 1;
+	process->allItem.thisItem = process;
+	process->handles = 1;
+	process->handleTable.process = process;
+	process->permissions = ES_PERMISSION_ALL;
+	process->type = processType;
+
+	if (processType == PROCESS_KERNEL) {
+		EsCRTstrcpy(process->cExecutableName, "Kernel");
+		scheduler.allProcesses.InsertEnd(&process->allItem);
+	}
+
+	return process; 
+}
+
+
+Thread *Scheduler::PickThread(CPULocalStorage *local) {
+	KSpinlockAssertLocked(&dispatchSpinlock);
+
+	if ((local->asyncTaskList.first || local->inAsyncTask) && local->asyncTaskThread->state == THREAD_ACTIVE) {
+		// If the asynchronous task thread for this processor isn't blocked, and has tasks to process, execute it.
+		return local->asyncTaskThread;
+	}
+
+	for (int i = 0; i < THREAD_PRIORITY_COUNT; i++) {
+		// For every priority, check if there is a thread available. If so, execute it.
+		LinkedItem<Thread> *item = activeThreads[i].firstItem;
+		if (!item) continue;
+		item->RemoveFromList();
+		return item->thisItem;
+	}
+
+	// If we couldn't find a thread to execute, idle.
+	return local->idleThread;
+}
+
+
+void Scheduler::MaybeUpdateActiveList(Thread *thread) {
+	// TODO Is this correct with regards to paused threads?
+
+	if (thread->type == THREAD_ASYNC_TASK) {
+		// Asynchronous task threads do not go in the activeThreads lists.
+		return;
+	}
+
+	if (thread->type != THREAD_NORMAL) {
+		KernelPanic("Scheduler::MaybeUpdateActiveList - Trying to update the active list of a non-normal thread %x.\n", thread);
+	}
+
+	KSpinlockAssertLocked(&dispatchSpinlock);
+
+	if (thread->state != THREAD_ACTIVE || thread->executing) {
+		// The thread is not currently in an active list, 
+		// so it'll end up in the correct activeThreads list when it becomes active.
+		return;
+	}
+
+	if (!thread->item.list) {
+		KernelPanic("Scheduler::MaybeUpdateActiveList - Despite thread %x being active and not executing, it is not in an activeThreads lists.\n", thread);
+	}
+
+	int8_t effectivePriority = GetThreadEffectivePriority(thread);
+
+	if (&activeThreads[effectivePriority] == thread->item.list) {
+		// The thread's effective priority has not changed.
+		// We don't need to do anything.
+		return;
+	}
+
+	// Remove the thread from its previous active list.
+	thread->item.RemoveFromList();
+
+	// Add it to the start of its new active list.
+	// TODO I'm not 100% sure we want to always put it at the start.
+	activeThreads[effectivePriority].InsertStart(&thread->item);
+}
+
+
+uint64_t ArchGetTimeFromPITMs() {
+	// TODO This isn't working on real hardware, but EarlyDelay1Ms is?
+
+	// NOTE This will only work if called at least once every 50 ms.
+	// 	(The PIT only stores a 16-bit counter, which is depleted every 50 ms.)
+
+	static bool started = false;
+	static uint64_t cumulative = 0, last = 0;
+
+	if (!started) {
+		ProcessorOut8(IO_PIT_COMMAND, 0x30);
+		ProcessorOut8(IO_PIT_DATA, 0xFF);
+		ProcessorOut8(IO_PIT_DATA, 0xFF);
+		started = true;
+		last = 0xFFFF;
+		return 0;
+	} else {
+		ProcessorOut8(IO_PIT_COMMAND, 0x00);
+		uint16_t x = ProcessorIn8(IO_PIT_DATA);
+		x |= (ProcessorIn8(IO_PIT_DATA)) << 8;
+		cumulative += last - x;
+		if (x > last) cumulative += 0x10000;
+		last = x;
+		return cumulative * 1000 / 1193182;
+	}
+}
+
+
+
+uint64_t ArchGetTimeMs() {
+	// Update the time stamp counter synchronization value.
+	timeStampCounterSynchronizationValue = ((timeStampCounterSynchronizationValue & 0x8000000000000000) 
+			^ 0x8000000000000000) | ProcessorReadTimeStamp();
+
+#ifdef ES_ARCH_X86_64
+	if (acpi.hpetBaseAddress && acpi.hpetPeriod) {
+		__int128 fsToMs = 1000000000000;
+		__int128 reading = acpi.hpetBaseAddress[30];
+		return (uint64_t) (reading * (__int128) acpi.hpetPeriod / fsToMs);
+	}
+#endif
+
+	return ArchGetTimeFromPITMs();
+}
+
+void Scheduler::Yield(InterruptContext *context) {
+	CPULocalStorage *local = GetLocalStorage();
+
+	if (!started || !local || !local->schedulerReady) {
+		return;
+	}
+
+	if (!local->processorID) {
+		// Update the scheduler's time.
+		timeMs = ArchGetTimeMs();
+		globalData->schedulerTimeMs = timeMs;
+
+		// Notify the necessary timers.
+		KSpinlockAcquire(&activeTimersSpinlock);
+		LinkedItem<KTimer> *_timer = activeTimers.firstItem;
+
+		while (_timer) {
+			KTimer *timer = _timer->thisItem;
+			LinkedItem<KTimer> *next = _timer->nextItem;
+
+			if (timer->triggerTimeMs <= timeMs) {
+				activeTimers.Remove(_timer);
+				KEventSet(&timer->event);
+
+				if (timer->callback) {
+					KRegisterAsyncTask(&timer->asyncTask, timer->callback);
+				}
+			} else {
+				break; // Timers are kept sorted, so there's no point continuing.
+			}
+
+			_timer = next;
+		}
+
+		KSpinlockRelease(&activeTimersSpinlock);
+	}
+
+	if (local->spinlockCount) {
+		KernelPanic("Scheduler::Yield - Spinlocks acquired while attempting to yield.\n");
+	}
+
+	ProcessorDisableInterrupts(); // We don't want interrupts to get reenabled after the context switch.
+	KSpinlockAcquire(&dispatchSpinlock);
+
+	if (dispatchSpinlock.interruptsEnabled) {
+		KernelPanic("Scheduler::Yield - Interrupts were enabled when scheduler lock was acquired.\n");
+	}
+
+	if (!local->currentThread->executing) {
+		KernelPanic("Scheduler::Yield - Current thread %x marked as not executing (%x).\n", local->currentThread, local);
+	}
+
+	MMSpace *oldAddressSpace = local->currentThread->temporaryAddressSpace ?: local->currentThread->process->vmm;
+
+	local->currentThread->interruptContext = context;
+	local->currentThread->executing = false;
+
+	bool killThread = local->currentThread->terminatableState == THREAD_TERMINATABLE 
+		&& local->currentThread->terminating;
+	bool keepThreadAlive = local->currentThread->terminatableState == THREAD_USER_BLOCK_REQUEST
+		&& local->currentThread->terminating; // The user can't make the thread block if it is terminating.
+
+	if (killThread) {
+		local->currentThread->state = THREAD_TERMINATED;
+		KernelLog(LOG_INFO, "Scheduler", "terminate yielded thread", "Terminated yielded thread %x\n", local->currentThread);
+		KRegisterAsyncTask(&local->currentThread->killAsyncTask, ThreadKill);
+	}
+
+	// If the thread is waiting for an object to be notified, put it in the relevant blockedThreads list.
+	// But if the object has been notified yet hasn't made itself active yet, do that for it.
+
+	else if (local->currentThread->state == THREAD_WAITING_MUTEX) {
+		KMutex *mutex = local->currentThread->blocking.mutex;
+
+		if (!keepThreadAlive && mutex->owner) {
+			mutex->owner->blockedThreadPriorities[local->currentThread->priority]++;
+			MaybeUpdateActiveList(mutex->owner);
+			mutex->blockedThreads.InsertEnd(&local->currentThread->item);
+		} else {
+			local->currentThread->state = THREAD_ACTIVE;
+		}
+	}
+
+	else if (local->currentThread->state == THREAD_WAITING_EVENT) {
+		if (keepThreadAlive) {
+			local->currentThread->state = THREAD_ACTIVE;
+		} else {
+			bool unblocked = false;
+
+			for (uintptr_t i = 0; i < local->currentThread->blocking.eventCount; i++) {
+				if (local->currentThread->blocking.events[i]->state) {
+					local->currentThread->state = THREAD_ACTIVE;
+					unblocked = true;
+					break;
+				}
+			}
+
+			if (!unblocked) {
+				for (uintptr_t i = 0; i < local->currentThread->blocking.eventCount; i++) {
+					local->currentThread->blocking.events[i]->blockedThreads.InsertEnd(&local->currentThread->blocking.eventItems[i]);
+				}
+			}
+		}
+	}
+
+	else if (local->currentThread->state == THREAD_WAITING_WRITER_LOCK) {
+		KWriterLock *lock = local->currentThread->blocking.writerLock;
+
+		if ((local->currentThread->blocking.writerLockType == K_LOCK_SHARED && lock->state >= 0)
+				|| (local->currentThread->blocking.writerLockType == K_LOCK_EXCLUSIVE && lock->state == 0)) {
+			local->currentThread->state = THREAD_ACTIVE;
+		} else {
+			local->currentThread->blocking.writerLock->blockedThreads.InsertEnd(&local->currentThread->item);
+		}
+	}
+
+	// Put the current thread at the end of the activeThreads list.
+	if (!killThread && local->currentThread->state == THREAD_ACTIVE) {
+		if (local->currentThread->type == THREAD_NORMAL) {
+			AddActiveThread(local->currentThread, false);
+		} else if (local->currentThread->type == THREAD_IDLE || local->currentThread->type == THREAD_ASYNC_TASK) {
+			// Do nothing.
+		} else {
+			KernelPanic("Scheduler::Yield - Unrecognised thread type\n");
+		}
+	}
+
+	// Get the next thread to execute.
+	Thread *newThread = local->currentThread = PickThread(local);
+
+	if (!newThread) {
+		KernelPanic("Scheduler::Yield - Could not find a thread to execute.\n");
+	}
+
+	if (newThread->executing) {
+		KernelPanic("Scheduler::Yield - Thread (ID %d) in active queue already executing with state %d, type %d.\n", 
+				local->currentThread->id, local->currentThread->state, local->currentThread->type);
+	}
+
+	// Store information about the thread.
+	newThread->executing = true;
+	newThread->executingProcessorID = local->processorID;
+	newThread->cpuTimeSlices++;
+	if (newThread->type == THREAD_IDLE) newThread->process->idleTimeSlices++;
+	else newThread->process->cpuTimeSlices++;
+
+	// Prepare the next timer interrupt.
+	ArchNextTimer(1 /* ms */);
+
+	InterruptContext *newContext = newThread->interruptContext;
+	MMSpace *addressSpace = newThread->temporaryAddressSpace ?: newThread->process->vmm;
+	MMSpaceOpenReference(addressSpace);
+	ArchSwitchContext(newContext, &addressSpace->data, newThread->kernelStack, newThread, oldAddressSpace);
+	KernelPanic("Scheduler::Yield - DoContextSwitch unexpectedly returned.\n");
+}
+
+
+
+void ProcessorSendYieldIPI(Thread *thread) {
+	thread->receivedYieldIPI = false;
+	KSpinlockAcquire(&ipiLock);
+	ProcessorSendIPI(YIELD_IPI, false);
+	KSpinlockRelease(&ipiLock);
+	while (!thread->receivedYieldIPI); // Spin until the thread gets the IPI.
+}
+
+void ThreadPause(Thread *thread, bool resume) {
+	KSpinlockAcquire(&scheduler.dispatchSpinlock);
+
+	if (thread->paused == !resume) {
+		return;
+	}
+
+	thread->paused = !resume;
+
+	if (!resume && thread->terminatableState == THREAD_TERMINATABLE) {
+		if (thread->state == THREAD_ACTIVE) {
+			if (thread->executing) {
+				if (thread == GetCurrentThread()) {
+					KSpinlockRelease(&scheduler.dispatchSpinlock);
+
+					// Yield.
+					ProcessorFakeTimerInterrupt();
+
+					if (thread->paused) {
+						KernelPanic("ThreadPause - Current thread incorrectly resumed.\n");
+					}
+				} else {
+					// The thread is executing, but on a different processor.
+					// Send them an IPI to stop.
+					ProcessorSendYieldIPI(thread);
+					// TODO The interrupt context might not be set at this point.
+				}
+			} else {
+				// Remove the thread from the active queue, and put it into the paused queue.
+				thread->item.RemoveFromList();
+				scheduler.AddActiveThread(thread, false);
+			}
+		} else {
+			// The thread doesn't need to be in the paused queue as it won't run anyway.
+			// If it is unblocked, then AddActiveThread will put it into the correct queue.
+		}
+	} else if (resume && thread->item.list == &scheduler.pausedThreads) {
+		// Remove the thread from the paused queue, and put it into the active queue.
+		scheduler.pausedThreads.Remove(&thread->item);
+		scheduler.AddActiveThread(thread, false);
+	}
+
+	KSpinlockRelease(&scheduler.dispatchSpinlock);
+}
+
+
+void ProcessPause(Process *process, bool resume) {
+	KMutexAcquire(&process->threadsMutex);
+	LinkedItem<Thread> *thread = process->threads.firstItem;
+
+	while (thread) {
+		Thread *threadObject = thread->thisItem;
+		thread = thread->nextItem;
+		ThreadPause(threadObject, resume);
+	}
+
+	KMutexRelease(&process->threadsMutex);
+}
+
+
+void ProcessCrash(Process *process, EsCrashReason *crashReason) {
+	if (process == kernelProcess) {
+		KernelPanic("ProcessCrash - Kernel process has crashed (%d).\n", crashReason->errorCode);
+	}
+
+	if (process->type != PROCESS_NORMAL) {
+		KernelPanic("ProcessCrash - A critical process has crashed (%d).\n", crashReason->errorCode);
+	}
+
+	if (GetCurrentThread()->process != process) {
+		KernelPanic("ProcessCrash - Attempt to crash process from different process.\n");
+	}
+
+	KMutexAcquire(&process->crashMutex);
+
+	if (process->crashed) {
+		KMutexRelease(&process->crashMutex);
+		return;
+	}
+
+	process->crashed = true;
+
+	KernelLog(LOG_ERROR, "Scheduler", "process crashed", "Process %x has crashed! (%d)\n", process, crashReason->errorCode);
+
+	EsMemoryCopy(&process->crashReason, crashReason, sizeof(EsCrashReason));
+
+	if (!scheduler.shutdown) {
+		_EsMessageWithObject m;
+		EsMemoryZero(&m, sizeof(m));
+		m.message.type = ES_MSG_APPLICATION_CRASH;
+		m.message.crash.pid = process->id;
+		EsMemoryCopy(&m.message.crash.reason, crashReason, sizeof(EsCrashReason));
+		DesktopSendMessage(&m);
+	}
+
+	KMutexRelease(&process->crashMutex);
+
+	// TODO Shouldn't this be done before sending the desktop message?
+	ProcessPause(GetCurrentThread()->process, false);
+}
+
+
+void MMPhysicalInsertFreePagesNext(uintptr_t page) {
+	MMPageFrame *frame = pmm.pageFrames + page;
+	frame->state = MMPageFrame::FREE;
+
+	{
+		frame->list.next = pmm.firstFreePage;
+		frame->list.previous = &pmm.firstFreePage;
+		if (pmm.firstFreePage) pmm.pageFrames[pmm.firstFreePage].list.previous = &frame->list.next;
+		pmm.firstFreePage = page;
+	}
+
+	pmm.freeOrZeroedPageBitset.Put(page);
+	pmm.countFreePages++;
+}
+
+uint64_t MMArchPopulatePageFrameDatabase() {
+	uint64_t commitLimit = 0;
+
+	for (uintptr_t i = 0; i < physicalMemoryRegionsCount; i++) {
+		uintptr_t base = physicalMemoryRegions[i].baseAddress >> K_PAGE_BITS;
+		uintptr_t count = physicalMemoryRegions[i].pageCount;
+		commitLimit += count;
+
+		for (uintptr_t j = 0; j < count; j++) {
+			MMPhysicalInsertFreePagesNext(base + j);
+		}
+	}
+
+	physicalMemoryRegionsPagesCount = 0;
+	return commitLimit;
+}
+
+
+uintptr_t MMArchGetPhysicalMemoryHighest() {
+	return physicalMemoryHighest;
+}
+
+void MMArchInitialise() {
+	coreMMSpace->data.cr3 = kernelMMSpace->data.cr3 = ProcessorReadCR3();
+
+	mmCoreRegions[0].baseAddress = MM_CORE_SPACE_START;
+	mmCoreRegions[0].pageCount = MM_CORE_SPACE_SIZE / K_PAGE_SIZE;
+
+#ifdef ES_ARCH_X86_64
+	for (uintptr_t i = 0x100; i < 0x200; i++) {
+		if (PAGE_TABLE_L4[i] == 0) {
+			// We don't need to commit anything because the PMM isn't ready yet.
+			PAGE_TABLE_L4[i] = MMPhysicalAllocate(ES_FLAGS_DEFAULT) | 3; 
+			EsMemoryZero((void *) (PAGE_TABLE_L3 + i * 0x200), K_PAGE_SIZE);
+		}
+	}
+
+	coreMMSpace->data.l1Commit = coreL1Commit;
+	KMutexAcquire(&coreMMSpace->reserveMutex);
+	kernelMMSpace->data.l1Commit = (uint8_t *) MMReserve(coreMMSpace, L1_COMMIT_SIZE_BYTES, MM_REGION_NORMAL | MM_REGION_NO_COMMIT_TRACKING | MM_REGION_FIXED)->baseAddress;
+	KMutexRelease(&coreMMSpace->reserveMutex);
+#endif
+}
+
+
+bool MMArchCommitPageTables(MMSpace *space, MMRegion *region) {
+	KMutexAssertLocked(&space->reserveMutex);
+
+	MMArchVAS *data = &space->data;
+
+	uintptr_t base = region->baseAddress - (space == coreMMSpace ? MM_CORE_SPACE_START : 0);
+	uintptr_t end = base + (region->pageCount << K_PAGE_BITS);
+	uintptr_t needed = 0;
+
+	for (uintptr_t i = base; i < end; i += 1L << (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 1)) {
+		uintptr_t indexL2 = i >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 1);
+		if (!(data->l1Commit[indexL2 >> 3] & (1 << (indexL2 & 7)))) needed++;
+		i = indexL2 << (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 1);
+	}
+
+	if (needed) {
+		if (!MMCommit(needed * K_PAGE_SIZE, true)) {
+			return false;
+		}
+
+		data->pageTablesCommitted += needed;
+	}
+
+	for (uintptr_t i = base; i < end; i += 1L << (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 1)) {
+		uintptr_t indexL2 = i >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 1);
+		data->l1Commit[indexL2 >> 3] |= (1 << (indexL2 & 7));
+		i = indexL2 << (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 1);
+	}
+
+	return true;
+}
+
+
+uintptr_t MMArchEarlyAllocatePage() {
+	uintptr_t i = physicalMemoryRegionsIndex;
+
+	while (!physicalMemoryRegions[i].pageCount) {
+		i++;
+
+		if (i == physicalMemoryRegionsCount) {
+			KernelPanic("MMArchEarlyAllocatePage - Expected more pages in physical regions.\n");
+		}
+	}
+
+	PhysicalMemoryRegion *region = physicalMemoryRegions + i;
+	uintptr_t returnValue = region->baseAddress;
+
+	region->baseAddress += K_PAGE_SIZE;
+	region->pageCount--;
+	physicalMemoryRegionsPagesCount--;
+	physicalMemoryRegionsIndex = i;
+
+	return returnValue;
+}
 
 
 void PCProcessMemoryMap() {
@@ -9233,10 +10689,38 @@ bool PostContextSwitch(InterruptContext *context, MMSpace *oldAddressSpace) {
 	return newThread;
 }
 
-struct NewProcessorStorage {
-	struct CPULocalStorage *local;
-	uint32_t *gdt;
-};
+void AsyncTaskThread() {
+	CPULocalStorage *local = GetLocalStorage();
+
+	while (true) {
+		if (!local->asyncTaskList.first) {
+			ProcessorFakeTimerInterrupt();
+		} else {
+			KSpinlockAcquire(&scheduler.asyncTaskSpinlock);
+			SimpleList *item = local->asyncTaskList.first;
+			KAsyncTask *task = EsContainerOf(KAsyncTask, item, item);
+			KAsyncTaskCallback callback = task->callback;
+			task->callback = nullptr;
+			local->inAsyncTask = true;
+			item->Remove();
+			KSpinlockRelease(&scheduler.asyncTaskSpinlock);
+			callback(task); // This may cause the task to be deallocated.
+			ThreadSetTemporaryAddressSpace(nullptr); // The task may have modified the address space.
+			local->inAsyncTask = false;
+		}
+	}
+}
+
+void Scheduler::CreateProcessorThreads(CPULocalStorage *local) {
+	local->asyncTaskThread = ThreadSpawn("AsyncTasks", (uintptr_t) AsyncTaskThread, 0, SPAWN_THREAD_ASYNC_TASK);
+	local->currentThread = local->idleThread = ThreadSpawn("Idle", 0, 0, SPAWN_THREAD_IDLE);
+	local->processorID = __sync_fetch_and_add(&nextProcessorID, 1);
+
+	if (local->processorID >= K_MAX_PROCESSORS) { 
+		KernelPanic("Scheduler::CreateProcessorThreads - Maximum processor count (%d) exceeded.\n", local->processorID);
+	}
+}
+
 
 void SetupProcessor2(NewProcessorStorage *storage) {
 	// Setup the local interrupts for the current processor.
@@ -10444,20 +11928,6 @@ void MMArchUnmapPages(MMSpace *space, uintptr_t virtualAddressStart, uintptr_t p
 	MMArchInvalidatePages(virtualAddressStart, pageCount);
 }
 
-void MMPhysicalInsertFreePagesNext(uintptr_t page) {
-	MMPageFrame *frame = pmm.pageFrames + page;
-	frame->state = MMPageFrame::FREE;
-
-	{
-		frame->list.next = pmm.firstFreePage;
-		frame->list.previous = &pmm.firstFreePage;
-		if (pmm.firstFreePage) pmm.pageFrames[pmm.firstFreePage].list.previous = &frame->list.next;
-		pmm.firstFreePage = page;
-	}
-
-	pmm.freeOrZeroedPageBitset.Put(page);
-	pmm.countFreePages++;
-}
 
 
 void MMPhysicalFree(uintptr_t page, bool mutexAlreadyAcquired, size_t count) {

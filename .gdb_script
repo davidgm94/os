@@ -1,9 +1,8 @@
 set disassembly-flavor intel
 symbol-file zig-cache/kernel.elf
-b CPU_stop
-b panic
-b kernel_init
+b _start
+b KernelInitialise
+b KernelMain
 target remote localhost:1234
 
-b kernel.scheduler.Thread.create
 c
