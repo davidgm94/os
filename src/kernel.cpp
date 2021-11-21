@@ -1,4 +1,4 @@
-#define DEBUG_BUILD
+//#define DEBUG_BUILD
 #define ES_BITS_64
 #define ES_ARCH_X86_64
 #define KERNEL
@@ -442,6 +442,9 @@ extern "C"
     void ProcessorOut8(uint16_t port, uint8_t value);
     uint8_t ProcessorIn8(uint16_t port);
     void ProcessorOut16(uint16_t port, uint16_t value);
+    uint16_t ProcessorIn16(uint16_t port);
+    void ProcessorOut32(uint16_t port, uint32_t value);
+    uint32_t ProcessorIn32(uint16_t port);
     uint64_t ProcessorReadMXCSR();
     void PCSetupCOM1();
     void PCDisablePIC();
@@ -3744,8 +3747,11 @@ struct Process {
 	int pgid;
 #endif
 };
+
 Process _kernelProcess;
+Process _desktopProcess;
 Process* kernelProcess = &_kernelProcess;
+Process* desktopProcess = &_desktopProcess;
 
 #define SPAWN_THREAD_USERLAND     (1 << 0)
 #define SPAWN_THREAD_LOW_PRIORITY (1 << 1)
@@ -3753,13 +3759,9 @@ Process* kernelProcess = &_kernelProcess;
 #define SPAWN_THREAD_ASYNC_TASK   (1 << 3)
 #define SPAWN_THREAD_IDLE         (1 << 4)
 
-
-
 #define THREAD_PRIORITY_NORMAL 	(0) // Lower value = higher priority.
 #define THREAD_PRIORITY_LOW 	(1)
 #define THREAD_PRIORITY_COUNT	(2)
-
-
 
 struct KTimer {
 	KEvent event;
@@ -9530,8 +9532,8 @@ volatile uintptr_t callFunctionOnAllProcessorsRemaining;
 //
 // Spinlock since some drivers need to access it in IRQs (e.g. ACPICA).
 KSpinlock pciConfigSpinlock; 
-
 KSpinlock ipiLock;
+
 uint32_t LapicReadRegister(uint32_t reg) {
 	return acpi.lapicAddress[reg];
 }
@@ -12246,6 +12248,32 @@ void KernelLog(KLogLevel level, const char *subsystem, const char *event, const 
 	va_end(arguments);
 }
 
+uint32_t ArchPCIReadConfig(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset, int size = 32)
+{
+    KSpinlockAcquire(&pciConfigSpinlock);
+    EsDefer(KSpinlockRelease(&pciConfigSpinlock));
+
+	if (offset & 3) KernelPanic("KPCIReadConfig - offset is not 4-byte aligned.");
+	ProcessorOut32(IO_PCI_CONFIG, (uint32_t) (0x80000000 | (bus << 16) | (device << 11) | (function << 8) | offset));
+	if (size == 8) return ProcessorIn8(IO_PCI_DATA);
+	if (size == 16) return ProcessorIn16(IO_PCI_DATA);
+	if (size == 32) return ProcessorIn32(IO_PCI_DATA);
+	KernelPanic("PCIController::ReadConfig - Invalid size %d.\n", size);
+	return 0;
+}
+
+void PCI_setup()
+{
+    uint32_t base_header_type = ArchPCIReadConfig(0, 0, 0, 0xc);
+    int base_buses = ((base_header_type & 0x80) != 0) ? 8 : 1;
+
+    int buses_to_scan = 0;
+
+    for (int base_bus = 0; base_bus < base_buses; base_buses++)
+    {
+
+    }
+}
 
 uintptr_t Syscall(uintptr_t argument0, uintptr_t argument1, uintptr_t argument2, uintptr_t returnAddress, uintptr_t argument3, uintptr_t argument4, uintptr_t *userStackPointer) {
     (void)argument0;
@@ -12533,9 +12561,8 @@ void InterruptHandler(InterruptContext *context) {
 
 extern "C" void KernelMain(uintptr_t a)
 {
-    auto reached_here = a + 1;
-    a-= 1;
-    auto result = reached_here + a;
+    desktopProcess = ProcessSpawn(PROCESS_DESKTOP);
+    //ProcessStart(desktopProcess, EsLiteral(K_DESKTOP_EXECUTABLE));
 }
 
 extern "C" void KernelInitialise()

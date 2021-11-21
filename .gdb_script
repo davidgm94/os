@@ -3,7 +3,6 @@ symbol-file zig-cache/kernel.elf
 b _start
 b KernelInitialise
 b KernelMain
-b InterruptHandler
 target remote localhost:1234
 
 c

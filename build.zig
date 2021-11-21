@@ -6,6 +6,7 @@ const Target = std.Target;
 const FileSource = std.build.FileSource;
 const Step = std.build.Step;
 const RunStep = std.build.RunStep;
+const LibExeObjStep = std.build.LibExeObjStep;
 
 const ArrayList = std.ArrayList;
 const print = std.debug.print;
@@ -13,7 +14,45 @@ const assert = std.debug.assert;
 
 pub fn build(b: *std.build.Builder) !void
 {
-    try build_bootloader(b);
+    const mbr = nasm_compile_binary(b, mbr_source_file, mbr_output_path);
+
+    const bios_stage_1 = nasm_compile_binary(b, bios_stage_1_source_file, bios_stage_1_output_path);
+    const bios_stage_2 = nasm_compile_binary(b, bios_stage_2_source_file, bios_stage_2_output_path);
+    const kernel = build_kernel(b);
+    const desktop = build_desktop(b);
+
+    b.default_step.dependOn(&mbr.step);
+    b.default_step.dependOn(&bios_stage_1.step);
+    b.default_step.dependOn(&bios_stage_2.step);
+    b.default_step.dependOn(&kernel.step);
+    b.default_step.dependOn(&desktop.step);
+
+    var disk_image = try DiskImage.create(b);
+    disk_image.step.dependOn(b.default_step);
+
+    const install_disk_image = b.addInstallBinFile(FileSource.relative(disk_image_output_path), disk_image_output_file);
+    install_disk_image.step.dependOn(&disk_image.step);
+
+    const qemu_command_str =
+            &[_][]const u8
+            {
+                "qemu-system-x86_64", "-hda", final_disk_image, "-no-reboot", "-no-shutdown", "-M", "q35", "-cpu", "Haswell",
+                //"-D", "logging.txt",
+                //"-d", "guest_errors,int,cpu,cpu_reset,in_asm"
+            };
+
+    const run_command = b.addSystemCommand(qemu_command_str);
+    run_command.step.dependOn(&install_disk_image.step);
+    const run_step = b.step("run", "Run the bootloader");
+    run_step.dependOn(&run_command.step);
+
+    const qemu_debug_command = qemu_command_str ++ &[_][]const u8 { "-s" } ++
+&[_][]const u8 { "-S" };
+    const debug_command = b.addSystemCommand(qemu_debug_command);
+    debug_command.step.dependOn(&install_disk_image.step);
+
+    const debug_step = b.step("debug", "Debug the kernel");
+    debug_step.dependOn(&debug_command.step);
 
     // Add clear
     const remove_cache = b.addRemoveDirTree("zig-cache");
@@ -47,7 +86,11 @@ const kernel_linker_script_path = "src/kernel/linker.ld";
 const disk_image_output_file = "disk.img";
 const disk_image_output_path = build_cache_dir ++ disk_image_output_file;
 
-const final_disk_image = build_output_dir ++ disk_image_output_file;
+    const final_disk_image =
+        if (true)
+            build_output_dir ++ disk_image_output_file
+        else 
+            "/home/david/git/essence/bin/drive";
 
 fn nasm_compile_elf_object(builder: *Builder, executable: *std.build.LibExeObjStep, comptime src: []const u8, comptime out: []const u8) void
 {
@@ -58,8 +101,23 @@ fn nasm_compile_elf_object(builder: *Builder, executable: *std.build.LibExeObjSt
 }
 
 const build_zig = false;
+const c_flags = &[_][]const u8
+{
+    "-ffreestanding",
+    "-fno-exceptions",
+    "-Wall",
+    "-Wextra",
+};
 
-fn build_kernel(b: *Builder) *std.build.LibExeObjStep
+const cross_target = CrossTarget
+{
+    .cpu_arch = .x86_64,
+    .os_tag = .freestanding,
+    .abi = .none,
+};
+
+
+fn build_kernel(b: *Builder) *LibExeObjStep
 {
     const kernel = if (build_zig) b.addExecutable(kernel_output_file, kernel_source_file) else b.addExecutable(kernel_output_file, null);
     kernel.red_zone = false;
@@ -82,30 +140,24 @@ fn build_kernel(b: *Builder) *std.build.LibExeObjStep
     disabled_features.addFeature(@enumToInt(features.avx2));
     enabled_features.addFeature(@enumToInt(features.soft_float));
 
-    kernel.setTarget(CrossTarget
-        {
-            .cpu_arch = .x86_64,
-            .os_tag = .freestanding,
-            .abi = .none,
-            .cpu_features_sub = disabled_features,
-            .cpu_features_add = enabled_features,
-        });
+    const kernel_cross_target = CrossTarget
+    {
+        .cpu_arch = cross_target.cpu_arch,
+        .os_tag = cross_target.os_tag,
+        .abi = cross_target.abi,
+        .cpu_features_sub = disabled_features,
+        .cpu_features_add = enabled_features,
+    };
+    kernel.setTarget(kernel_cross_target);
 
     if (!build_zig)
     {
-        const c_source_files = [_][]const u8
+        const c_source_files = &[_][]const u8
         {
             "src/kernel.cpp",
         };
 
-        const c_flags = [_][]const u8
-        {
-            "-ffreestanding",
-            "-fno-exceptions",
-            "-Wall",
-            "-Wextra",
-        };
-        kernel.addCSourceFiles(c_source_files[0..], c_flags[0..]);
+        kernel.addCSourceFiles(c_source_files, c_flags);
     }
 
     nasm_compile_elf_object(b, kernel, if (build_zig) "src/kernel/x86.S" else "src/x86_64.S", "zig-cache/kernel_x86.o");
@@ -116,43 +168,16 @@ fn build_kernel(b: *Builder) *std.build.LibExeObjStep
     return kernel;
 }
 
-fn build_bootloader(b: *Builder) !void
+
+fn build_desktop(b: *Builder) *LibExeObjStep
 {
-    const mbr = nasm_compile_binary(b, mbr_source_file, mbr_output_path);
+    const desktop = b.addExecutable("desktop.elf", null);
+    desktop.setBuildMode(b.standardReleaseOptions());
+    desktop.addCSourceFile("src/desktop.cpp", c_flags);
+    desktop.setTarget(cross_target);
+    desktop.setOutputDir("zig-cache");
 
-    const bios_stage_1 = nasm_compile_binary(b, bios_stage_1_source_file, bios_stage_1_output_path);
-    const bios_stage_2 = nasm_compile_binary(b, bios_stage_2_source_file, bios_stage_2_output_path);
-    const kernel = build_kernel(b);
-    b.default_step.dependOn(&mbr.step);
-    b.default_step.dependOn(&bios_stage_1.step);
-    b.default_step.dependOn(&bios_stage_2.step);
-    b.default_step.dependOn(&kernel.step);
-
-    var disk_image = try DiskImage.create(b);
-    disk_image.step.dependOn(b.default_step);
-
-    const install_disk_image = b.addInstallBinFile(FileSource.relative(disk_image_output_path), disk_image_output_file);
-    install_disk_image.step.dependOn(&disk_image.step);
-
-    const qemu_command_str = &[_][]const u8
-    {
-        "qemu-system-x86_64", "-hda", final_disk_image, "-no-reboot", "-no-shutdown", "-M", "q35", "-cpu", "Haswell",
-        //"-D", "logging.txt",
-        //"-d", "guest_errors,int,cpu,cpu_reset,in_asm"
-    };
-
-    const run_command = b.addSystemCommand(qemu_command_str);
-    run_command.step.dependOn(&install_disk_image.step);
-    const run_step = b.step("run", "Run the bootloader");
-    run_step.dependOn(&run_command.step);
-
-const qemu_debug_command = qemu_command_str ++ &[_][]const u8 { "-s" } ++
-&[_][]const u8 { "-S" };
-    const debug_command = b.addSystemCommand(qemu_debug_command);
-    debug_command.step.dependOn(&install_disk_image.step);
-
-    const debug_step = b.step("debug", "Debug the kernel");
-    debug_step.dependOn(&debug_command.step);
+    return desktop;
 }
 
 const a_megabyte = 1024 * 1024;
@@ -208,11 +233,20 @@ const DiskImage = struct
         var kernel_size_writer = @ptrCast(*align(1) u32, &self.file_buffer.items[MBR.Offset.kernel_size]);
         kernel_size_writer.* = kernel_size;
 
+        self.align_buffer(0x100);
+
+        try self.copy_file("zig-cache/desktop.elf", null);
+
         // @TODO: continue writing to the disk
         print("Writing image disk to {s}\n", .{disk_image_output_path});
         self.file_buffer.items.len = self.file_buffer.capacity;
         print("Disk size: {}\n", .{self.file_buffer.items.len});
         try std.fs.cwd().writeFile(disk_image_output_path, self.file_buffer.items[0..]);
+    }
+
+    fn align_buffer(self: *Self, alignment: u64) void
+    {
+        self.file_buffer.items.len = std.mem.alignForward(self.file_buffer.items.len, alignment);
     }
 
     fn fix_partition(partitions: *align(1) [16]u32) void
