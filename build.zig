@@ -81,7 +81,7 @@ const bios_stage_2_output_path = build_cache_dir ++ bios_stage_2_output_file;
 const kernel_source_file = "src/kernel/main.zig";
 const kernel_output_file = "kernel.elf";
 const kernel_output_path = build_cache_dir ++ kernel_output_file;
-const kernel_linker_script_path = "src/kernel/linker.ld";
+const kernel_linker_script_path = "src/linker.ld";
 
 const disk_image_output_file = "disk.img";
 const disk_image_output_path = build_cache_dir ++ disk_image_output_file;
