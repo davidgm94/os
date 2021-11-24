@@ -6,6 +6,7 @@
 #define KERNEL
 #define TREE_VALIDATE
 #define K_ARCH_STACK_GROWS_DOWN
+#define DEBUG_BUILD
 
 #include <stdint.h>
 #include <stddef.h>
@@ -1351,6 +1352,8 @@ struct KMutex { // Mutual exclusion. Thread-owned.
 	LinkedList<struct Thread> blockedThreads;
 };
 
+extern "C"
+{
 #ifdef DEBUG_BUILD
 bool _KMutexAcquire(KMutex *mutex, const char *cMutexString, const char *cFile, int line);
 void _KMutexRelease(KMutex *mutex, const char *cMutexString, const char *cFile, int line);
@@ -1361,6 +1364,7 @@ bool KMutexAcquire(KMutex *mutex);
 void KMutexRelease(KMutex *mutex);
 #endif
 void KMutexAssertLocked(KMutex *mutex);
+}
 
 #define PHYSICAL_MEMORY_MANIPULATION_REGION_PAGES (16)
 #define POOL_CACHE_COUNT                          (16)
@@ -1389,11 +1393,13 @@ struct KSpinlock { // Mutual exclusion. CPU-owned. Disables interrupts. The only
 #endif
 };
 
-void KSpinlockAcquire(KSpinlock *spinlock);
-void KSpinlockRelease(KSpinlock *spinlock, bool force = false);
-void KSpinlockAssertLocked(KSpinlock *spinlock);
-
-
+extern "C"
+{
+    void KSpinlockAcquire(KSpinlock *spinlock);
+    void KSpinlockRelease(KSpinlock *spinlock);
+    void KSpinlockReleaseForced(KSpinlock *spinlock);
+    void KSpinlockAssertLocked(KSpinlock *spinlock);
+}
 
 struct Pool {
     void *Add(size_t _elementSize) { 		// Aligned to the size of a pointer.
@@ -1710,7 +1716,8 @@ static void HeapPrintAllocatedRegions(EsHeap *heap) {
 	MemoryLeakDetectorCheckpoint(heap);
 }
 
-void *EsHeapAllocate(size_t size, bool zeroMemory, EsHeap *_heap) {
+void *EsHeapAllocate(size_t size, bool zeroMemory, EsHeap *_heap)
+{
 #ifndef KERNEL
 	if (!_heap) _heap = &heap;
 #endif
@@ -4118,8 +4125,6 @@ bool KEventWait(KEvent *_this, uint64_t timeoutMs) {
 	}
 }
 
-
-
 void KSpinlockAcquire(KSpinlock *spinlock) {
 	if (scheduler.panic) return;
 
@@ -4163,7 +4168,7 @@ void KSpinlockAcquire(KSpinlock *spinlock) {
 #endif
 }
 
-void KSpinlockRelease(KSpinlock *spinlock, bool force) {
+void KSpinlockReleaseForced(KSpinlock *spinlock) {
 	if (scheduler.panic) return;
 
 	CPULocalStorage *storage = GetLocalStorage();
@@ -4172,9 +4177,31 @@ void KSpinlockRelease(KSpinlock *spinlock, bool force) {
 		storage->spinlockCount--;
 	}
 
-	if (!force) {
-		KSpinlockAssertLocked(spinlock);
+	volatile bool wereInterruptsEnabled = spinlock->interruptsEnabled;
+
+#ifdef DEBUG_BUILD
+	spinlock->owner = nullptr;
+#endif
+	__sync_synchronize();
+	spinlock->state = 0;
+
+	if (wereInterruptsEnabled) ProcessorEnableInterrupts();
+
+#ifdef DEBUG_BUILD
+	spinlock->releaseAddress = (uintptr_t) __builtin_return_address(0);
+#endif
+}
+
+void KSpinlockRelease(KSpinlock *spinlock) {
+	if (scheduler.panic) return;
+
+	CPULocalStorage *storage = GetLocalStorage();
+
+	if (storage) {
+		storage->spinlockCount--;
 	}
+
+    KSpinlockAssertLocked(spinlock);
 	
 	volatile bool wereInterruptsEnabled = spinlock->interruptsEnabled;
 
@@ -10773,7 +10800,7 @@ bool PostContextSwitch(InterruptContext *context, MMSpace *oldAddressSpace) {
 	// We can only free the scheduler's spinlock when we are no longer using the stack
 	// from the previous thread. See DoContextSwitch.
 	// (Another CPU can KillThread this once it's back in activeThreads.)
-	KSpinlockRelease(&scheduler.dispatchSpinlock, true);
+	KSpinlockReleaseForced(&scheduler.dispatchSpinlock);
 
 	Thread *currentThread = GetCurrentThread();
 

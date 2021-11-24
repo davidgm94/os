@@ -4,6 +4,8 @@ b _start
 b KernelInitialise
 b KernelMain
 b KernelPanic
+b rust_kernel_panic
+b panic
 target remote localhost:1234
 
 c

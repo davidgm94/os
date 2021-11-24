@@ -161,7 +161,12 @@ fn build_kernel(b: *Builder) *LibExeObjStep
 
         kernel.addCSourceFiles(c_source_files, c_flags);
 
-    nasm_compile_elf_object(b, kernel, "src/x86_64.S", "zig-cache/kernel_x86.o");
+    const compile_rust_kernel = b.addSystemCommand(&[_][]const u8 { "cargo", "build" });
+    kernel.step.dependOn(&compile_rust_kernel.step);
+    //kernel.addLibPath("rust_target/target/debug");
+    //kernel.linkSystemLibrary("renaissance-os");
+    kernel.addObjectFile("target/rust_target/debug/librenaissance_os.a");
+    nasm_compile_elf_object(b, kernel, if (build_zig) "src/kernel/x86.S" else "src/x86_64.S", "zig-cache/kernel_x86.o");
     kernel.setMainPkgPath("src");
     kernel.setLinkerScriptPath(FileSource.relative(kernel_linker_script_path));
     kernel.setOutputDir(build_cache_dir);
