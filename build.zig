@@ -36,7 +36,13 @@ pub fn build(b: *std.build.Builder) !void
     const qemu_command_str =
             &[_][]const u8
             {
-                "qemu-system-x86_64", "-hda", final_disk_image, "-no-reboot", "-no-shutdown", "-M", "q35", "-cpu", "Haswell",
+                //"qemu-system-x86_64", "-hda", final_disk_image, "-no-reboot", "-no-shutdown", "-M", "q35", "-cpu", "Haswell",
+                "qemu-system-x86_64",
+                "-drive", "file=" ++ final_disk_image ++ ",if=none,id=mydisk,format=raw,media=disk,index=0",
+                "-device", "ich9-ahci,id=ahci",
+                "-device", "ide-hd,drive=mydisk,bus=ahci.0",
+                "-no-reboot", "-no-shutdown", "-M", "q35", "-cpu", "Haswell",
+                "-serial", "stdio",
                 //"-D", "logging.txt",
                 //"-d", "guest_errors,int,cpu,cpu_reset,in_asm"
             };
@@ -100,7 +106,6 @@ fn nasm_compile_elf_object(builder: *Builder, executable: *std.build.LibExeObjSt
     executable.step.dependOn(&nasm_command.step);
 }
 
-const build_zig = false;
 const c_flags = &[_][]const u8
 {
     "-ffreestanding",
@@ -116,10 +121,9 @@ const cross_target = CrossTarget
     .abi = .none,
 };
 
-
 fn build_kernel(b: *Builder) *LibExeObjStep
 {
-    const kernel = if (build_zig) b.addExecutable(kernel_output_file, kernel_source_file) else b.addExecutable(kernel_output_file, null);
+    const kernel = b.addExecutable(kernel_output_file, null);
     kernel.red_zone = false;
     kernel.code_model = .kernel;
     kernel.disable_stack_probing = true;
@@ -150,24 +154,20 @@ fn build_kernel(b: *Builder) *LibExeObjStep
     };
     kernel.setTarget(kernel_cross_target);
 
-    if (!build_zig)
-    {
         const c_source_files = &[_][]const u8
         {
             "src/kernel.cpp",
         };
 
         kernel.addCSourceFiles(c_source_files, c_flags);
-    }
 
-    nasm_compile_elf_object(b, kernel, if (build_zig) "src/kernel/x86.S" else "src/x86_64.S", "zig-cache/kernel_x86.o");
+    nasm_compile_elf_object(b, kernel, "src/x86_64.S", "zig-cache/kernel_x86.o");
     kernel.setMainPkgPath("src");
     kernel.setLinkerScriptPath(FileSource.relative(kernel_linker_script_path));
     kernel.setOutputDir(build_cache_dir);
 
     return kernel;
 }
-
 
 fn build_desktop(b: *Builder) *LibExeObjStep
 {

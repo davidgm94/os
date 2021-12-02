@@ -3,6 +3,8 @@ symbol-file zig-cache/kernel.elf
 b _start
 b KernelInitialise
 b KernelMain
+b KernelPanic
+b AHCIDriver::init
 target remote localhost:1234
 
 c
