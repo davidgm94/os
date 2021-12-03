@@ -90,9 +90,8 @@ void CloseHandleToObject(void *object, KernelObjectType type, uint32_t flags = 0
 void *MMStandardAllocate(MMSpace *space, size_t bytes, uint32_t flags, void *baseAddress = nullptr, bool commitAll = true);
 bool MMFree(MMSpace *space, void *address, size_t expectedSize = 0, bool userOnly = false);
 
-
-
-void EsMemoryFill(void *from, void *to, uint8_t byte) {
+void EsMemoryFill(void *from, void *to, uint8_t byte)
+{
 	uint8_t *a = (uint8_t *) from;
 	uint8_t *b = (uint8_t *) to;
 	while (a != b) *a = byte, a++;
@@ -6320,6 +6319,12 @@ bool MMHandlePageFault(MMSpace *space, uintptr_t address, unsigned faultFlags) {
 
 
 
+struct KDMASegment
+{
+    uintptr_t physicalAddress;
+    size_t byteCount;
+    bool isLast;
+};
 
 #define K_ACCESS_READ (0)
 #define K_ACCESS_WRITE (1)
@@ -6328,7 +6333,45 @@ struct KDMABuffer {
 	uintptr_t virtualAddress;
 	size_t totalByteCount;
 	uintptr_t offsetBytes;
+
+    bool is_complete()
+    {
+        return offsetBytes == totalByteCount;
+    }
+
+    KDMASegment next_segment(bool peek = false)
+    {
+        if (offsetBytes >= totalByteCount || !virtualAddress)
+        {
+            KernelPanic("Invalid state KDMABuffer\n");
+        }
+
+        size_t transfer_byte_count = K_PAGE_SIZE;
+        uintptr_t virtual_address = virtualAddress + offsetBytes; 
+        uintptr_t physical_address = MMArchTranslateAddress(kernelMMSpace, virtual_address);
+        uintptr_t offset_into_page = virtual_address & (K_PAGE_SIZE - 1);
+
+        if (physical_address == 0) KernelPanic("Page in buffer unmapped\n");
+
+        if (offset_into_page > 0)
+        {
+            transfer_byte_count = K_PAGE_SIZE - offset_into_page;
+            physical_address += offset_into_page;
+        }
+
+        auto total_minus_offset = this->totalByteCount - this->offsetBytes;
+        if (transfer_byte_count > total_minus_offset)
+        {
+            transfer_byte_count = total_minus_offset;
+        }
+
+        bool is_last = this->offsetBytes + transfer_byte_count == this->totalByteCount;
+        if (!peek) this->offsetBytes += transfer_byte_count;
+
+        return { physical_address, transfer_byte_count, is_last };
+    }
 };
+
 
 struct KWorkGroup {
 	inline void Initialise() {
@@ -13262,9 +13305,103 @@ struct BlockDeviceAccessRequest {
 	KDMABuffer *buffer;
 	uint64_t flags;
 	KWorkGroup *dispatchGroup;
+
 };
 
+#define K_SIGNATURE_BLOCK_SIZE (65536)
+
+struct MBRPartition
+{
+    u32 offset;
+    u32 count;
+    bool present;
+};
+
+struct GPTPartition
+{
+    u64 offset;
+    u64 count;
+    bool present;
+    bool is_ESP;
+};
+
+struct GPTHeader
+{
+    u8 signature[8];
+    u32 revision;
+    u32 header_bytes;
+    u32 header_CRC32;
+    u32 _reserved0;
+    u64 header_self_LBA;
+    u64 header_backup_LBA;
+    u64 first_usable_LBA;
+    u64 last_usable_LBA;
+    u8 drive_GUID[16];
+    u64 table_LBA;
+    u32 partition_entry_count;
+    u32 partition_entry_bytes;
+    u32 table_CRC32;
+};
+
+struct GPTEntry
+{
+    u8 type_GUID[16];
+    u8 partition_GUID[16];
+    u64 first_LBA;
+    u64 last_LBA;
+    u64 attributes;
+    u16 name[36];
+};
+
+bool MBRGetPartitions(uint8_t *firstBlock, EsFileOffset sectorCount, MBRPartition *partitions /* 4 */) {
+	if (firstBlock[510] != 0x55 || firstBlock[511] != 0xAA) {
+		return false;
+	}
+
+#ifdef KERNEL
+	KernelLog(LOG_INFO, "FS", "probing MBR", "First sector on device looks like an MBR...\n");
+#endif
+
+	for (uintptr_t i = 0; i < 4; i++) {
+		if (!firstBlock[4 + 0x1BE + i * 0x10]) {
+			partitions[i].present = false;
+			continue;
+		}
+
+		partitions[i].offset =  
+			  ((uint32_t) firstBlock[0x1BE + i * 0x10 + 8 ] <<  0)
+			+ ((uint32_t) firstBlock[0x1BE + i * 0x10 + 9 ] <<  8)
+			+ ((uint32_t) firstBlock[0x1BE + i * 0x10 + 10] << 16)
+			+ ((uint32_t) firstBlock[0x1BE + i * 0x10 + 11] << 24);
+		partitions[i].count =
+			  ((uint32_t) firstBlock[0x1BE + i * 0x10 + 12] <<  0)
+			+ ((uint32_t) firstBlock[0x1BE + i * 0x10 + 13] <<  8)
+			+ ((uint32_t) firstBlock[0x1BE + i * 0x10 + 14] << 16)
+			+ ((uint32_t) firstBlock[0x1BE + i * 0x10 + 15] << 24);
+		partitions[i].present = true;
+
+		if (partitions[i].offset > sectorCount || partitions[i].count > sectorCount - partitions[i].offset || partitions[i].count < 32) {
+#ifdef KERNEL
+			KernelLog(LOG_INFO, "FS", "invalid MBR", "Partition %d has offset %d and count %d, which is invalid. Ignoring the rest of the MBR...\n",
+					i, partitions[i].offset, partitions[i].count);
+#endif
+			return false;
+		}
+	}
+
+	return true;
+}
+
+EsError FSBlockDeviceAccess(BlockDeviceAccessRequest request);
 typedef void (*DeviceAccessCallbackFunction)(BlockDeviceAccessRequest request);
+
+MBRPartition mbr_partitions[4];
+struct PartitionDevice* partitions[16];
+u64 mbr_partition_count = 0;
+
+
+struct PartitionDevice* PartitionDeviceCreate(BlockDevice* parent, EsFileOffset offset, EsFileOffset sector_count, u32 flags, const char* model, size_t model_bytes);
+
 struct BlockDevice
 {
     DeviceAccessCallbackFunction access;
@@ -13279,7 +13416,206 @@ struct BlockDevice
 
     u8* signature_block;
     KMutex detect_filesystem_mutex;
+
+    void detect_fs()
+    {
+        KMutexAcquire(&detect_filesystem_mutex);
+        EsDefer(KMutexRelease(&detect_filesystem_mutex));
+
+        if (nest_level > 4)
+        {
+            KernelPanic("Filesystem nest limit");
+        }
+
+        u64 sectors_to_read = (K_SIGNATURE_BLOCK_SIZE + sector_size - 1) / sector_size;
+
+        if (sectors_to_read > sector_count)
+        {
+            KernelPanic("Drive too small\n");
+        }
+
+        u64 bytes_to_read = sectors_to_read * sector_size;
+        u8* signature_block_memory = (u8*)EsHeapAllocate(bytes_to_read, false, K_FIXED);
+        if (signature_block_memory != nullptr)
+        {
+            signature_block = signature_block_memory;
+
+            KDMABuffer dma_buffer = { (uintptr_t)signature_block };
+            BlockDeviceAccessRequest request = {};
+            request.device = this;
+            request.count = bytes_to_read;
+            request.operation = K_ACCESS_READ;
+            request.buffer = &dma_buffer;
+
+            if (ES_SUCCESS != FSBlockDeviceAccess(request))
+            {
+                KernelPanic("Could't read disk");
+            }
+
+            // @TODO: support GPT and more than one partition
+            EsAssert(nest_level == 0);
+            // @INFO: this also "initializes" partition
+            if (!check_mbr())
+            {
+                KernelPanic("Only MBR is supported\n");
+            }
+
+            EsHeapFree(signature_block_memory, bytes_to_read, K_FIXED);
+        }
+    }
+
+    void fs_register()
+    {
+        detect_fs();
+        // @TODO: notify desktop
+    }
+
+    bool is_gpt()
+    {
+        K_NOT_IMPLEMENTED();
+    }
+
+    bool check_mbr()
+    {
+        if (MBRGetPartitions(this->signature_block, this->sector_count, mbr_partitions))
+        {
+            bool found_any = false;
+
+            for (u64 partition_i = 0; partition_i < 4; partition_i++)
+            {
+                MBRPartition* partition = &mbr_partitions[partition_i];
+                if (partition->present)
+                {
+                    // @TODO: this should be a recursive call to fs_register
+                    PartitionDevice* partition_device = PartitionDeviceCreate(this, partition->offset, partition->count, 0, "MBR partition", EsCStringLength("MBR partitition"));
+                    return true;
+                    // @TODO support more partitions
+                    // @TODO: support GPT
+                }
+            }
+
+            return found_any;
+        }
+        else
+        {
+            return false;
+        }
+    }
 };
+
+struct PartitionDevice : BlockDevice
+{
+    EsFileOffset sector_offset;
+    BlockDevice* parent;
+};
+
+void PartitionDeviceAccess(BlockDeviceAccessRequest request)
+{
+    PartitionDevice* device = (PartitionDevice*)request.device;
+    request.device = (BlockDevice*)device->parent;
+    request.offset += device->sector_offset * device->sector_size;
+    FSBlockDeviceAccess(request);
+}
+
+PartitionDevice* PartitionDeviceCreate(BlockDevice* parent, EsFileOffset offset, EsFileOffset sector_count, u32 flags, const char* model, size_t model_bytes)
+{
+    PartitionDevice* partition = (PartitionDevice*) EsHeapAllocate(sizeof(PartitionDevice), true, K_FIXED);
+    if (!partition) return nullptr;
+
+    if (model_bytes > sizeof(partition->model)) model_bytes = sizeof(partition->model);
+
+    EsMemoryCopy(partition->model, model, model_bytes);
+
+    partition->parent = parent;
+    partition->sector_size = parent->sector_size;
+    partition->max_access_sector_count = parent->max_access_sector_count;
+    partition->sector_offset = offset;
+    partition->sector_count = sector_count;
+    partition->read_only = parent->read_only;
+    partition->access = PartitionDeviceAccess;
+    partition->model_bytes = model_bytes;
+    partition->nest_level = parent->nest_level + 1;
+    partition->drive_type = parent->drive_type;
+
+    // @TODO proper register
+    // @WARN @ERROR maybe race condition
+    partitions[mbr_partition_count] = partition;
+    mbr_partition_count += 1;
+
+    return partition;
+}
+
+EsError FSBlockDeviceAccess(BlockDeviceAccessRequest request)
+{
+    BlockDevice* device = request.device;
+
+    if (request.count == 0) return ES_SUCCESS;
+
+    if (device->read_only && request.operation == K_ACCESS_WRITE)
+    {
+        if (request.flags & FS_BLOCK_ACCESS_SOFT_ERRORS) return ES_ERROR_BLOCK_ACCESS_INVALID;
+        KernelPanic("Read only\n");
+    }
+
+    if (request.offset / device->sector_size > device->sector_count || (request.offset + request.count) / device->sector_size > device->sector_count)
+    {
+        if (request.flags & FS_BLOCK_ACCESS_SOFT_ERRORS) return ES_ERROR_BLOCK_ACCESS_INVALID;
+        KernelPanic("Disk access out of bounds\n");
+    }
+
+    if (request.offset % device->sector_size != 0 || request.count % device->sector_size != 0)
+    {
+        if (request.flags & FS_BLOCK_ACCESS_SOFT_ERRORS) return ES_ERROR_BLOCK_ACCESS_INVALID;
+        KernelPanic("Unaligned access\n");
+    }
+
+    KDMABuffer buffer = *request.buffer;
+
+    if (buffer.virtualAddress & 3)
+    {
+        if (request.flags & FS_BLOCK_ACCESS_SOFT_ERRORS) return ES_ERROR_BLOCK_ACCESS_INVALID;
+        KernelPanic("Buffer must be 4-byte aligned\n");
+    }
+
+    KWorkGroup fake_dispatch_group = {};
+
+    if (!request.dispatchGroup)
+    {
+        fake_dispatch_group.Initialise();
+        request.dispatchGroup = &fake_dispatch_group;
+    }
+
+    BlockDeviceAccessRequest r = {};
+    r.device = request.device;
+    r.buffer = &buffer;
+    r.flags = request.flags;
+    r.dispatchGroup = request.dispatchGroup;
+    r.operation = request.operation;
+    r.offset = request.offset;
+
+    while (request.count != 0)
+    {
+        r.count = device->max_access_sector_count * device->sector_size;
+        if (r.count > request.count) r.count = request.count;
+
+        buffer.offsetBytes = 0;
+        buffer.totalByteCount = r.count;
+        r.count = r.count;
+        device->access(r);
+        r.offset += r.count;
+        buffer.virtualAddress += r.count;
+        request.count -= r.count;
+    }
+
+    if (request.dispatchGroup == &fake_dispatch_group)
+    {
+        return fake_dispatch_group.Wait() ? ES_SUCCESS : ES_ERROR_DRIVE_CONTROLLER_REPORTED;
+    }
+    else
+    {
+        return ES_SUCCESS;
+    }
+}
 
 struct AHCIDrive
 {
@@ -13754,7 +14090,8 @@ struct AHCIDriver
                     }
                 };
 
-                KernelPanic("hereeeeeeeeeee\n");
+                BlockDevice* _device = (BlockDevice*) drive;
+                _device->fs_register();
             }
         }
     }
@@ -13880,7 +14217,117 @@ struct AHCIDriver
 
     bool access(u64 port_index, u64 offset_bytes, u64 count_bytes, int operation, KDMABuffer* buffer, u64 _not_used, KWorkGroup* dispath_group)
     {
-        K_NOT_IMPLEMENTED();
+        Port* port = ports + port_index;
+
+        // Find a command slot to use
+        u64 command_index = 0;
+
+        while (true)
+        {
+            KSpinlockAcquire(&port->command_spinlock);
+
+            u32 commands_available = ~PCI.read(port_index);
+
+            bool found = false;
+
+            for (u64 slot_i = 0; slot_i < command_slot_count; slot_i++)
+            {
+                if ((commands_available & (1 << slot_i)) && !port->command_contexts[slot_i])
+                {
+                    command_index = slot_i;
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found)
+            {
+                KEventReset(&port->command_slots_available);
+            }
+            else
+            {
+                port->command_contexts[command_index] = dispath_group;
+            }
+
+            KSpinlockRelease(&port->command_spinlock);
+
+            if (!found)
+            {
+                KEventWait(&ports->command_slots_available);
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        // Setup the command FIS
+        u32 count_sectors = count_bytes / port->sector_bytes;
+        u64 offset_sectors = offset_bytes / port->sector_bytes;
+
+        if (count_sectors & ~0xffff)
+        {
+            KernelPanic("Too many sectors to read\n");
+        }
+
+        u32* command_FIS = (u32*) (port->command_tables + (AHCI_COMMAND_TABLE_SIZE * command_index));
+        command_FIS[0] = 0x27 | (1 << 15) | ((operation == K_ACCESS_WRITE ? 0x35 : 0x25) << 16);
+        command_FIS[1] = (offset_sectors & 0xFFFFFF) | (1 << 30);
+        command_FIS[2] = (offset_sectors >> 24) & 0xFFFFFF;
+        command_FIS[3] = count_sectors & 0xffff;
+        command_FIS[4] = 0;
+
+        // Setup the PRDT
+        u64 PRDT_entry_count = 0;
+        u32* prdt = (u32*) (port->command_tables + AHCI_COMMAND_TABLE_SIZE * command_index + 0x80);
+
+        while (!buffer->is_complete())
+        {
+            if (PRDT_entry_count == AHCI_PRDT_ENTRY_COUNT)
+            {
+                KernelPanic("Too many PRDT entries\n");
+            }
+
+
+            KDMASegment segment = buffer->next_segment();
+
+            prdt[0 + 4 * PRDT_entry_count] = ES_PTR64_LS32(segment.physicalAddress);
+            prdt[1 + 4 * PRDT_entry_count] = ES_PTR64_MS32(segment.physicalAddress);
+            prdt[2 + 4 * PRDT_entry_count] = 0;
+            prdt[3 + 4 * PRDT_entry_count] = (segment.byteCount - 1) | (segment.isLast ? (1 << 31) : 0);
+
+            PRDT_entry_count++;
+        }
+
+        // Setup the command list entry and issue the command
+        port->command_list[command_index * 8 + 0] = 5 | (PRDT_entry_count << 16) | (operation == K_ACCESS_WRITE ? (1 << 6) : 0);
+        port->command_list[command_index * 8 + 1] = 0;
+
+        if (port->atapi)
+        {
+            port->command_list[command_index * 8 + 0] |= (1 << 5);
+            command_FIS[0] = 0x27 | (1 << 15) | (0xa0 << 16);
+            command_FIS[1] = count_bytes << 8;
+
+            u8* SCSI_command = (u8*)command_FIS + 0x40;
+            EsMemoryZero(SCSI_command, 10);
+            SCSI_command[0] = 0xa8;
+            SCSI_command[2] = (offset_sectors >> 0x18) & 0xFF;
+            SCSI_command[3] = (offset_sectors >> 0x10) & 0xFF;
+            SCSI_command[4] = (offset_sectors >> 0x08) & 0xFF;
+            SCSI_command[5] = (offset_sectors >> 0x00) & 0xFF;
+            SCSI_command[9] = count_sectors;
+        }
+
+        // Start executing the command
+        KSpinlockAcquire(&port->command_spinlock);
+        port->running_commands |= 1 << command_index;
+        __sync_synchronize();
+        PCI.write(port_index, 1 << command_index);
+        port->command_start_timestamps[command_index] = KGetTimeInMs();
+        KSpinlockRelease(&port->command_spinlock);
+
+        return true;
     }
 
     struct GlobalRegister
