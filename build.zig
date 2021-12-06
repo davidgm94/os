@@ -233,7 +233,7 @@ const DiskImage = struct
         var kernel_size_writer = @ptrCast(*align(1) u32, &self.file_buffer.items[MBR.Offset.kernel_size]);
         kernel_size_writer.* = kernel_size;
 
-        self.align_buffer(0x100);
+        self.align_buffer(0x200);
 
         try self.copy_file("zig-cache/desktop.elf", null);
 

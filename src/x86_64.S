@@ -101,9 +101,16 @@ processorGDTR:
 	dq 0
 	dq 0
 
+[global kernel_size]
+kernel_size:
+    dd 0
+
 [section .text]
 
 _start:
+    mov [kernel_size], edx
+    xor rdx, rdx
+
 	mov	rax,0x63
 	mov	fs,ax
 	mov	gs,ax

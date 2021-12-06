@@ -26,6 +26,8 @@ typedef uint8_t EsNodeType;
 typedef int64_t EsFileOffsetDifference;
 typedef uint64_t _EsLongConstant;
 
+extern uint32_t kernel_size;
+
 enum KernelObjectType : uint32_t {
 	COULD_NOT_RESOLVE_HANDLE	= 0x00000000,
 	KERNEL_OBJECT_NONE		= 0x80000000,
@@ -5052,12 +5054,6 @@ struct MMObjectCache {
 	size_t averageObjectBytes;
 };
 
-
-
-
-
-
-
 uintptr_t /* Returns physical address of first page, or 0 if none were available. */ MMPhysicalAllocate(unsigned flags, 
 		uintptr_t count = 1 /* Number of contiguous pages to allocate. */, 
 		uintptr_t align = 1 /* Alignment, in pages. */, 
@@ -9926,7 +9922,6 @@ void ArchInitialise() {
 	SetupProcessor2(&storage);
 }
 
-
 Process *ProcessSpawn(ProcessType processType) {
 	if (scheduler.shutdown) return nullptr;
 
@@ -9958,7 +9953,6 @@ Process *ProcessSpawn(ProcessType processType) {
 
 	return process; 
 }
-
 
 Thread *Scheduler::PickThread(CPULocalStorage *local) {
 	KSpinlockAssertLocked(&dispatchSpinlock);
@@ -12797,32 +12791,15 @@ struct KTimeout {
 	inline bool Hit() { return KGetTimeInMs() >= end; }
 };
 
-void drivers_init();
-extern "C" void KernelMain(uintptr_t _)
-{
-    desktopProcess = ProcessSpawn(PROCESS_DESKTOP);
-    drivers_init();
-    KernelPanic("NOT IMPLEMENTED\n");
-}
-
-extern "C" void KernelInitialise()
-{										
-	kernelProcess = ProcessSpawn(PROCESS_KERNEL);			// Spawn the kernel process.
-	MMInitialise();							// Initialise the memory manager.
-	KThreadCreate("KernelMain", KernelMain);			// Create the KernelMain thread.
-	ArchInitialise(); 						// Start processors and initialise CPULocalStorage. 
-	scheduler.started = true;					// Start the pre-emptive scheduler.
-}
-
 // my code
 typedef uint8_t  u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
-typedef int8_t  s8;
-typedef int16_t s16;
-typedef int32_t s32;
-typedef int64_t s64;
+typedef int8_t   s8;
+typedef int16_t  s16;
+typedef int32_t  s32;
+typedef int64_t  s64;
 
 
 uint32_t arch_pci_read_config(u8 bus, u8 device, u8 function, u8 offset, u32 size = 32) {
@@ -13393,7 +13370,7 @@ bool MBRGetPartitions(uint8_t *firstBlock, EsFileOffset sectorCount, MBRPartitio
 }
 
 EsError FSBlockDeviceAccess(BlockDeviceAccessRequest request);
-typedef void (*DeviceAccessCallbackFunction)(BlockDeviceAccessRequest request);
+typedef EsError (*DeviceAccessCallbackFunction)(BlockDeviceAccessRequest request);
 
 MBRPartition mbr_partitions[4];
 struct PartitionDevice* partitions[16];
@@ -13470,11 +13447,6 @@ struct BlockDevice
         // @TODO: notify desktop
     }
 
-    bool is_gpt()
-    {
-        K_NOT_IMPLEMENTED();
-    }
-
     bool check_mbr()
     {
         if (MBRGetPartitions(this->signature_block, this->sector_count, mbr_partitions))
@@ -13509,12 +13481,12 @@ struct PartitionDevice : BlockDevice
     BlockDevice* parent;
 };
 
-void PartitionDeviceAccess(BlockDeviceAccessRequest request)
+EsError PartitionDeviceAccess(BlockDeviceAccessRequest request)
 {
     PartitionDevice* device = (PartitionDevice*)request.device;
     request.device = (BlockDevice*)device->parent;
     request.offset += device->sector_offset * device->sector_size;
-    FSBlockDeviceAccess(request);
+    return FSBlockDeviceAccess(request);
 }
 
 PartitionDevice* PartitionDeviceCreate(BlockDevice* parent, EsFileOffset offset, EsFileOffset sector_count, u32 flags, const char* model, size_t model_bytes)
@@ -14079,7 +14051,7 @@ struct AHCIDriver
                 drive->block_device.model_bytes = sizeof(ports[port_i].model);
                 drive->block_device.drive_type = ports[port_i].atapi ? ES_DRIVE_TYPE_CDROM : ports[port_i].ssd ? ES_DRIVE_TYPE_SSD : ES_DRIVE_TYPE_HDD;
 
-                drive->block_device.access = [] (BlockDeviceAccessRequest request)
+                drive->block_device.access = [] (BlockDeviceAccessRequest request) -> EsError
                 {
                     AHCIDrive* drive = (AHCIDrive*)request.device;
                     request.dispatchGroup->Start();
@@ -14088,6 +14060,8 @@ struct AHCIDriver
                     {
                         request.dispatchGroup->End(false);
                     }
+
+                    return ES_SUCCESS;
                 };
 
                 BlockDevice* _device = (BlockDevice*) drive;
@@ -14415,4 +14389,55 @@ void drivers_init()
 {
     pci_driver.init();
     ahci_driver.init();
+}
+
+u64 align(u64 n, u64 alignment)
+{
+    u64 mask = alignment - 1;
+    EsAssert((alignment & mask) == 0);
+    return (n + mask) & ~mask;
+}
+
+const u32 hardcoded_desktop_size = 1928;
+const u32 hardcoded_kernel_file_offset = 1056768;
+
+void start_desktop_process()
+{
+    u32 unaligned_desktop_offset = hardcoded_kernel_file_offset + kernel_size;
+    u32 desktop_offset = (u32)align(unaligned_desktop_offset, 0x200);
+
+    EsAssert(ahci_drive_count > 0);
+    EsAssert(ahci_drive_count == 1);
+    EsAssert(mbr_partition_count > 0);
+    EsAssert(mbr_partition_count == 1);
+
+    u8 desktop_buffer[8192] = {};
+    KDMABuffer buffer = { (uintptr_t) desktop_buffer };
+    BlockDeviceAccessRequest request = {};
+    request.offset = desktop_offset;
+    request.count = align(hardcoded_desktop_size, 0x200);
+	request.operation = K_ACCESS_READ;
+    request.device = (BlockDevice*) &ahci_drives[0];
+    request.buffer = &buffer;
+
+    EsError result = FSBlockDeviceAccess(request);
+    EsAssert(result == ES_SUCCESS);
+}
+
+extern "C" void KernelMain(uintptr_t _)
+{
+    desktopProcess = ProcessSpawn(PROCESS_DESKTOP);
+    drivers_init();
+
+    start_desktop_process();
+    K_NOT_IMPLEMENTED();
+}
+
+extern "C" void KernelInitialise()
+{										
+	kernelProcess = ProcessSpawn(PROCESS_KERNEL);			// Spawn the kernel process.
+	MMInitialise();							// Initialise the memory manager.
+	KThreadCreate("KernelMain", KernelMain);			// Create the KernelMain thread.
+	ArchInitialise(); 						// Start processors and initialise CPULocalStorage. 
+	scheduler.started = true;					// Start the pre-emptive scheduler.
 }

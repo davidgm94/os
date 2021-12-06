@@ -745,6 +745,7 @@ load_kernel_executable:
     ; jump to kernel side
     xor rdi, rdi
     mov rsi, 1
+    mov edx, [kernel_size]
     jmp rcx
 
 error_64:
@@ -830,8 +831,6 @@ drive_number db 0
 partition_entry dw 0
 sector_count dw 0
 head_count dw 0
-
-their_kernel_size: dq 0
 
 kernel_buffer: dq 0
 kernel_size: dd 0
