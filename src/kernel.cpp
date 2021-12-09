@@ -14401,7 +14401,71 @@ u64 align(u64 n, u64 alignment)
 const u32 hardcoded_desktop_size = 1928;
 const u32 hardcoded_kernel_file_offset = 1056768;
 
-void start_desktop_process()
+bool MMArchInitialiseUserSpace(MMSpace *space, MMRegion *region) {
+	region->baseAddress = MM_USER_SPACE_START; 
+	region->pageCount = MM_USER_SPACE_SIZE / K_PAGE_SIZE;
+
+	if (!MMCommit(K_PAGE_SIZE, true)) {
+		return false;
+	}
+
+	space->data.cr3 = MMPhysicalAllocate(ES_FLAGS_DEFAULT);
+
+	KMutexAcquire(&coreMMSpace->reserveMutex);
+	MMRegion *l1Region = MMReserve(coreMMSpace, L1_COMMIT_SIZE_BYTES, MM_REGION_NORMAL | MM_REGION_NO_COMMIT_TRACKING | MM_REGION_FIXED);
+	if (l1Region) space->data.l1Commit = (uint8_t *) l1Region->baseAddress;
+	KMutexRelease(&coreMMSpace->reserveMutex);
+
+	if (!space->data.l1Commit) {
+		return false;
+	}
+
+	uint64_t *pageTable = (uint64_t *) MMMapPhysical(kernelMMSpace, (uintptr_t) space->data.cr3, K_PAGE_SIZE, ES_FLAGS_DEFAULT);
+	EsMemoryZero(pageTable + 0x000, K_PAGE_SIZE / 2);
+	EsMemoryCopy(pageTable + 0x100, (uint64_t *) (PAGE_TABLE_L4 + 0x100), K_PAGE_SIZE / 2);
+	pageTable[512 - 2] = space->data.cr3 | 3;
+	MMFree(kernelMMSpace, pageTable);
+
+	return true;
+}
+
+bool MMSpaceInitialise(MMSpace* space)
+{
+    space->user = true;
+
+    MMRegion* region = (MMRegion*)EsHeapAllocate(sizeof(MMRegion), true, K_CORE);
+
+    if (!region) return false;
+
+    if (!MMArchInitialiseUserSpace(space, region))
+    {
+        EsHeapFree(region, sizeof(MMRegion), K_CORE);
+        return false;
+    }
+
+    TreeInsert(&space->freeRegionsBase, &region->itemBase, region, MakeShortKey(region->baseAddress));
+    TreeInsert(&space->freeRegionsSize, &region->itemSize, region, MakeShortKey(region->pageCount), AVL_DUPLICATE_KEYS_ALLOW);
+
+    return true;
+}
+
+#define ES_PROCESS_EXECUTABLE_NOT_LOADED     (0)
+#define ES_PROCESS_EXECUTABLE_FAILED_TO_LOAD (1)
+#define ES_PROCESS_EXECUTABLE_LOADED         (2)
+
+struct KLoadedExecutable {
+	uintptr_t startAddress;
+
+	uintptr_t tlsImageStart;
+	uintptr_t tlsImageBytes;
+	uintptr_t tlsBytes; // All bytes after the image are to be zeroed.
+
+	bool isDesktop, isBundle;
+};
+
+u8 desktop_executable_buffer[8192] = {};
+
+EsError hard_disk_read_desktop_executable()
 {
     u32 unaligned_desktop_offset = hardcoded_kernel_file_offset + kernel_size;
     u32 desktop_offset = (u32)align(unaligned_desktop_offset, 0x200);
@@ -14411,18 +14475,253 @@ void start_desktop_process()
     EsAssert(mbr_partition_count > 0);
     EsAssert(mbr_partition_count == 1);
 
-    u8 desktop_buffer[8192] = {};
-    KDMABuffer buffer = { (uintptr_t) desktop_buffer };
+    KDMABuffer buffer = { (uintptr_t) desktop_executable_buffer };
     BlockDeviceAccessRequest request = {};
     request.offset = desktop_offset;
     request.count = align(hardcoded_desktop_size, 0x200);
-	request.operation = K_ACCESS_READ;
+    request.operation = K_ACCESS_READ;
     request.device = (BlockDevice*) &ahci_drives[0];
     request.buffer = &buffer;
 
     EsError result = FSBlockDeviceAccess(request);
     EsAssert(result == ES_SUCCESS);
+
+    return result;
 }
+
+struct ElfHeader {
+	uint32_t magicNumber; // 0x7F followed by 'ELF'
+	uint8_t bits; // 1 = 32 bit, 2 = 64 bit
+	uint8_t endianness; // 1 = LE, 2 = BE
+	uint8_t version1;
+	uint8_t abi; // 0 = System V
+	uint8_t _unused0[8];
+	uint16_t type; // 1 = relocatable, 2 = executable, 3 = shared
+	uint16_t instructionSet; // 0x03 = x86, 0x28 = ARM, 0x3E = x86-64, 0xB7 = AArch64
+	uint32_t version2;
+
+#ifdef ES_BITS_32
+	uint32_t entry;
+	uint32_t programHeaderTable;
+	uint32_t sectionHeaderTable;
+	uint32_t flags;
+	uint16_t headerSize;
+	uint16_t programHeaderEntrySize;
+	uint16_t programHeaderEntries;
+	uint16_t sectionHeaderEntrySize;
+	uint16_t sectionHeaderEntries;
+	uint16_t sectionNameIndex;
+#else
+	uint64_t entry;
+	uint64_t programHeaderTable;
+	uint64_t sectionHeaderTable;
+	uint32_t flags;
+	uint16_t headerSize;
+	uint16_t programHeaderEntrySize;
+	uint16_t programHeaderEntries;
+	uint16_t sectionHeaderEntrySize;
+	uint16_t sectionHeaderEntries;
+	uint16_t sectionNameIndex;
+#endif
+};
+
+struct ElfProgramHeader {
+	uint32_t type; // 0 = unused, 1 = load, 2 = dynamic, 3 = interp, 4 = note
+	uint32_t flags; // 1 = executable, 2 = writable, 4 = readable
+	uint64_t fileOffset;
+	uint64_t virtualAddress;
+	uint64_t _unused0;
+	uint64_t dataInFile;
+	uint64_t segmentSize;
+	uint64_t alignment;
+
+    bool arch_check()
+    {
+        // 64 bit
+        return virtualAddress >= 0xC0000000ULL || virtualAddress < 0x1000 || segmentSize > 0x10000000ULL;
+    }
+};
+
+EsError k_load_desktop_elf(KLoadedExecutable* executable)
+{
+    Process* process = GetCurrentThread()->process;
+
+    u64 executable_offset = 0;
+    u64 file_size = hardcoded_desktop_size;
+
+    {
+        // Bundle
+    }
+
+    if (ES_SUCCESS != hard_disk_read_desktop_executable())
+    {
+        KernelPanic("Can't read desktop exe\n");
+    }
+
+    ElfHeader* header = (ElfHeader*) desktop_executable_buffer;
+
+    uint16_t program_header_entry_size = header->programHeaderEntrySize;
+
+	if (header->magicNumber != 0x464C457F) return ES_ERROR_UNSUPPORTED_EXECUTABLE;
+	if (header->bits != 2) return ES_ERROR_UNSUPPORTED_EXECUTABLE;
+	if (header->endianness != 1) return ES_ERROR_UNSUPPORTED_EXECUTABLE;
+	if (header->abi != 0) return ES_ERROR_UNSUPPORTED_EXECUTABLE;
+	if (header->type != 2) return ES_ERROR_UNSUPPORTED_EXECUTABLE;
+	if (header->instructionSet != 0x3E) return ES_ERROR_UNSUPPORTED_EXECUTABLE;
+
+    ElfProgramHeader *programHeaders = (ElfProgramHeader *) EsHeapAllocate(program_header_entry_size * header->programHeaderEntries, false, K_PAGED);
+	if (!programHeaders) return ES_ERROR_INSUFFICIENT_RESOURCES;
+	EsDefer(EsHeapFree(programHeaders, 0, K_PAGED));
+
+    EsMemoryCopy(programHeaders, &desktop_executable_buffer[executable_offset + header->programHeaderTable], program_header_entry_size * header->programHeaderEntries);
+
+    for (u64 ph_i = 0; ph_i < header->programHeaderEntries; ph_i++)
+    {
+        ElfProgramHeader* ph = (ElfProgramHeader*) ((u8*)programHeaders + program_header_entry_size * ph_i);
+
+        
+        if (ph->type == 1) // PT_LOAD
+        {
+            if (ph->arch_check())
+            {
+                return ES_ERROR_UNSUPPORTED_EXECUTABLE;
+            }
+
+            // @TODO: could do this part mmaping the file, but this is easier to start with
+            void* success = MMStandardAllocate(process->vmm, RoundUp(ph->segmentSize, (u64)K_PAGE_SIZE), ES_FLAGS_DEFAULT, (u8*)RoundDown(ph->virtualAddress, (u64)K_PAGE_SIZE));
+
+            if (success)
+            {
+                EsMemoryCopy((void*)ph->virtualAddress, &desktop_executable_buffer[executable_offset + ph->fileOffset], ph->dataInFile);
+            }
+            else
+            {
+                return ES_ERROR_INSUFFICIENT_RESOURCES;
+            }
+        }
+        else if (ph->type == 7) // PT_TLS
+        {
+            executable->tlsImageStart = ph->virtualAddress;
+            executable->tlsImageBytes = ph->dataInFile;
+            executable->tlsBytes = ph->segmentSize;
+        }
+    }
+
+    executable->startAddress = header->entry;
+    return ES_SUCCESS;
+}
+
+struct EsProcessStartupInformation {
+	bool isDesktop, isBundle;
+	uintptr_t applicationStartAddress;
+	uintptr_t tlsImageStart;
+	uintptr_t tlsImageBytes;
+	uintptr_t tlsBytes; // All bytes after the image are to be zeroed.
+	uintptr_t timeStampTicksPerMs;
+	EsProcessCreateData data;
+};
+
+
+#define ES_PROCESS_CREATE_PAUSED (1 << 0)
+
+void process_load_desktop_executable()
+{
+    Process* process = GetCurrentThread()->process;
+
+    KLoadedExecutable exe = {};
+    exe.isDesktop = true;
+    EsError load_error = ES_SUCCESS;
+
+    k_load_desktop_elf(&exe);
+    EsProcessStartupInformation* startup_information = (EsProcessStartupInformation*) MMStandardAllocate(process->vmm, sizeof(EsProcessStartupInformation), ES_FLAGS_DEFAULT);
+    if (!startup_information) KernelPanic("Can't allocate startup information\n");
+
+    startup_information->isDesktop = true;
+    startup_information->isBundle = false;
+    startup_information->applicationStartAddress = exe.startAddress;
+    startup_information->tlsImageStart = exe.tlsImageStart;
+    startup_information->tlsImageBytes = exe.tlsImageBytes;
+    startup_information->tlsBytes = exe.tlsBytes;
+    startup_information->timeStampTicksPerMs = timeStampTicksPerMs;
+    EsMemoryCopy(&startup_information->data, &process->data, sizeof(EsProcessCreateData));
+    
+    u64 thread_flags = SPAWN_THREAD_USERLAND;
+    if (process->creationFlags & ES_PROCESS_CREATE_PAUSED) thread_flags |= SPAWN_THREAD_PAUSED;
+
+    process->executableState = ES_PROCESS_EXECUTABLE_LOADED;
+    process->executableMainThread = ThreadSpawn("MainThread", exe.startAddress, (uintptr_t)startup_information, thread_flags, process);
+
+    if (!process->executableMainThread) KernelPanic("Couldnt create main thread for executable\n");
+
+    KEventSet(&process->executableLoadAttemptComplete);
+}
+
+// ProcessStartWithNode
+bool process_start_with_something(Process* process)
+{
+    KSpinlockAcquire(&scheduler.dispatchSpinlock);
+    if (process->executableStartRequest)
+    {
+        KSpinlockRelease(&scheduler.dispatchSpinlock);
+        return false;
+    }
+
+    process->executableStartRequest = true;
+    KSpinlockRelease(&scheduler.dispatchSpinlock);
+
+    // @TODO: get the name of the process from the file node
+
+    // initialize the memory space
+    bool success = MMSpaceInitialise(process->vmm);
+    if (!success) return false;
+
+    // open file handle
+
+    // ?? @TODO @WARNING
+    if (KEventPoll(&scheduler.allProcessesTerminatedEvent))
+    {
+        KernelPanic("ProcessStartWithNode - allProcessesTerminatedEvent was set\n");
+    }
+
+    // assign node
+    
+    process->blockShutdown = true;
+    __sync_fetch_and_add(&scheduler.activeProcessCount, 1);
+    __sync_fetch_and_add(&scheduler.blockShutdownProcessCount, 1);
+
+    // Add the process to the list of all processes,
+    // and spawn the kernel thread to load the executable.
+    // This is synchronized under allProcessesMutex so that the process can't be terminated or paused
+    // until loadExecutableThread has been spawned.
+    KMutexAcquire(&scheduler.allProcessesMutex);
+    scheduler.allProcesses.InsertEnd(&process->allItem);
+    // @TODO: change thread fn
+    Thread *loadExecutableThread = ThreadSpawn("ExecLoad", (uintptr_t) process_load_desktop_executable, 0, ES_FLAGS_DEFAULT, process);
+    KMutexRelease(&scheduler.allProcessesMutex);
+
+    if (!loadExecutableThread) {
+        CloseHandleToObject(process, KERNEL_OBJECT_PROCESS);
+        return false;
+    }
+
+    // Wait for the executable to be loaded.
+
+    CloseHandleToObject(loadExecutableThread, KERNEL_OBJECT_THREAD);
+    KEventWait(&process->executableLoadAttemptComplete, ES_WAIT_NO_TIMEOUT);
+
+    if (process->executableState == ES_PROCESS_EXECUTABLE_FAILED_TO_LOAD) {
+        KernelLog(LOG_ERROR, "Scheduler", "executable load failure", "Executable failed to load.\n");
+        return false;
+    }
+
+    return true;
+}
+
+void start_desktop_process()
+{
+    process_start_with_something(desktopProcess);
+}
+KEvent shutdownEvent;
 
 extern "C" void KernelMain(uintptr_t _)
 {
@@ -14430,7 +14729,7 @@ extern "C" void KernelMain(uintptr_t _)
     drivers_init();
 
     start_desktop_process();
-    K_NOT_IMPLEMENTED();
+    KEventWait(&shutdownEvent, ES_WAIT_NO_TIMEOUT);
 }
 
 extern "C" void KernelInitialise()
