@@ -3,8 +3,8 @@ name = "renaissance-os"
 version = "0.1.0"
 authors = ["David Gonzalez Martin <davidgm94.work@protonmail.com"]
 
-[lib]
-crate-type = ["staticlib"]
+#[lib]
+#crate-type = ["bin"]
 
 [dependencies.lazy_static]
 version = "1.4.0"

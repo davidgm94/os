@@ -109,9 +109,6 @@ extern MMSpace _kernelMMSpace, _coreMMSpace;
 #define CC_ACCESS_USER_BUFFER_MAPPED (1 << 5) // Set if the user buffer is memory-mapped to mirror this or another cache.
 
 
-void CloseHandleToObject(void *object, KernelObjectType type, uint32_t flags = 0);
-void *MMStandardAllocate(MMSpace *space, size_t bytes, uint32_t flags, void *baseAddress = nullptr, bool commitAll = true);
-bool MMFree(MMSpace *space, void *address, size_t expectedSize = 0, bool userOnly = false);
 
 void EsMemoryFill(void *from, void *to, uint8_t byte)
 {
@@ -204,9 +201,6 @@ char *EsCRTstrcpy(char *dest, const char *src) {
 	EsCRTmemcpy(dest, src, stringLength + 1);
 	return dest;
 }
-
-
-
 
 #define ES_MEMORY_OPEN_FAIL_IF_FOUND     (0x1000)
 #define ES_MEMORY_OPEN_FAIL_IF_NOT_FOUND (0x2000)
@@ -339,6 +333,10 @@ int EsStringCompareRaw(const char *s1, ptrdiff_t length1, const char *s2, ptrdif
 #define ES_ERROR_BLOCK_ACCESS_INVALID		(-74)
 #define ES_ERROR_DEVICE_REMOVED			(-75)
 #define ES_ERROR_TOO_MANY_FILES_WITH_NAME	(-76)
+
+void CloseHandleToObject(void *object, KernelObjectType type, uint32_t flags = 0);
+void *MMStandardAllocate(MMSpace *space, size_t bytes, uint32_t flags, void *baseAddress = nullptr, bool commitAll = true);
+bool MMFree(MMSpace *space, void *address, size_t expectedSize = 0, bool userOnly = false);
 
 
 #define K_USER_BUFFER // Used to mark pointers that (might) point to non-kernel memory.

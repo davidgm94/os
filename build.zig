@@ -12,19 +12,33 @@ const ArrayList = std.ArrayList;
 const print = std.debug.print;
 const assert = std.debug.assert;
 
+const build_rust = true;
+const rust_kernel_elf_path = "/home/david/git/os/target/rust_target/debug/renaissance-os";
+
 pub fn build(b: *std.build.Builder) !void
 {
     const mbr = nasm_compile_binary(b, mbr_source_file, mbr_output_path);
+    b.default_step.dependOn(&mbr.step);
 
     const bios_stage_1 = nasm_compile_binary(b, bios_stage_1_source_file, bios_stage_1_output_path);
-    const bios_stage_2 = nasm_compile_binary(b, bios_stage_2_source_file, bios_stage_2_output_path);
-    const kernel = build_kernel(b);
-    const desktop = build_desktop(b);
-
-    b.default_step.dependOn(&mbr.step);
     b.default_step.dependOn(&bios_stage_1.step);
+
+    const bios_stage_2 = nasm_compile_binary(b, bios_stage_2_source_file, bios_stage_2_output_path);
     b.default_step.dependOn(&bios_stage_2.step);
-    b.default_step.dependOn(&kernel.step);
+
+    if (build_rust)
+    {
+        const cargo_cmd = b.addSystemCommand(&[_][]const u8 { "cargo", "build" });
+        b.default_step.dependOn(&cargo_cmd.step);
+
+    }
+    else
+    {
+        const kernel = build_kernel(b);
+        b.default_step.dependOn(&kernel.step);
+    }
+
+    const desktop = build_desktop(b);
     b.default_step.dependOn(&desktop.step);
 
     var disk_image = try DiskImage.create(b);
@@ -166,7 +180,7 @@ fn build_kernel(b: *Builder) *LibExeObjStep
     //kernel.addLibPath("rust_target/target/debug");
     //kernel.linkSystemLibrary("renaissance-os");
     kernel.addObjectFile("target/rust_target/debug/librenaissance_os.a");
-    nasm_compile_elf_object(b, kernel, if (build_zig) "src/kernel/x86.S" else "src/x86_64.S", "zig-cache/kernel_x86.o");
+    nasm_compile_elf_object(b, kernel, "src/x86_64.S", "zig-cache/kernel_x86.o");
     kernel.setMainPkgPath("src");
     kernel.setLinkerScriptPath(FileSource.relative(kernel_linker_script_path));
     kernel.setOutputDir(build_cache_dir);
@@ -240,7 +254,7 @@ const DiskImage = struct
         self.file_buffer.items.len = kernel_offset;
         print("File offset: {}\n", .{self.file_buffer.items.len});
         var kernel_size: u32 = 0;
-        try self.copy_file(kernel_output_path, null);
+        try self.copy_file(if (build_rust) rust_kernel_elf_path else kernel_output_path, null);
         kernel_size = @intCast(u32, self.file_buffer.items.len - kernel_offset);
         var kernel_size_writer = @ptrCast(*align(1) u32, &self.file_buffer.items[MBR.Offset.kernel_size]);
         kernel_size_writer.* = kernel_size;
