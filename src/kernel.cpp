@@ -1,4 +1,6 @@
-//#define DEBUG_BUILD
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wc99-designator"
+#define DEBUG_BUILD
 #define ES_BITS_64
 #define ES_ARCH_X86_64
 #define KERNEL
@@ -2056,115 +2058,122 @@ void EsHeapValidate() {
 
 #endif
 
-enum EsSyscallType {
-	// Memory.
-
-	ES_SYSCALL_MEMORY_ALLOCATE,
-	ES_SYSCALL_MEMORY_FREE,
-	ES_SYSCALL_MEMORY_MAP_OBJECT,
-	ES_SYSCALL_MEMORY_OPEN,
-	ES_SYSCALL_MEMORY_COMMIT,
-	ES_SYSCALL_MEMORY_FAULT_RANGE,
-	ES_SYSCALL_MEMORY_GET_AVAILABLE,
-
-	// Processing.
-
-	ES_SYSCALL_EVENT_CREATE,
-	ES_SYSCALL_EVENT_RESET,
-	ES_SYSCALL_EVENT_SET,
-	ES_SYSCALL_PROCESS_CRASH,
-	ES_SYSCALL_PROCESS_CREATE,
-	ES_SYSCALL_PROCESS_GET_STATE,
-	ES_SYSCALL_PROCESS_GET_STATUS,
-	ES_SYSCALL_PROCESS_GET_TLS,
-	ES_SYSCALL_PROCESS_OPEN,
-	ES_SYSCALL_PROCESS_PAUSE,
-	ES_SYSCALL_PROCESS_SET_TLS,
-	ES_SYSCALL_PROCESS_TERMINATE,
-	ES_SYSCALL_SLEEP,
-	ES_SYSCALL_THREAD_CREATE,
-	ES_SYSCALL_THREAD_GET_ID,
-	ES_SYSCALL_THREAD_STACK_SIZE,
-	ES_SYSCALL_THREAD_TERMINATE,
-	ES_SYSCALL_WAIT,
-	ES_SYSCALL_YIELD_SCHEDULER,
-
-	// Windowing.
-
-	ES_SYSCALL_MESSAGE_GET,
-	ES_SYSCALL_MESSAGE_POST,
-	ES_SYSCALL_MESSAGE_WAIT,
-
-	ES_SYSCALL_CURSOR_POSITION_GET,
-	ES_SYSCALL_CURSOR_POSITION_SET,
-	ES_SYSCALL_CURSOR_PROPERTIES_SET,
-	ES_SYSCALL_GAME_CONTROLLER_STATE_POLL,
-	ES_SYSCALL_EYEDROP_START,
-	ES_SYSCALL_SCREEN_WORK_AREA_SET,
-	ES_SYSCALL_SCREEN_WORK_AREA_GET,
-	ES_SYSCALL_SCREEN_BOUNDS_GET,
-	ES_SYSCALL_SCREEN_FORCE_UPDATE,
-
-	ES_SYSCALL_WINDOW_CREATE,
-	ES_SYSCALL_WINDOW_CLOSE,
-	ES_SYSCALL_WINDOW_REDRAW,
-	ES_SYSCALL_WINDOW_MOVE,
-	ES_SYSCALL_WINDOW_TRANSFER_PRESS,
-	ES_SYSCALL_WINDOW_FIND_BY_POINT,
-	ES_SYSCALL_WINDOW_GET_ID,
-	ES_SYSCALL_WINDOW_GET_BOUNDS,
-	ES_SYSCALL_WINDOW_SET_BITS,
-	ES_SYSCALL_WINDOW_SET_CURSOR,
-	ES_SYSCALL_WINDOW_SET_PROPERTY,
-
-	ES_SYSCALL_MESSAGE_DESKTOP,
-
-	// IO.
-
-	ES_SYSCALL_NODE_OPEN,
-	ES_SYSCALL_NODE_DELETE,
-	ES_SYSCALL_NODE_MOVE,
-	ES_SYSCALL_FILE_READ_SYNC,
-	ES_SYSCALL_FILE_WRITE_SYNC,
-	ES_SYSCALL_FILE_RESIZE,
-	ES_SYSCALL_FILE_GET_SIZE,
-	ES_SYSCALL_FILE_CONTROL,
-	ES_SYSCALL_DIRECTORY_ENUMERATE,
-	ES_SYSCALL_VOLUME_GET_INFORMATION,
-	ES_SYSCALL_DEVICE_CONTROL,
-
-	// Networking.
-
-	ES_SYSCALL_DOMAIN_NAME_RESOLVE,
-	ES_SYSCALL_ECHO_REQUEST,
-	ES_SYSCALL_CONNECTION_OPEN,
-	ES_SYSCALL_CONNECTION_POLL,
-	ES_SYSCALL_CONNECTION_NOTIFY,
-
-	// IPC.
-
-	ES_SYSCALL_CONSTANT_BUFFER_READ,
-	ES_SYSCALL_CONSTANT_BUFFER_CREATE,
-	ES_SYSCALL_PIPE_CREATE,
-	ES_SYSCALL_PIPE_WRITE,
-	ES_SYSCALL_PIPE_READ,
-
-	// Misc.
-
-	ES_SYSCALL_HANDLE_CLOSE,
-	ES_SYSCALL_HANDLE_SHARE,
-	ES_SYSCALL_BATCH,
-	ES_SYSCALL_DEBUG_COMMAND,
-	ES_SYSCALL_POSIX,
-	ES_SYSCALL_PRINT,
-	ES_SYSCALL_SHUTDOWN,
-	ES_SYSCALL_SYSTEM_TAKE_SNAPSHOT,
-	ES_SYSCALL_PROCESSOR_COUNT,
-
-	// End.
-
-	ES_SYSCALL_COUNT,
+enum EsSyscallType
+{
+    ES_SYSCALL_PROCESS_EXIT,
+    ES_SYSCALL_BATCH,
+    ES_SYSCALL_COUNT,
 };
+
+//enum EsSyscallType {
+	//// Memory.
+
+	//ES_SYSCALL_MEMORY_ALLOCATE,
+	//ES_SYSCALL_MEMORY_FREE,
+	//ES_SYSCALL_MEMORY_MAP_OBJECT,
+	//ES_SYSCALL_MEMORY_OPEN,
+	//ES_SYSCALL_MEMORY_COMMIT,
+	//ES_SYSCALL_MEMORY_FAULT_RANGE,
+	//ES_SYSCALL_MEMORY_GET_AVAILABLE,
+
+	//// Processing.
+
+	//ES_SYSCALL_EVENT_CREATE,
+	//ES_SYSCALL_EVENT_RESET,
+	//ES_SYSCALL_EVENT_SET,
+	//ES_SYSCALL_PROCESS_CRASH,
+	//ES_SYSCALL_PROCESS_CREATE,
+	//ES_SYSCALL_PROCESS_GET_STATE,
+	//ES_SYSCALL_PROCESS_GET_STATUS,
+	//ES_SYSCALL_PROCESS_GET_TLS,
+	//ES_SYSCALL_PROCESS_OPEN,
+	//ES_SYSCALL_PROCESS_PAUSE,
+	//ES_SYSCALL_PROCESS_SET_TLS,
+	//ES_SYSCALL_PROCESS_TERMINATE,
+	//ES_SYSCALL_SLEEP,
+	//ES_SYSCALL_THREAD_CREATE,
+	//ES_SYSCALL_THREAD_GET_ID,
+	//ES_SYSCALL_THREAD_STACK_SIZE,
+	//ES_SYSCALL_THREAD_TERMINATE,
+	//ES_SYSCALL_WAIT,
+	//ES_SYSCALL_YIELD_SCHEDULER,
+
+	//// Windowing.
+
+	//ES_SYSCALL_MESSAGE_GET,
+	//ES_SYSCALL_MESSAGE_POST,
+	//ES_SYSCALL_MESSAGE_WAIT,
+
+	//ES_SYSCALL_CURSOR_POSITION_GET,
+	//ES_SYSCALL_CURSOR_POSITION_SET,
+	//ES_SYSCALL_CURSOR_PROPERTIES_SET,
+	//ES_SYSCALL_GAME_CONTROLLER_STATE_POLL,
+	//ES_SYSCALL_EYEDROP_START,
+	//ES_SYSCALL_SCREEN_WORK_AREA_SET,
+	//ES_SYSCALL_SCREEN_WORK_AREA_GET,
+	//ES_SYSCALL_SCREEN_BOUNDS_GET,
+	//ES_SYSCALL_SCREEN_FORCE_UPDATE,
+
+	//ES_SYSCALL_WINDOW_CREATE,
+	//ES_SYSCALL_WINDOW_CLOSE,
+	//ES_SYSCALL_WINDOW_REDRAW,
+	//ES_SYSCALL_WINDOW_MOVE,
+	//ES_SYSCALL_WINDOW_TRANSFER_PRESS,
+	//ES_SYSCALL_WINDOW_FIND_BY_POINT,
+	//ES_SYSCALL_WINDOW_GET_ID,
+	//ES_SYSCALL_WINDOW_GET_BOUNDS,
+	//ES_SYSCALL_WINDOW_SET_BITS,
+	//ES_SYSCALL_WINDOW_SET_CURSOR,
+	//ES_SYSCALL_WINDOW_SET_PROPERTY,
+
+	//ES_SYSCALL_MESSAGE_DESKTOP,
+
+	//// IO.
+
+	//ES_SYSCALL_NODE_OPEN,
+	//ES_SYSCALL_NODE_DELETE,
+	//ES_SYSCALL_NODE_MOVE,
+	//ES_SYSCALL_FILE_READ_SYNC,
+	//ES_SYSCALL_FILE_WRITE_SYNC,
+	//ES_SYSCALL_FILE_RESIZE,
+	//ES_SYSCALL_FILE_GET_SIZE,
+	//ES_SYSCALL_FILE_CONTROL,
+	//ES_SYSCALL_DIRECTORY_ENUMERATE,
+	//ES_SYSCALL_VOLUME_GET_INFORMATION,
+	//ES_SYSCALL_DEVICE_CONTROL,
+
+	//// Networking.
+
+	//ES_SYSCALL_DOMAIN_NAME_RESOLVE,
+	//ES_SYSCALL_ECHO_REQUEST,
+	//ES_SYSCALL_CONNECTION_OPEN,
+	//ES_SYSCALL_CONNECTION_POLL,
+	//ES_SYSCALL_CONNECTION_NOTIFY,
+
+	//// IPC.
+
+	//ES_SYSCALL_CONSTANT_BUFFER_READ,
+	//ES_SYSCALL_CONSTANT_BUFFER_CREATE,
+	//ES_SYSCALL_PIPE_CREATE,
+	//ES_SYSCALL_PIPE_WRITE,
+	//ES_SYSCALL_PIPE_READ,
+
+	//// Misc.
+
+	//ES_SYSCALL_HANDLE_CLOSE,
+	//ES_SYSCALL_HANDLE_SHARE,
+	//ES_SYSCALL_BATCH,
+	//ES_SYSCALL_DEBUG_COMMAND,
+	//ES_SYSCALL_POSIX,
+	//ES_SYSCALL_PRINT,
+	//ES_SYSCALL_SHUTDOWN,
+	//ES_SYSCALL_SYSTEM_TAKE_SNAPSHOT,
+	//ES_SYSCALL_PROCESSOR_COUNT,
+
+	//// End.
+
+	//ES_SYSCALL_COUNT,
+//};
 
 
 // MMArchMapPage.
@@ -12335,19 +12344,92 @@ void KernelLog(KLogLevel level, const char *subsystem, const char *event, const 
 	va_end(arguments);
 }
 
-uintptr_t Syscall(uintptr_t argument0, uintptr_t argument1, uintptr_t argument2, uintptr_t returnAddress, uintptr_t argument3, uintptr_t argument4, uintptr_t *userStackPointer) {
-    (void)argument0;
-    (void)argument1;
-    (void)argument2;
-    (void)argument3;
-    (void)argument4;
-    (void)userStackPointer;
-    (void)returnAddress;
-    return 0;
-	//(void) returnAddress;
-	//return DoSyscall((EsSyscallType) argument0, argument1, argument2, argument3, argument4, false, nullptr, userStackPointer);
+#define SYSCALL(_name_) uintptr_t _name_(uintptr_t argument0, uintptr_t argument1, uintptr_t argument2, uintptr_t argument3, Thread* currentThread, Process* currentProcess, MMSpace* currentVMM, uintptr_t *userStackPointer, bool *fatalError)
+
+
+typedef SYSCALL(SyscallFunction);
+SYSCALL(syscall_process_exit);
+SyscallFunction* syscallFunctions[ES_SYSCALL_COUNT + 1] =
+{
+    [ES_SYSCALL_PROCESS_EXIT] = syscall_process_exit,
+};
+
+uintptr_t DoSyscall(EsSyscallType index, uintptr_t argument0, uintptr_t argument1, uintptr_t argument2, uintptr_t argument3,
+		bool batched, bool *fatal, uintptr_t *userStackPointer) {
+	// Interrupts need to be enabled during system calls,
+	// because many of them block on mutexes or events.
+	ProcessorEnableInterrupts();
+
+	Thread *currentThread = GetCurrentThread();
+	Process *currentProcess = currentThread->process;
+	MMSpace *currentVMM = currentProcess->vmm;
+
+	if (!batched) {
+		if (currentThread->terminating) {
+			// The thread has been terminated.
+			// Yield the scheduler so it can be removed.
+			ProcessorFakeTimerInterrupt();
+		}
+
+		if (currentThread->terminatableState != THREAD_TERMINATABLE) {
+			KernelPanic("DoSyscall - Current thread %x was not terminatable (was %d).\n", 
+					currentThread, currentThread->terminatableState);
+		}
+
+		currentThread->terminatableState = THREAD_IN_SYSCALL;
+	}
+
+	EsError returnValue = ES_FATAL_ERROR_UNKNOWN_SYSCALL;
+	bool fatalError = true;
+
+	if (index < ES_SYSCALL_COUNT) {
+		SyscallFunction* function = syscallFunctions[index];
+
+		if (batched && index == ES_SYSCALL_BATCH) {
+			// This could cause a stack overflow, so it's a fatal error.
+		} else if (function) {
+			returnValue = (EsError) function(argument0, argument1, argument2, argument3, 
+					currentThread, currentProcess, currentVMM, userStackPointer, &fatalError);
+		}
+	}
+
+	if (fatal) *fatal = false;
+
+	if (fatalError) {
+		if (fatal) {
+			*fatal = true;
+		} else {
+			EsCrashReason reason;
+			EsMemoryZero(&reason, sizeof(EsCrashReason));
+			reason.errorCode = (EsFatalError) returnValue;
+			reason.duringSystemCall = index;
+			KernelLog(LOG_ERROR, "Syscall", "syscall failure", 
+					"Process crashed during system call [%x, %x, %x, %x, %x]\n", index, argument0, argument1, argument2, argument3);
+			ProcessCrash(currentProcess, &reason);
+		}
+	}
+
+	if (!batched) {
+		currentThread->terminatableState = THREAD_TERMINATABLE;
+
+		if (currentThread->terminating || currentThread->paused) {
+			// The thread has been terminated or paused.
+			// Yield the scheduler so it can be removed or sent to the paused thread queue.
+			ProcessorFakeTimerInterrupt();
+		}
+	}
+	
+	return returnValue;
 }
 
+uintptr_t Syscall(uintptr_t argument0, uintptr_t argument1, uintptr_t argument2, uintptr_t returnAddress, uintptr_t argument3, uintptr_t argument4, uintptr_t *userStackPointer) {
+	(void) returnAddress;
+	return DoSyscall((EsSyscallType) argument0, argument1, argument2, argument3, argument4, false, nullptr, userStackPointer);
+}
+
+SYSCALL(syscall_process_exit)
+{
+}
 
 void InterruptHandler(InterruptContext *context) {
 	if (scheduler.panic && context->interruptNumber != 2) {
@@ -14740,3 +14822,5 @@ extern "C" void KernelInitialise()
 	ArchInitialise(); 						// Start processors and initialise CPULocalStorage. 
 	scheduler.started = true;					// Start the pre-emptive scheduler.
 }
+
+#pragma clang diagnostic pop
