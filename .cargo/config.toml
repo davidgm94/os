@@ -7,3 +7,5 @@ panic = "abort"
 panic = "abort"
 [build]
 target = "rust_target.json"
+[rust]
+channel = "nightly"
