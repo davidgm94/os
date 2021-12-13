@@ -50,13 +50,13 @@ pub fn build(b: *std.build.Builder) !void
     const qemu_command_str =
             &[_][]const u8
             {
-                //"qemu-system-x86_64", "-hda", final_disk_image, "-no-reboot", "-no-shutdown", "-M", "q35", "-cpu", "Haswell",
                 "qemu-system-x86_64",
                 "-drive", "file=" ++ final_disk_image ++ ",if=none,id=mydisk,format=raw,media=disk,index=0",
                 "-device", "ich9-ahci,id=ahci",
                 "-device", "ide-hd,drive=mydisk,bus=ahci.0",
                 "-no-reboot", "-no-shutdown", "-M", "q35", "-cpu", "Haswell",
                 "-serial", "stdio",
+                //"-d", "int,cpu_reset,in_asm",
                 //"-D", "logging.txt",
                 //"-d", "guest_errors,int,cpu,cpu_reset,in_asm"
             };

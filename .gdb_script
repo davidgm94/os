@@ -1,10 +1,7 @@
 set disassembly-flavor intel
-symbol-file zig-cache/kernel.elf
+symbol-file target/rust_target/debug/renaissance-os
 b _start
-b KernelInitialise
-b KernelMain
-b KernelPanic
-b rust_kernel_panic
+b kernel_initialize
 b panic
 target remote localhost:1234
 
