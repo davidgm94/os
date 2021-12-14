@@ -452,10 +452,6 @@ pub static mut kernel_size: Volatile<u32> = Volatile::new(0);
 pub static mut bootloader_ID: Volatile<u32> = Volatile::new(0);
 
 #[no_mangle]
-//#[link_section = ".data"]
-pub static mut bootloader_information_offset: Volatile<u64> = Volatile::new(0);
-
-#[no_mangle]
 #[link_section = ".data"]
 pub static mut installation_ID: Volatile<u128> = Volatile::new(0);
 
@@ -664,7 +660,7 @@ global_asm!(
 
 pub mod Arch
 {
-    use {size_of, physical_memory, stack_size, bootloader_information_offset};
+    use {size_of, physical_memory, stack_size};
     use Memory;
 
     pub const core_memory_regions_start: u64 = 0xFFFF8001F0000000;
@@ -685,14 +681,13 @@ pub mod Arch
     global_asm!(
         ".extern kernel_size",
         ".extern bootloader_ID",
-        ".extern bootloader_information_offset",
         ".extern stack",
         ".extern installation_ID",
         ".extern gdtr",
+        ".extern bootloader_information_offset",
 
         ".extern PIC_disable",
         ".extern memory_region_setup",
-        ".extern foo_modify",
 
         ".section .text",
         ".global _start",
@@ -955,11 +950,18 @@ pub mod Arch
         stack_size = const stack_size
     );
 
-    extern "C" { pub fn interrupts_are_enabled() -> bool; }
-    extern "C" { pub fn interrupts_disable(); }
-    extern "C" { pub fn interrupts_enable(); }
+    extern "C"
+    {
+        pub fn interrupts_are_enabled() -> bool;
+        pub fn interrupts_disable();
+        pub fn interrupts_enable();
+        pub fn bootloader_information_offset_get() -> u64;
+    }
 
     global_asm!(
+        ".section .data",
+        "bootloader_information_offset: .quad 0",
+
         ".section .text",
 
         ".global interrupts_are_enabled",
@@ -968,6 +970,7 @@ pub mod Arch
         ".global out8",
         ".global in8",
         ".global CPU_idle",
+        ".global bootloader_information_offset_get",
 
         "interrupts_are_enabled:",
         "pushf",
@@ -1050,6 +1053,11 @@ pub mod Arch
         "pop	r11",
         "pop	rcx", // Return address",
         "sysretq",
+
+        ".global bootloader_information_offset_get",
+        "bootloader_information_offset_get:",
+        "mov rax, [bootloader_information_offset]",
+        "ret",
     );
 
     pub mod IO
@@ -1117,15 +1125,12 @@ pub mod Arch
     #[no_mangle]
     pub extern "C" fn memory_region_setup()
     {
-        let physical_memory_region_ptr = unsafe
-        {
-            let base_low = low_memory_map_start + 0x600000;
-            (base_low + bootloader_information_offset.read()) as *mut Memory::PhysicalRegion
-        };
+        let physical_memory_region_ptr = unsafe { (low_memory_map_start + 0x600000 + bootloader_information_offset_get()) as *mut Memory::PhysicalRegion };
         let physical_memory_region_count =
         {
             let mut region_count: usize = 0;
             let mut region_it = physical_memory_region_ptr;
+
             loop
             {
                 let region = unsafe { region_it.as_mut() }.unwrap();

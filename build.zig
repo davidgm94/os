@@ -56,7 +56,7 @@ pub fn build(b: *std.build.Builder) !void
                 "-device", "ide-hd,drive=mydisk,bus=ahci.0",
                 "-no-reboot", "-no-shutdown", "-M", "q35", "-cpu", "Haswell",
                 "-serial", "stdio",
-                //"-d", "int,cpu_reset,in_asm",
+                "-d", "int,cpu_reset,in_asm",
                 //"-D", "logging.txt",
                 //"-d", "guest_errors,int,cpu,cpu_reset,in_asm"
             };
