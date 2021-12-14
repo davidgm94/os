@@ -51,6 +51,18 @@ enum KernelObjectType : uint32_t {
 };
 
 
+#define ES_MEMORY_MAP_OBJECT_ALL (0) // Set size to this to map the entire object.
+#define ES_MEMORY_MAP_OBJECT_READ_WRITE    (1 << 0)
+#define ES_MEMORY_MAP_OBJECT_READ_ONLY     (1 << 1)
+#define ES_MEMORY_MAP_OBJECT_COPY_ON_WRITE (1 << 2) // Files only.
+
+#define ES_SHARED_MEMORY_READ_WRITE (1 << 0)
+
+#define ES_SUBSYSTEM_ID_NATIVE (0)
+#define ES_SUBSYSTEM_ID_POSIX (1)
+
+
+
 #define ES_PERMISSION_NETWORKING				(1 << 0)
 #define ES_PERMISSION_PROCESS_CREATE			(1 << 1)
 #define ES_PERMISSION_PROCESS_OPEN			(1 << 2)
@@ -1423,7 +1435,7 @@ struct Pool {
 
 struct KEvent { // Waiting and notifying. Can wait on multiple at once. Can be set and reset with interrupts disabled.
 	volatile bool autoReset; // This should be first field in the structure, so that the type of KEvent can be easily declared with {autoReset}.
-	volatile uintptr_t state;
+	volatile uintptr_t state; // @TODO: change this into a bool?
 	LinkedList<Thread> blockedThreads;
 	volatile size_t handles;
 };
@@ -2616,6 +2628,7 @@ struct RangeSet {
         return true;
 
     }
+
     bool Clear(uintptr_t from, uintptr_t to, intptr_t *delta, bool modify) {
 #if 0
         for (uintptr_t i = from; i < to; i++) {
@@ -2786,9 +2799,6 @@ struct KDevice {
 	void (*destroy)(KDevice *device);   // Called just before the device is destroyed.
 };
 
-
-
-
 #define ES_SNAPSHOT_MAX_PROCESS_NAME_LENGTH 	(31)
 
 struct Process;
@@ -2808,13 +2818,11 @@ struct EsThreadEventLogEntry {
 	EsObjectID objectID, threadID;
 };
 
-
-
-
-
-
 struct EsProcessCreateData {
-	EsHandle environment, initialMountPoints, initialDevices;
+    EsHandle systemData;
+    EsHandle subsystemData;
+    EsGeneric userData;
+    uint8_t subsystemID;
 };
 
 enum EsFatalError {
@@ -2838,19 +2846,8 @@ struct EsCrashReason {
 };
 
 #define ES_INVALID_HANDLE 		((EsHandle) (0))
-
-
-
-
-
-
-
-// This file is part of the Essence operating system.
-// It is released under the terms of the MIT license -- see LICENSE.md.
-// Written by: nakst.
-
-
-
+#define ES_CURRENT_THREAD	 	((EsHandle) (0x10))
+#define ES_CURRENT_PROCESS	 	((EsHandle) (0x11))
 
 #define THREAD_PRIORITY_NORMAL 	(0) // Lower value = higher priority.
 #define THREAD_PRIORITY_LOW 	(1)
@@ -2904,9 +2901,13 @@ struct Thread {
 	uintptr_t userStackBase;
 	uintptr_t kernelStackBase;
 	uintptr_t kernelStack;
-	uintptr_t tlsAddress;
 	size_t userStackReserve;
 	volatile size_t userStackCommit;
+
+	uintptr_t tlsAddress;
+    uintptr_t timerAdjustAddress;
+    uint64_t timerAdjustTicks;
+    uint64_t lastInterruptTimeStamp;
 
 	ThreadType type;
 	bool isKernelThread, isPageGenerator;
@@ -4649,8 +4650,6 @@ struct MMSharedRegion {
 	size_t sizeBytes;
 	volatile size_t handles;
 	KMutex mutex;
-	LinkedItem<MMSharedRegion> namedItem;
-	char cName[ES_SHARED_MEMORY_NAME_MAX_LENGTH + 1];
 	void *data;
 };
 
@@ -5135,9 +5134,7 @@ PMM pmm;
 MMRegion *mmCoreRegions = (MMRegion *) MM_CORE_REGIONS_START;
 size_t mmCoreRegionCount, mmCoreRegionArrayCommit;
 
-LinkedList<MMSharedRegion> mmNamedSharedRegions;
-KMutex mmNamedSharedRegionsMutex;
-
+MMSharedRegion* mmGlobalDataRegion, *mmAPITableRegion;
 GlobalData *globalData; // Shared with all processes.
 
 typedef bool (*KIRQHandler)(uintptr_t interruptIndex /* tag for MSI */, void *context);
@@ -6075,10 +6072,6 @@ EsError CCSpaceAccess(CCSpace *cache, K_USER_BUFFER void *_buffer, EsFileOffset 
         }
 
 copy:;
-
-     if (GetLocalStorage()->spinlockCount) {
-         KernelPanic("CCSpaceAccess - Spinlocks acquired.\n");
-     }
 
      // Copy into/from the user's buffer.
 
@@ -7948,7 +7941,7 @@ void KRegisterAsyncTask(KAsyncTask *task, KAsyncTaskCallback callback) {
 	KSpinlockRelease(&scheduler.asyncTaskSpinlock);
 }
 
-void ThreadTerminate(Thread *thread) {
+void thread_exit(Thread *thread) {
 	// Overview:
 	//	Set terminating true, and paused false.
 	// 	Is this the current thread?
@@ -8035,7 +8028,7 @@ void ThreadTerminate(Thread *thread) {
 
 
 void KThreadTerminate() {
-	ThreadTerminate(GetCurrentThread());
+	thread_exit(GetCurrentThread());
 }
 
 void MMSpaceOpenReference(MMSpace *space) {
@@ -8066,11 +8059,6 @@ void ThreadSetTemporaryAddressSpace(MMSpace *space) {
 	MMSpaceCloseReference(oldSpace);
 }
 
-void MMArchFreeVAS(MMSpace *space) {
-    (void)space;
-	// TODO.
-	KernelPanic("Unimplemented!\n");
-}
 
 void MMSpaceDestroy(MMSpace *space) {
 	LinkedItem<MMRegion> *item = space->usedRegionsNonGuard.firstItem;
@@ -8994,38 +8982,6 @@ void MMBalanceThread() {
 	}
 }
 
-MMSharedRegion *MMSharedOpenRegion(const char *name, size_t nameBytes, size_t fallbackSizeBytes, uint64_t flags) {
-	if (nameBytes > ES_SHARED_MEMORY_NAME_MAX_LENGTH) return nullptr;
-
-	KMutexAcquire(&mmNamedSharedRegionsMutex);
-	EsDefer(KMutexRelease(&mmNamedSharedRegionsMutex));
-
-	LinkedItem<MMSharedRegion> *item = mmNamedSharedRegions.firstItem;
-
-	while (item) {
-		MMSharedRegion *region = item->thisItem;
-
-		if (EsCStringLength(region->cName) == nameBytes && 0 == EsMemoryCompare(region->cName, name, nameBytes)) {
-			if (flags & ES_MEMORY_OPEN_FAIL_IF_FOUND) return nullptr;
-			OpenHandleToObject(region, KERNEL_OBJECT_SHMEM);
-			return region;
-		}
-
-		item = item->nextItem;
-	}
-
-	if (flags & ES_MEMORY_OPEN_FAIL_IF_NOT_FOUND) return nullptr;
-
-	MMSharedRegion *region = MMSharedCreateRegion(fallbackSizeBytes);
-	if (!region) return nullptr;
-	EsMemoryCopy(region->cName, name, nameBytes);
-
-	region->namedItem.thisItem = region;
-	mmNamedSharedRegions.InsertEnd(&region->namedItem);
-
-	return region;
-}
-
 void *MMMapShared(MMSpace *space, MMSharedRegion *sharedRegion, uintptr_t offset, size_t bytes, uint32_t additionalFlags = ES_FLAGS_DEFAULT, void *baseAddress = nullptr) {
 	MMRegion *region;
 	OpenHandleToObject(sharedRegion, KERNEL_OBJECT_SHMEM);
@@ -9124,8 +9080,9 @@ void MMInitialise() {
 	{
 		// Create the global data shared region.
 
-		MMSharedRegion *region = MMSharedOpenRegion(EsLiteral("Desktop.Global"), sizeof(GlobalData), ES_FLAGS_DEFAULT); 
-		globalData = (GlobalData *) MMMapShared(kernelMMSpace, region, 0, sizeof(GlobalData), MM_REGION_FIXED);
+        mmAPITableRegion = MMSharedCreateRegion(0xF000, false, 0);
+        mmGlobalDataRegion = MMSharedCreateRegion(sizeof(GlobalData), false, 0);
+		globalData = (GlobalData *) MMMapShared(kernelMMSpace, mmGlobalDataRegion, 0, sizeof(GlobalData), MM_REGION_FIXED);
 		MMFaultRange((uintptr_t) globalData, sizeof(GlobalData), MM_HANDLE_PAGE_FAULT_FOR_SUPERVISOR);
 	}
 }
@@ -9740,6 +9697,41 @@ uintptr_t GetBootloaderInformationOffset() {
 #define PAGE_TABLE_L1 ((volatile uint64_t *) 0xFFFFFF0000000000)
 #define ENTRIES_PER_PAGE_TABLE (512)
 #define ENTRIES_PER_PAGE_TABLE_BITS (9)
+
+void MMArchFreeVAS(MMSpace* space)
+{
+	for (uintptr_t i = 0; i < 256; i++) {
+		if (!PAGE_TABLE_L4[i]) continue;
+
+		for (uintptr_t j = i * ENTRIES_PER_PAGE_TABLE; j < (i + 1) * ENTRIES_PER_PAGE_TABLE; j++) {
+			if (!PAGE_TABLE_L3[j]) continue;
+
+			for (uintptr_t k = j * ENTRIES_PER_PAGE_TABLE; k < (j + 1) * ENTRIES_PER_PAGE_TABLE; k++) {
+				if (!PAGE_TABLE_L2[k]) continue;
+				MMPhysicalFree(PAGE_TABLE_L2[k] & ~(K_PAGE_SIZE - 1));
+				space->data.pageTablesActive--;
+			}
+
+			MMPhysicalFree(PAGE_TABLE_L3[j] & ~(K_PAGE_SIZE - 1));
+			space->data.pageTablesActive--;
+		}
+
+		MMPhysicalFree(PAGE_TABLE_L4[i] & ~(K_PAGE_SIZE - 1));
+		space->data.pageTablesActive--;
+	}
+
+	if (space->data.pageTablesActive) {
+		KernelPanic("MMArchFreeVAS - Space %x still has %d page tables active.\n", space, space->data.pageTablesActive);
+	}
+
+	KMutexAcquire(&coreMMSpace->reserveMutex);
+	MMRegion *l1CommitRegion = MMFindRegion(coreMMSpace, (uintptr_t) space->data.l1Commit);
+	MMArchUnmapPages(coreMMSpace, l1CommitRegion->baseAddress, l1CommitRegion->pageCount, MM_UNMAP_PAGES_FREE);
+	MMUnreserve(coreMMSpace, l1CommitRegion, false /* we manually unmap pages above, so we can free them */);
+	KMutexRelease(&coreMMSpace->reserveMutex);
+	MMDecommit(space->data.pageTablesCommitted * K_PAGE_SIZE, true);
+}
+
 
 
 
@@ -10806,6 +10798,16 @@ bool PostContextSwitch(InterruptContext *context, MMSpace *oldAddressSpace) {
 		KernelPanic("PostContextSwitch - spinlockCount is non-zero (%x).\n", local);
 	}
 
+    currentThread->timerAdjustTicks += ProcessorReadTimeStamp() - local->currentThread->lastInterruptTimeStamp;
+
+    if (currentThread->timerAdjustAddress && MMArchIsBufferInUserRange(currentThread->timerAdjustAddress, sizeof(uint64_t)))
+    {
+        // ES_SYSCALL_THREAD_SET_TIMER_ADJUST_ADDRESS ensures that this address is on the thread's user stack,
+		// which is managed by the kernel.
+        MMArchSafeCopy(currentThread->timerAdjustAddress, (uintptr_t)&local->currentThread->timerAdjustTicks, sizeof(uintptr_t));
+    }
+
+
 #ifdef ES_ARCH_X86_32
 	if (context->fromRing0) {
 		// Returning to a kernel thread; we need to fix the stack.
@@ -11060,8 +11062,15 @@ DEFINE_INTERFACE_STRING(CommonSearchPrompt2, "Enter text to search for.");
 DEFINE_INTERFACE_STRING(CommonItemFolder, "Folder");
 DEFINE_INTERFACE_STRING(CommonItemFile, "File");
 
+DEFINE_INTERFACE_STRING(CommonSortHeader, "Sort" ELLIPSIS);
 DEFINE_INTERFACE_STRING(CommonSortAscending, "Sort ascending");
 DEFINE_INTERFACE_STRING(CommonSortDescending, "Sort descending");
+DEFINE_INTERFACE_STRING(CommonSortAToZ, "A to Z");
+DEFINE_INTERFACE_STRING(CommonSortZToA, "Z to A");
+DEFINE_INTERFACE_STRING(CommonSortSmallToLarge, "Smallest first");
+DEFINE_INTERFACE_STRING(CommonSortLargeToSmall, "Largest first");
+DEFINE_INTERFACE_STRING(CommonSortOldToNew, "Oldest first");
+DEFINE_INTERFACE_STRING(CommonSortNewToOld, "Newest first");
 
 DEFINE_INTERFACE_STRING(CommonDriveHDD, "Hard disk");
 DEFINE_INTERFACE_STRING(CommonDriveSSD, "SSD");
@@ -11086,10 +11095,25 @@ DEFINE_INTERFACE_STRING(CommonEmpty, "empty");
 
 DEFINE_INTERFACE_STRING(CommonUnitPercent, "%");
 DEFINE_INTERFACE_STRING(CommonUnitBytes, " B");
-DEFINE_INTERFACE_STRING(CommonUnitKilobytes, " KB");
+DEFINE_INTERFACE_STRING(CommonUnitKilobytes, " kB");
 DEFINE_INTERFACE_STRING(CommonUnitMegabytes, " MB");
 DEFINE_INTERFACE_STRING(CommonUnitGigabytes, " GB");
 DEFINE_INTERFACE_STRING(CommonUnitMilliseconds, " ms");
+DEFINE_INTERFACE_STRING(CommonUnitSeconds, " s");
+DEFINE_INTERFACE_STRING(CommonUnitBits, " bits");
+DEFINE_INTERFACE_STRING(CommonUnitPixels, " px");
+DEFINE_INTERFACE_STRING(CommonUnitDPI, " dpi");
+DEFINE_INTERFACE_STRING(CommonUnitBps, " Bps");
+DEFINE_INTERFACE_STRING(CommonUnitKBps, " kBps");
+DEFINE_INTERFACE_STRING(CommonUnitMBps, " MBps");
+DEFINE_INTERFACE_STRING(CommonUnitHz, " Hz");
+DEFINE_INTERFACE_STRING(CommonUnitKHz, " kHz");
+DEFINE_INTERFACE_STRING(CommonUnitMHz, " MHz");
+
+DEFINE_INTERFACE_STRING(CommonBooleanYes, "Yes");
+DEFINE_INTERFACE_STRING(CommonBooleanNo, "No");
+DEFINE_INTERFACE_STRING(CommonBooleanOn, "On");
+DEFINE_INTERFACE_STRING(CommonBooleanOff, "Off");
 
 // Desktop.
 
@@ -11560,9 +11584,11 @@ void WriteCStringToCallback(FormatCallback callback, void *callbackData, const c
 	}
 }
 
+// @TODO: this implementation is old, update
 void _StringFormat(FormatCallback callback, void *callbackData, const char *format, va_list arguments) {
 	int c;
 	int pad = 0;
+    int decimalPlaces = -1;
 	uint32_t flags = 0;
 
 	char buffer[32];
@@ -11670,14 +11696,21 @@ void _StringFormat(FormatCallback callback, void *callbackData, const char *form
 				} break;
 
 				case 's': {
-					size_t length = va_arg(arguments, size_t);
+					ptrdiff_t length = va_arg(arguments, size_t);
 					char *string = va_arg(arguments, char *);
-					char *position = string;
+                    if (length == -1)
+                    {
+                        WriteCStringToCallback(callback, callbackData, string ?:"[null]");
+                    }
+                    else
+                    {
+                        char *position = string;
 
-					while (position < string + length) {
-						callback(utf8_value(position), callbackData);
-						position = utf8_advance(position);
-					}
+                        while (position < string + length) {
+                            callback(utf8_value(position), callbackData);
+                            position = utf8_advance(position);
+                        }
+                    }
 				} break;
 
 				case 'z': {
@@ -11754,20 +11787,28 @@ void _StringFormat(FormatCallback callback, void *callbackData, const char *form
 					_FormatInteger(callback, callbackData, integer, pad, flags & ES_STRING_FORMAT_SIMPLE);
 
 					// Decimal separator.
-					if (digitCount) {
+					if (digitCount && decimalPlaces) {
 						callback('.', callbackData);
 					}
 
 					// Fractional digits.
 					for (uintptr_t i = 0; i < digitCount; i++) {
+                        if ((int)i == decimalPlaces) break;
 						callback('0' + digits[i], callbackData);
 					}
+
+                    decimalPlaces = -1;
 				} break;
 
 				case '*': {
 					pad = va_arg(arguments, int);
 					goto repeat;
 				} break;
+
+                case '.': {
+                    decimalPlaces = va_arg(arguments, int);
+                    goto repeat;
+                } break;
 
 				case 'f': {
 					flags = va_arg(arguments, uint32_t);
@@ -12343,6 +12384,51 @@ void KernelLog(KLogLevel level, const char *subsystem, const char *event, const 
 	va_end(arguments);
 }
 
+uint8_t HandleTable::ResolveHandle(Handle *outHandle, EsHandle inHandle, KernelObjectType typeMask) {
+	// Special handles.
+	if (inHandle == ES_CURRENT_THREAD && (typeMask & KERNEL_OBJECT_THREAD)) {
+		outHandle->type = KERNEL_OBJECT_THREAD;
+		outHandle->object = GetCurrentThread();
+		outHandle->flags = 0;
+		return RESOLVE_HANDLE_NO_CLOSE;
+	} else if (inHandle == ES_CURRENT_PROCESS && (typeMask & KERNEL_OBJECT_PROCESS)) {
+		outHandle->type = KERNEL_OBJECT_PROCESS;
+		outHandle->object = GetCurrentThread()->process;
+		outHandle->flags = 0;
+		return RESOLVE_HANDLE_NO_CLOSE;
+	} else if (inHandle == ES_INVALID_HANDLE && (typeMask & KERNEL_OBJECT_NONE)) {
+		outHandle->type = KERNEL_OBJECT_NONE;
+		outHandle->object = nullptr;
+		outHandle->flags = 0;
+		return RESOLVE_HANDLE_NO_CLOSE;
+	}
+
+	// Check that the handle is within the correct bounds.
+	if ((!inHandle) || inHandle >= HANDLE_TABLE_L1_ENTRIES * HANDLE_TABLE_L2_ENTRIES) {
+		return RESOLVE_HANDLE_FAILED;
+	}
+
+	KMutexAcquire(&lock);
+	EsDefer(KMutexRelease(&lock));
+
+	HandleTableL2 *l2 = l1r.t[inHandle / HANDLE_TABLE_L2_ENTRIES];
+	if (!l2) return RESOLVE_HANDLE_FAILED;
+
+	Handle *_handle = l2->t + (inHandle % HANDLE_TABLE_L2_ENTRIES);
+
+	if ((_handle->type & typeMask) && (_handle->object)) {
+		// Open a handle to the object so that it can't be destroyed while the system call is still using it.
+		// The handle is closed in the KObject's destructor.
+		if (OpenHandleToObject(_handle->object, _handle->type, _handle->flags)) {
+			*outHandle = *_handle;
+			return RESOLVE_HANDLE_NORMAL;
+		}
+	}
+
+	return RESOLVE_HANDLE_FAILED;
+}
+
+
 #define SYSCALL(_name_) uintptr_t _name_(uintptr_t argument0, uintptr_t argument1, uintptr_t argument2, uintptr_t argument3, Thread* currentThread, Process* currentProcess, MMSpace* currentVMM, uintptr_t *userStackPointer, bool *fatalError)
 
 
@@ -12428,36 +12514,67 @@ uintptr_t Syscall(uintptr_t argument0, uintptr_t argument1, uintptr_t argument2,
 
 void process_exit(Process* process, int32_t status)
 {
+    KMutexAcquire(&process->threadsMutex);
+
+    KernelLog(LOG_INFO, "Scheduler", "terminate process", "Terminating process %d '%z' with status %i...\n", 
+            process->id, process->cExecutableName, status);
+    process->exitStatus = status;
+    process->preventNewThreads = true;
+
+    Thread *currentThread = GetCurrentThread();
+    bool isCurrentProcess = process == currentThread->process;
+    bool foundCurrentThread = false;
+
+    LinkedItem<Thread> *thread = process->threads.firstItem;
+
+    while (thread) {
+        Thread *threadObject = thread->thisItem;
+        thread = thread->nextItem;
+
+        if (threadObject != currentThread) {
+            thread_exit(threadObject);
+        } else if (isCurrentProcess) {
+            foundCurrentThread = true;
+        } else {
+            KernelPanic("Scheduler::ProcessTerminate - Found current thread in the wrong process?!\n");
+        }
+    }
+
+    KMutexRelease(&process->threadsMutex);
+
+    if (!foundCurrentThread && isCurrentProcess) {
+        KernelPanic("Scheduler::ProcessTerminate - Could not find current thread in the current process?!\n");
+    } else if (isCurrentProcess) {
+        // This doesn't return.
+        thread_exit(currentThread);
+    }
 }
 
 SYSCALL(syscall_process_exit)
 {
     // TODO Prevent the termination of the kernel/desktop.
-    //
-    K_NOT_IMPLEMENTED();
+    bool self = false;
 
-	//bool self = false;
+    {
+        Handle process_out;
+        uint8_t status_out = currentProcess->handleTable.ResolveHandle(&process_out, argument0, KERNEL_OBJECT_PROCESS);
+        if (status_out == RESOLVE_HANDLE_FAILED)
+        {
+            *fatalError = ES_FATAL_ERROR_INVALID_HANDLE;
+            return true;
+        }
 
-	//{
-        //Handle process_out;
-        //uint8_t status_out = currentProcess->handleTable.ResolveHandle(&process_out, argument0, KERNEL_OBJECT_PROCESS);
-        //if (status_out == RESOLVE_HANDLE_FAILED)
-        //{
-            //*fatalError = ES_FATAL_ERROR_INVALID_HANDLE;
-            //return true;
-        //}
+        EsDefer(if (status_out == RESOLVE_HANDLE_NORMAL) CloseHandleToObject(process_out.object, process_out.type, process_out.flags));
+        Process* process = (Process*) process_out.object;
 
-        //EsDefer(if (status_out == RESOLVE_HANDLE_NORMAL) CloseHandleToObject(process_out.object, process_out.type, process_out.flags));
-        //Process* process = (Process*) process_out.object;
+        if (process == currentProcess) self = true;
+        else process_exit(process, argument1);
+    }
 
-		//if (process == currentProcess) self = true;
-		//else process_exit(process, argument1);
-	//}
+    if (self) process_exit(currentProcess, argument1);
 
-	//if (self) process_exit(currentProcess, argument1);
-
-    //*fatalError = ES_SUCCESS;
-    //return false;
+    *fatalError = ES_SUCCESS;
+    return false;
 }
 
 void InterruptHandler(InterruptContext *context) {
@@ -12471,6 +12588,11 @@ void InterruptHandler(InterruptContext *context) {
 
 	CPULocalStorage *local = GetLocalStorage();
 	uintptr_t interrupt = context->interruptNumber;
+
+    if (local && local->currentThread)
+    {
+        local->currentThread->lastInterruptTimeStamp = ProcessorReadTimeStamp();
+    }
 
 	if (local && local->spinlockCount && context->cr8 != 0xE) {
 		KernelPanic("InterruptHandler - Local spinlockCount is %d but interrupts were enabled (%x/%x).\n", local->spinlockCount, local, context);
@@ -12501,6 +12623,7 @@ void InterruptHandler(InterruptContext *context) {
 		}
 
 		bool supervisor = (context->cs & 3) == 0;
+        Thread* currentThread = GetCurrentThread();
 
 		if (!supervisor) {
 			// EsPrint("User interrupt: %x/%x/%x\n", interrupt, context->cr2, context->errorCode);
@@ -12509,14 +12632,12 @@ void InterruptHandler(InterruptContext *context) {
 				KernelPanic("InterruptHandler - Unexpected value of CS 0x%X\n", context->cs);
 			}
 
-			if (GetCurrentThread()->isKernelThread) {
+			if (currentThread->isKernelThread) {
 				KernelPanic("InterruptHandler - Kernel thread executing user code. (1)\n");
 			}
 
 			// User-code exceptions are *basically* the same thing as system calls.
-			Thread *currentThread = GetCurrentThread();
-			ThreadTerminatableState previousTerminatableState;
-			previousTerminatableState = currentThread->terminatableState;
+			ThreadTerminatableState previousTerminatableState = currentThread->terminatableState;
 			currentThread->terminatableState = THREAD_IN_SYSCALL;
 
 			if (local && local->spinlockCount) {
@@ -12525,6 +12646,7 @@ void InterruptHandler(InterruptContext *context) {
 
 			// Re-enable interrupts during exception handling.
 			ProcessorEnableInterrupts();
+            local = nullptr; // The CPU we're executing on could change
 
 			if (interrupt == 14) {
 				bool success = MMArchHandlePageFault(context->cr2, (context->errorCode & 2) ? MM_HANDLE_PAGE_FAULT_WRITE : 0);
@@ -12540,10 +12662,10 @@ void InterruptHandler(InterruptContext *context) {
 
 			// TODO Usermode exceptions and debugging.
 			KernelLog(LOG_ERROR, "Arch", "unhandled userland exception", 
-					"InterruptHandler - Exception (%z) in userland process (%z).\nRIP = %x (CPU %d)\nRSP = %x\nX86_64 error codes: [err] %x, [cr2] %x\n", 
+					"InterruptHandler - Exception (%z) in userland process (%z).\nRIP = %x\nRSP = %x\nX86_64 error codes: [err] %x, [cr2] %x\n", 
 					exceptionInformation[interrupt], 
 					currentThread->process->cExecutableName,
-					context->rip, local->processorID, context->rsp, context->errorCode, context->cr2);
+					context->rip, context->rsp, context->errorCode, context->cr2);
 
 			EsPrint("Attempting to make a stack trace...\n");
 
@@ -12597,19 +12719,21 @@ void InterruptHandler(InterruptContext *context) {
 					goto fault;
 				}
 
-				if ((context->flags & 0x200) && context->cr8 != 0xE) {
-					ProcessorEnableInterrupts();
-				}
 
 				if (local && local->spinlockCount && ((context->cr2 >= 0xFFFF900000000000 && context->cr2 < 0xFFFFF00000000000) 
 							|| context->cr2 < 0x8000000000000000)) {
 					KernelPanic("HandlePageFault - Page fault occurred with spinlocks active at %x (S = %x, B = %x, LG = %x, CR2 = %x, local = %x).\n", 
 							context->rip, context->rsp, context->rbp, local->currentThread->lastKnownExecutionAddress, context->cr2, local);
 				}
+
+				if ((context->flags & 0x200) && context->cr8 != 0xE) {
+					ProcessorEnableInterrupts();
+                    local = nullptr; // The CPU we're executing on could change
+				}
 				
 				if (!MMArchHandlePageFault(context->cr2, MM_HANDLE_PAGE_FAULT_FOR_SUPERVISOR
 							| ((context->errorCode & 2) ? MM_HANDLE_PAGE_FAULT_WRITE : 0))) {
-					if (local->currentThread->inSafeCopy && context->cr2 < 0x8000000000000000) {
+					if (currentThread->inSafeCopy && context->cr2 < 0x8000000000000000) {
 						context->rip = context->r8; // See definition of MMArchSafeCopy.
 					} else {
 						goto fault;
@@ -12619,11 +12743,11 @@ void InterruptHandler(InterruptContext *context) {
 				ProcessorDisableInterrupts();
 			} else {
 				fault:
-				KernelPanic("Unresolvable processor exception encountered in supervisor mode.\n%z\nRIP = %x (CPU %d)\nX86_64 error codes: [err] %x, [cr2] %x\n"
+				KernelPanic("Unresolvable processor exception encountered in supervisor mode.\n%z\nRIP = %x\nX86_64 error codes: [err] %x, [cr2] %x\n"
 						"Stack: [rsp] %x, [rbp] %x\nRegisters: [rax] %x, [rbx] %x, [rsi] %x, [rdi] %x.\nThread ID = %d\n", 
-						exceptionInformation[interrupt], context->rip, local ? local->processorID : -1, context->errorCode, context->cr2, 
+						exceptionInformation[interrupt], context->rip, context->errorCode, context->cr2, 
 						context->rsp, context->rbp, context->rax, context->rbx, context->rsi, context->rdi, 
-						local && local->currentThread ? local->currentThread->id : -1);
+						currentThread ? currentThread->id : -1);
 			}
 		}
 	} else if (interrupt == 0xFF) {
@@ -14729,6 +14853,7 @@ struct EsProcessStartupInformation {
 	uintptr_t tlsImageBytes;
 	uintptr_t tlsBytes; // All bytes after the image are to be zeroed.
 	uintptr_t timeStampTicksPerMs;
+    EsHandle globalDataRegion;
 	EsProcessCreateData data;
 };
 
