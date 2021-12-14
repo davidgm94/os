@@ -171,13 +171,18 @@ fn build_kernel(b: *Builder) *LibExeObjStep
 
 fn build_desktop(b: *Builder) *LibExeObjStep
 {
-    const desktop = b.addExecutable("desktop.elf", null);
-    desktop.setBuildMode(b.standardReleaseOptions());
-    desktop.addCSourceFile("src/desktop.cpp", c_flags);
-    desktop.setTarget(cross_target);
+    const build_cpp = false;
+    const desktop_exe_name = "desktop.elf";
+    const desktop = if (build_cpp) b.addExecutable(desktop_exe_name, null) else b.addExecutable(desktop_exe_name, "src/desktop.zig");
     desktop.setOutputDir("zig-cache");
+    desktop.setBuildMode(b.standardReleaseOptions());
+    desktop.setTarget(cross_target);
 
-    nasm_compile_elf_object(b, desktop, "src/desktop.S", "zig-cache/desktop_asm.o");
+    if (build_cpp)
+    {
+        desktop.addCSourceFile("src/desktop.cpp", c_flags);
+        nasm_compile_elf_object(b, desktop, "src/desktop.S", "zig-cache/desktop_asm.o");
+    }
 
     return desktop;
 }
