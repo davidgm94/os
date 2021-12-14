@@ -177,6 +177,8 @@ fn build_desktop(b: *Builder) *LibExeObjStep
     desktop.setTarget(cross_target);
     desktop.setOutputDir("zig-cache");
 
+    nasm_compile_elf_object(b, desktop, "src/desktop.S", "zig-cache/desktop_asm.o");
+
     return desktop;
 }
 
