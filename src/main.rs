@@ -7,6 +7,7 @@
 #![no_main]
 
 #![feature(asm)]
+#![feature(asm_sym)]
 #![feature(core_intrinsics)]
 #![feature(asm_const)]
 #![feature(global_asm)]
@@ -451,9 +452,6 @@ pub static mut kernel_size: Volatile<u32> = Volatile::new(0);
 #[link_section = ".data"]
 pub static mut bootloader_ID: Volatile<u32> = Volatile::new(0);
 
-#[no_mangle]
-#[link_section = ".data"]
-pub static mut installation_ID: Volatile<u128> = Volatile::new(0);
 
 pub struct PhysicalMemory<'a>
 {
@@ -474,6 +472,7 @@ pub static mut physical_memory: PhysicalMemory = PhysicalMemory
     region_index: 0,
     highest: 0,
 };
+
 
 global_asm!(
     ".section .text",
@@ -660,7 +659,7 @@ global_asm!(
 
 pub mod Arch
 {
-    use {size_of, physical_memory, stack_size};
+    use {size_of, physical_memory, stack, stack_size, Stack};
     use Memory;
 
     pub const core_memory_regions_start: u64 = 0xFFFF8001F0000000;
@@ -678,277 +677,323 @@ pub mod Arch
 
     pub const page_bit_count: u8 = 12;
 
+    pub static mut bootloader_ID: u64 = 0;
+    pub static mut bootloader_information_offset: u64 = 0;
+    pub static mut kernel_size: u32 = 0;
+    pub static mut installation_ID: [u64;2] = [0;2];
+
     global_asm!(
-        ".extern kernel_size",
-        ".extern bootloader_ID",
-        ".extern stack",
-        ".extern installation_ID",
-        ".extern gdtr",
-        ".extern bootloader_information_offset",
-
-        ".extern PIC_disable",
-        ".extern memory_region_setup",
-
         ".section .text",
         ".global _start",
-
+        ".extern start",
+        ".extern stack",
         "_start:",
-        "mov [kernel_size], edx",
-        "xor rdx, rdx",
+            "mov rax, 0x63",
+            "mov fs, ax",
+            "mov gs, ax",
+            "mov rsp, OFFSET stack + {stack_size}",
+            "jmp start",
+            stack_size = const stack_size,
+        );
 
-        "mov rax, 0x63",
-        "mov fs, ax",
-        "mov gs, ax",
+    #[no_mangle]
+    pub extern "C" fn start(_bootloader_information_offset: u64, _bootloader_ID: u64, _kernel_size: u32)
+    {
+        unsafe
+        {
+            kernel_size = _kernel_size;
 
-        // Save bootloader ID
-        "mov rax, OFFSET bootloader_ID",
-        "mov [rax], rsi",
+            bootloader_ID = _bootloader_ID;
 
-        // The MBR bootloader doesn't know the address of the RSDP
-        "cmp rdi, 0",
-        "jne .standard_acpi",
-        "mov [0x7fe8], rdi",
-        ".standard_acpi:",
+            let standard_acpi = _bootloader_information_offset != 0;
+            if !standard_acpi
+            {
+                (0x7fe8 as *mut u64).write(_bootloader_information_offset);
+            }
 
-        // Save the bootloader information offset
-        "mov rax, OFFSET bootloader_information_offset",
-        "mov [rax], rdi",
+            bootloader_information_offset = _bootloader_information_offset;
 
-        // Install a stack
-        "mov rsp, OFFSET stack + {stack_size}",
+            let installation_id_offset = bootloader_information_offset + 0x7ff0;
+            installation_ID[0] = *(installation_id_offset as *mut u64);
+            installation_ID[1] = *(installation_id_offset as *mut u64);
 
-        // Load the installation ID
-        "mov rbx, OFFSET installation_ID",
-        "mov rax, [rdi + 0x7ff0]",
-        "mov [rbx], rax",
-        "mov rax, [rdi + 0x7ff8]",
-        "mov [rbx + 8], rax",
+            *(0xFFFFFF7FBFDFE000 as *mut u64) = 0;
+            // flush
+            aksjdjaks
+        }
+    }
 
-        // Unmap the identity paging the bootloader used
-        "mov rax, 0xFFFFFF7FBFDFE000",
-        "mov qword ptr [rax], 0",
-        "mov rax, cr3",
-        "mov cr3, rax",
+    //global_asm!(
+        //".extern kernel_size",
+        //".extern bootloader_ID",
+        //".extern stack",
+        //".extern installation_ID",
+        //".extern gdtr",
+        //".extern bootloader_information_offset",
 
-        // @TODO: serial
-        "call PIC_disable",
-        "call memory_region_setup",
+        //".extern PIC_disable",
+        //".extern memory_region_setup",
 
-        // Install interrupt handlers
-        ".macro INSTALL_INTERRUPT_HANDLER i",
-        "mov rbx, (\\i * 16) + OFFSET idt_data",
-        "mov rdx, OFFSET interrupt_handler\\i",
-        "call install_interrupt_handler",
-        ".endm",
+        //".section .text",
+        //".global _start",
 
-        ".altmacro",
-        ".set i, 0",
-        ".rept 256",
-        "INSTALL_INTERRUPT_HANDLER %i",
-        ".set i, i + 1",
-        ".endr",
+        //"_start:",
+        //"mov [kernel_size], edx",
+        //"xor rdx, rdx",
 
-        // Save the location of the bootstrap GDT
-        "mov rcx, OFFSET gdtr",
-        "sgdt [rcx]",
+        //"mov rax, 0x63",
+        //"mov fs, ax",
+        //"mov gs, ax",
 
-        // First stage of CPU initialization
-        "call CPU_setup1",
+        //// Save bootloader ID
+        //"mov rax, OFFSET bootloader_ID",
+        //"mov [rax], rsi",
 
-        "and rsp, ~0xf",
-        "call kernel_initialize",
+        //// The MBR bootloader doesn't know the address of the RSDP
+        //"cmp rdi, 0",
+        //"jne .standard_acpi",
+        //"mov [0x7fe8], rdi",
+        //".standard_acpi:",
 
-        "CPU_ready:",
-        "mov rdi, 1",
-        "call next_timer",
-        "jmp CPU_idle",
+        //// Save the bootloader information offset
+        //"mov rax, OFFSET bootloader_information_offset",
+        //"mov [rax], rdi",
 
-        "CPU_setup1:",
+        //// Install a stack
+        //"mov rsp, OFFSET stack + {stack_size}",
 
-        ".enable_cpu_features:",
-        // Enable no-execute support, if available"
-        "mov	eax,0x80000001",
-        "cpuid",
-        "and	edx,1 << 20",
-        "shr	edx,20",
-        "mov	rax, OFFSET paging_NXE_support",
-        "and	[rax],edx",
-        "cmp	edx,0",
-        "je	.no_paging_nxe_support",
-        "mov	ecx,0xC0000080",
-        "rdmsr",
-        "or	eax,1 << 11",
-        "wrmsr",
-        ".no_paging_nxe_support:",
+        //// Load the installation ID
+        //"mov rbx, OFFSET installation_ID",
+        //"mov rax, [rdi + 0x7ff0]",
+        //"mov [rbx], rax",
+        //"mov rax, [rdi + 0x7ff8]",
+        //"mov [rbx + 8], rax",
 
-        // x87 FPU
-        "fninit",
-        "mov	rax,.cw",
-        "fldcw	[rax]",
-        "jmp	.cwa",
-        ".cw:", ".short 0x037A",
-        ".cwa:",
-        // Enable SMEP support, if available"
-        // This prevents the kernel from executing userland pages",
-        // TODO Test this: neither Bochs or Qemu seem to support it?",
-        "xor	eax,eax",
-        "cpuid",
-        "cmp	eax,7",
-        "jb	.no_smep_support",
-        "mov	eax,7",
-        "xor	ecx,ecx",
-        "cpuid",
-        "and ebx,1 << 7",
-        "shr	ebx,7",
-        "mov	rax, OFFSET paging_SMEP_support",
-        "and	[rax],ebx",
-        "cmp	ebx,0",
-        "je	.no_smep_support",
-        "mov	word ptr [rax],2",
-        "mov	rax,cr4",
-        "or	rax,1 << 20",
-        "mov	cr4,rax",
-        ".no_smep_support:",
+        //// Unmap the identity paging the bootloader used
+        //"mov rax, 0xFFFFFF7FBFDFE000",
+        //"mov qword ptr [rax], 0",
+        //"mov rax, cr3",
+        //"mov cr3, rax",
 
-        // Enable PCID support, if available
-        "mov	eax,1",
-        "xor	ecx,ecx",
-        "cpuid",
-        "and	ecx,1 << 17",
-        "shr	ecx,17",
-        "mov	rax, OFFSET paging_PCID_support",
-        "and	[rax],ecx",
-        "cmp	ecx,0",
-        "je	.no_pcid_support",
-        "mov	rax,cr4",
-        "or	rax,1 << 17",
-        "mov	cr4,rax",
-        ".no_pcid_support:",
+        //// @TODO: serial
+        //"call PIC_disable",
+        //"call memory_region_setup",
 
-        // Enable global pages
-        "mov	rax,cr4",
-        "or	rax,1 << 7",
-        "mov	cr4,rax",
+        //// Install interrupt handlers
+        //".macro INSTALL_INTERRUPT_HANDLER i",
+        //"mov rbx, (\\i * 16) + OFFSET idt_data",
+        //"mov rdx, OFFSET interrupt_handler\\i",
+        //"call install_interrupt_handler",
+        //".endm",
 
-        // Enable TCE support, if available
-        "mov	eax,0x80000001",
-        "xor	ecx,ecx",
-        "cpuid",
-        "and	ecx,1 << 17",
-        "shr	ecx,17",
-        "mov	rax, OFFSET paging_TCE_support",
-        "and	[rax],ecx",
-        "cmp	ecx,0",
-        "je	.no_tce_support",
-        "mov	ecx, 0xC0000080",
-        "rdmsr",
-        "or	eax,1 << 15",
-        "wrmsr",
-        ".no_tce_support:",
+        //".altmacro",
+        //".set i, 0",
+        //".rept 256",
+        //"INSTALL_INTERRUPT_HANDLER %i",
+        //".set i, i + 1",
+        //".endr",
 
-        // Enable write protect, so copy-on-write works in the kernel, and MMArchSafeCopy will page fault in read-only regions.
-        "mov	rax,cr0",
-        "or	rax,1 << 16",
-        "mov	cr0,rax",
+        //// Save the location of the bootstrap GDT
+        //"mov rcx, OFFSET gdtr",
+        //"sgdt [rcx]",
 
-        // Enable MMX, SSE and SSE2",
-        // These features are all guaranteed to be present on a x86_64 CPU",
-        "mov	rax,cr0",
-        "mov	rbx,cr4",
-        "and	rax,~4",
-        "or	rax,2",
-        "or	rbx,512 + 1024",
-        "mov	cr0,rax",
-        "mov	cr4,rbx",
+        //// First stage of CPU initialization
+        //"call CPU_setup1",
 
-        // Detect SSE3 and SSSE3, if available.",
-        "mov	eax,1",
-        "cpuid",
-        "test	ecx,1 << 0",
-        "jnz	.has_sse3",
-        "mov	rax, OFFSET simd_SSE3_support",
-        "and	byte ptr [rax],0",
-        ".has_sse3:",
-        "test	ecx,1 << 9",
-        "jnz	.has_ssse3",
-        "mov	rax, OFFSET simd_SSSE3_support",
-        "and	byte ptr [rax],0",
-        ".has_ssse3:",
+        //"and rsp, ~0xf",
+        //"call kernel_initialize",
 
-        // Enable system-call extensions (SYSCALL and SYSRET).",
-        "mov	ecx,0xC0000080",
-        "rdmsr",
-        "or	eax,1",
-        "wrmsr",
-        "add	ecx,1",
-        "rdmsr",
-        "mov	edx,0x005B0048",
-        "wrmsr",
-        "add	ecx,1",
-        "mov	rdx, OFFSET syscall_entry",
-        "mov	rax,rdx",
-        "shr	rdx,32",
-        "wrmsr",
-        "add	ecx,2",
-        "rdmsr",
-        "mov	eax,(1 << 10) | (1 << 9)", // Clear direction and interrupt flag when we enter ring 0.",
-        "wrmsr",
+        //"CPU_ready:",
+        //"mov rdi, 1",
+        //"call next_timer",
+        //"jmp CPU_idle",
 
-        // Assign PAT2 to WC.",
-        "mov	ecx,0x277",
-        "xor	rax,rax",
-        "xor	rdx,rdx",
-        "rdmsr",
-        "and	eax,0xFFF8FFFF",
-        "or	eax,0x00010000",
-        "wrmsr",
+        //"CPU_setup1:",
 
-        ".setup_cpu_local_storage:",
-        "mov	ecx,0xC0000101",
-        "mov	rax, OFFSET cpu_local_storage",
-        "mov	rdx, OFFSET cpu_local_storage",
-        "shr	rdx,32",
-        "mov	rdi, OFFSET cpu_local_storage_index",
-        "add	rax,[rdi]",
-        "add	qword ptr [rdi],32", // Space for 4 8-byte values at gs:0 - gs:31",
-        "wrmsr",
+        //".enable_cpu_features:",
+        //// Enable no-execute support, if available"
+        //"mov	eax,0x80000001",
+        //"cpuid",
+        //"and	edx,1 << 20",
+        //"shr	edx,20",
+        //"mov	rax, OFFSET paging_NXE_support",
+        //"and	[rax],edx",
+        //"cmp	edx,0",
+        //"je	.no_paging_nxe_support",
+        //"mov	ecx,0xC0000080",
+        //"rdmsr",
+        //"or	eax,1 << 11",
+        //"wrmsr",
+        //".no_paging_nxe_support:",
 
-        ".load_idtr:",
-        // Load the IDTR",
-        "mov	rax,idt",
-        "lidt	[rax]",
-        "sti",
+        //// x87 FPU
+        //"fninit",
+        //"mov	rax,.cw",
+        //"fldcw	[rax]",
+        //"jmp	.cwa",
+        //".cw:", ".short 0x037A",
+        //".cwa:",
+        //// Enable SMEP support, if available"
+        //// This prevents the kernel from executing userland pages",
+        //// TODO Test this: neither Bochs or Qemu seem to support it?",
+        //"xor	eax,eax",
+        //"cpuid",
+        //"cmp	eax,7",
+        //"jb	.no_smep_support",
+        //"mov	eax,7",
+        //"xor	ecx,ecx",
+        //"cpuid",
+        //"and ebx,1 << 7",
+        //"shr	ebx,7",
+        //"mov	rax, OFFSET paging_SMEP_support",
+        //"and	[rax],ebx",
+        //"cmp	ebx,0",
+        //"je	.no_smep_support",
+        //"mov	word ptr [rax],2",
+        //"mov	rax,cr4",
+        //"or	rax,1 << 20",
+        //"mov	cr4,rax",
+        //".no_smep_support:",
 
-        ".enable_apic:",
-        // Enable the APIC!",
-        // Since we're on AMD64, we know that the APIC will be present.",
-        "mov	ecx,0x1B",
-        "rdmsr",
-        "or	eax,0x800",
-        "wrmsr",
-        "and	eax,~0xFFF",
-        "mov	edi,eax",
+        //// Enable PCID support, if available
+        //"mov	eax,1",
+        //"xor	ecx,ecx",
+        //"cpuid",
+        //"and	ecx,1 << 17",
+        //"shr	ecx,17",
+        //"mov	rax, OFFSET paging_PCID_support",
+        //"and	[rax],ecx",
+        //"cmp	ecx,0",
+        //"je	.no_pcid_support",
+        //"mov	rax,cr4",
+        //"or	rax,1 << 17",
+        //"mov	cr4,rax",
+        //".no_pcid_support:",
 
-        // Set the spurious interrupt vector to 0xFF",
-        "mov	rax,0xFFFFFE00000000F0", // LOW_MEMORY_MAP_START + 0xF0",
-        "add	rax,rdi",
-        "mov	ebx,[rax]",
-        "or	ebx,0x1FF",
-        "mov	[rax],ebx",
+        //// Enable global pages
+        //"mov	rax,cr4",
+        //"or	rax,1 << 7",
+        //"mov	cr4,rax",
 
-        // Use the flat processor addressing model",
-        "mov	rax,0xFFFFFE00000000E0", // LOW_MEMORY_MAP_START + 0xE0",
-        "add	rax,rdi",
-        "mov	dword ptr [rax],0xFFFFFFFF",
+        //// Enable TCE support, if available
+        //"mov	eax,0x80000001",
+        //"xor	ecx,ecx",
+        //"cpuid",
+        //"and	ecx,1 << 17",
+        //"shr	ecx,17",
+        //"mov	rax, OFFSET paging_TCE_support",
+        //"and	[rax],ecx",
+        //"cmp	ecx,0",
+        //"je	.no_tce_support",
+        //"mov	ecx, 0xC0000080",
+        //"rdmsr",
+        //"or	eax,1 << 15",
+        //"wrmsr",
+        //".no_tce_support:",
 
-        // Make sure that no external interrupts are masked",
-        "xor	rax,rax",
-        "mov	cr8,rax",
+        //// Enable write protect, so copy-on-write works in the kernel, and MMArchSafeCopy will page fault in read-only regions.
+        //"mov	rax,cr0",
+        //"or	rax,1 << 16",
+        //"mov	cr0,rax",
 
-        "ret",
+        //// Enable MMX, SSE and SSE2",
+        //// These features are all guaranteed to be present on a x86_64 CPU",
+        //"mov	rax,cr0",
+        //"mov	rbx,cr4",
+        //"and	rax,~4",
+        //"or	rax,2",
+        //"or	rbx,512 + 1024",
+        //"mov	cr0,rax",
+        //"mov	cr4,rbx",
 
-        stack_size = const stack_size
-    );
+        //// Detect SSE3 and SSSE3, if available.",
+        //"mov	eax,1",
+        //"cpuid",
+        //"test	ecx,1 << 0",
+        //"jnz	.has_sse3",
+        //"mov	rax, OFFSET simd_SSE3_support",
+        //"and	byte ptr [rax],0",
+        //".has_sse3:",
+        //"test	ecx,1 << 9",
+        //"jnz	.has_ssse3",
+        //"mov	rax, OFFSET simd_SSSE3_support",
+        //"and	byte ptr [rax],0",
+        //".has_ssse3:",
+
+        //// Enable system-call extensions (SYSCALL and SYSRET).",
+        //"mov	ecx,0xC0000080",
+        //"rdmsr",
+        //"or	eax,1",
+        //"wrmsr",
+        //"add	ecx,1",
+        //"rdmsr",
+        //"mov	edx,0x005B0048",
+        //"wrmsr",
+        //"add	ecx,1",
+        //"mov	rdx, OFFSET syscall_entry",
+        //"mov	rax,rdx",
+        //"shr	rdx,32",
+        //"wrmsr",
+        //"add	ecx,2",
+        //"rdmsr",
+        //"mov	eax,(1 << 10) | (1 << 9)", // Clear direction and interrupt flag when we enter ring 0.",
+        //"wrmsr",
+
+        //// Assign PAT2 to WC.",
+        //"mov	ecx,0x277",
+        //"xor	rax,rax",
+        //"xor	rdx,rdx",
+        //"rdmsr",
+        //"and	eax,0xFFF8FFFF",
+        //"or	eax,0x00010000",
+        //"wrmsr",
+
+        //".setup_cpu_local_storage:",
+        //"mov	ecx,0xC0000101",
+        //"mov	rax, OFFSET cpu_local_storage",
+        //"mov	rdx, OFFSET cpu_local_storage",
+        //"shr	rdx,32",
+        //"mov	rdi, OFFSET cpu_local_storage_index",
+        //"add	rax,[rdi]",
+        //"add	qword ptr [rdi],32", // Space for 4 8-byte values at gs:0 - gs:31",
+        //"wrmsr",
+
+        //".load_idtr:",
+        //// Load the IDTR",
+        //"mov	rax,idt",
+        //"lidt	[rax]",
+        //"sti",
+
+        //".enable_apic:",
+        //// Enable the APIC!",
+        //// Since we're on AMD64, we know that the APIC will be present.",
+        //"mov	ecx,0x1B",
+        //"rdmsr",
+        //"or	eax,0x800",
+        //"wrmsr",
+        //"and	eax,~0xFFF",
+        //"mov	edi,eax",
+
+        //// Set the spurious interrupt vector to 0xFF",
+        //"mov	rax,0xFFFFFE00000000F0", // LOW_MEMORY_MAP_START + 0xF0",
+        //"add	rax,rdi",
+        //"mov	ebx,[rax]",
+        //"or	ebx,0x1FF",
+        //"mov	[rax],ebx",
+
+        //// Use the flat processor addressing model",
+        //"mov	rax,0xFFFFFE00000000E0", // LOW_MEMORY_MAP_START + 0xE0",
+        //"add	rax,rdi",
+        //"mov	dword ptr [rax],0xFFFFFFFF",
+
+        //// Make sure that no external interrupts are masked",
+        //"xor	rax,rax",
+        //"mov	cr8,rax",
+
+        //"ret",
+
+        //stack_size = const stack_size
+    //);
 
     extern "C"
     {
