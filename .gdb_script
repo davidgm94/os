@@ -1,4 +1,5 @@
 set disassembly-flavor intel
+cd /home/david/git/os
 symbol-file target/rust_target/debug/renaissance-os
 b _start
 b kernel_initialize
