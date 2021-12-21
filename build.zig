@@ -7,6 +7,7 @@ const FileSource = std.build.FileSource;
 const Step = std.build.Step;
 const RunStep = std.build.RunStep;
 const LibExeObjStep = std.build.LibExeObjStep;
+const InstallFileStep = std.build.InstallFileStep;
 
 const ArrayList = std.ArrayList;
 const print = std.debug.print;
@@ -19,7 +20,9 @@ const memory_size: u64 = disk_size;
 const build_rust = true;
 const cpp_kernel_elf = "cpp_kernel.elf";
 const rust_kernel_elf = "rust_kernel.elf";
-const rust_kernel_lib_path = "/home/david/git/os/target/rust_target/debug/librenaissance_os.a";
+const rust_out_path = "target/rust_target/debug/";
+const rust_kernel_lib_path = rust_out_path ++ "librenaissance_os.a";
+const rust_kernel_bin_path = rust_out_path ++ "renaissance-os";
 
 const build_cache_dir = "zig-cache/";
 const build_output_dir = "zig-out/bin/";
@@ -38,7 +41,7 @@ const bios_stage_2_output_file = "bios_stage_2.bin";
 const bios_stage_2_output_path = build_cache_dir ++ bios_stage_2_output_file;
 
 const kernel_linker_script_path = "src/linker.ld";
-const rust_kernel_elf_path = build_cache_dir ++ rust_kernel_elf;
+const rust_kernel_elf_path = "zig-out/" ++ rust_kernel_elf;
 const cpp_kernel_elf_path = build_cache_dir ++ cpp_kernel_elf;
 
 const disk_image_output_file = "disk.img";
@@ -71,16 +74,20 @@ pub fn build(b: *std.build.Builder) !void
     const bios_stage_2 = nasm_compile_binary(b, bios_stage_2_source_file, bios_stage_2_output_path);
     b.default_step.dependOn(&bios_stage_2.step);
 
-    const rust_kernel = build_rust_kernel(b);
-    b.default_step.dependOn(&rust_kernel.step);
     const cpp_kernel = build_cpp_kernel(b);
     b.default_step.dependOn(&cpp_kernel.step);
 
     const desktop = build_desktop(b);
     b.default_step.dependOn(&desktop.step);
 
+    const cargo_build = build_rust_kernel(b);
+    b.default_step.dependOn(&cargo_build.step);
+
+    const installation = b.addInstallFile(FileSource.relative(rust_kernel_bin_path), rust_kernel_elf);
+    installation.step.dependOn(b.default_step);
+
     var disk_image = try DiskImage.create(b);
-    disk_image.step.dependOn(b.default_step);
+    disk_image.step.dependOn(&installation.step);
 
     const install_disk_image = b.addInstallBinFile(FileSource.relative(disk_image_output_path), disk_image_output_file);
     install_disk_image.step.dependOn(&disk_image.step);
@@ -184,16 +191,11 @@ fn build_cpp_kernel(b: *Builder) *LibExeObjStep
     return kernel;
 }
 
-fn build_rust_kernel(b: *Builder) *LibExeObjStep
+fn build_rust_kernel(b: *Builder) *RunStep
 {
-    const kernel = build_kernel_common(b, rust_kernel_elf);
-    //nasm_compile_elf_object(b, kernel, "src/x86_64_new.S", "zig-cache/kernel_x86_new.o");
-
     const cargo_build = b.addSystemCommand(&[_][]const u8 { "cargo", "build" });
-    kernel.step.dependOn(&cargo_build.step);
-    kernel.addObjectFile(rust_kernel_lib_path);
 
-    return kernel;
+    return cargo_build;
 }
 
 fn build_desktop(b: *Builder) *LibExeObjStep

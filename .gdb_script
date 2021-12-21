@@ -1,6 +1,6 @@
 set disassembly-flavor intel
 cd /home/david/git/os
-symbol-file zig-cache/rust_kernel.elf
+symbol-file zig-out/rust_kernel.elf
 
 b _start
 b kernel_initialize

@@ -21,7 +21,6 @@
     "stack-probes": { "kind": "none" },
     "singlethread": false,
     "code-model": "kernel",
-    "split-debuginfo": "packed",
     "eh-frame-header": false,
     "requires-uwtable": false,
     "function-sections": false,
