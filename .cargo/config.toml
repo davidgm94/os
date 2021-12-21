@@ -1,11 +1,11 @@
 [unstable]
 build-std-features = ["compiler-builtins-mem"]
 build-std = ["core", "compiler_builtins"]
-[profile.dev]
-panic = "abort"
-[profile.release]
-panic = "abort"
 [build]
 target = "rust_target.json"
+#[profile.dev]
+#panic = "abort"
+#[profile.release]
+#panic = "abort"
 [rust]
 channel = "nightly"

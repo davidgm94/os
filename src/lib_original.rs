@@ -371,9 +371,6 @@ pub mod Memory
     }
 }
 
-
-
-
 pub mod Arch
 {
     use kernel;
@@ -398,106 +395,106 @@ pub mod Arch
     pub const page_size: u16 = 0x1000;
     pub const page_bit_count: u8 = 12;
 
-    pub const stack_size: usize = 0x4000;
-    #[repr(align(0x10))]
-    pub struct Stack
-    {
-        memory: [u8; stack_size],
-    }
-    #[no_mangle]
-    #[link_section = ".bss"]
-    pub static mut stack: Stack = Stack { memory: [0; stack_size] };
+    //pub const stack_size: usize = 0x4000;
+    //#[repr(align(0x10))]
+    //pub struct Stack
+    //{
+        //memory: [u8; stack_size],
+    //}
+    ////#[no_mangle]
+    ////#[link_section = ".bss"]
+    ////pub static mut stack: Stack = Stack { memory: [0; stack_size] };
 
-    pub const idt_size: u16 = 0x1000;
-    pub const idt_entry_count: usize = 0x1000 / size_of::<IDTEntry>();
+    //pub const idt_size: u16 = 0x1000;
+    //pub const idt_entry_count: usize = 0x1000 / size_of::<IDTEntry>();
 
-    #[derive(Clone, Copy)]
-    #[repr(C, align(0x10))]
-    pub struct IDTEntry
-    {
-        foo1: u16,
-        foo2: u16,
-        foo3: u16,
-        foo4: u16,
-        handler: u64,
-    }
+    //#[derive(Clone, Copy)]
+    //#[repr(C, align(0x10))]
+    //pub struct IDTEntry
+    //{
+        //foo1: u16,
+        //foo2: u16,
+        //foo3: u16,
+        //foo4: u16,
+        //handler: u64,
+    //}
 
-    impl const Default for IDTEntry
-    {
-        fn default() -> Self
-        {
-            Self
-            {
-                foo1: 0,
-                foo2: 0,
-                foo3: 0,
-                foo4: 0,
-                handler: 0,
-            }
-        }
-    }
+    //impl const Default for IDTEntry
+    //{
+        //fn default() -> Self
+        //{
+            //Self
+            //{
+                //foo1: 0,
+                //foo2: 0,
+                //foo3: 0,
+                //foo4: 0,
+                //handler: 0,
+            //}
+        //}
+    //}
 
-    impl IDTEntry
-    {
-        const fn new(handler: InterruptHandlerFn) -> Self
-        {
-            let handler_raw_address = unsafe { transmute::<InterruptHandlerFn, u64>(handler) };
-            let foo4 = handler_raw_address >> 16;
-            let handler_address = foo4 >> 16;
+    //impl IDTEntry
+    //{
+        //const fn new(handler: InterruptHandlerFn) -> Self
+        //{
+            //let handler_raw_address = unsafe { transmute::<InterruptHandlerFn, u64>(handler) };
+            //let foo4 = handler_raw_address >> 16;
+            //let handler_address = foo4 >> 16;
 
-            Self
-            {
-                foo1: handler_raw_address as u16,
-                foo2: 0x48,
-                foo3: 0x8e00,
-                foo4: foo4 as u16,
-                handler: handler_address,
-            }
-        }
-    }
+            //Self
+            //{
+                //foo1: handler_raw_address as u16,
+                //foo2: 0x48,
+                //foo3: 0x8e00,
+                //foo4: foo4 as u16,
+                //handler: handler_address,
+            //}
+        //}
+    //}
 
-    #[repr(align(0x10))]
-    pub struct IDT
-    {
-        entries: [IDTEntry; idt_entry_count],
-    }
+    //#[repr(align(0x10))]
+    //pub struct IDT
+    //{
+        //entries: [IDTEntry; idt_entry_count],
+    //}
 
-    impl IDT
-    {
-        #[inline(always)]
-        const fn register_new<const interrupt_number: u64, const error_code: bool>(&mut self)
-        {
-            let handler: InterruptHandlerFn =
-                if error_code { InterruptHandler::<interrupt_number>::interrupt_handler_prologue_error_code }
-                else { InterruptHandler::<interrupt_number>::interrupt_handler_prologue };
-            self.entries[interrupt_number as usize] = IDTEntry::new(handler);
-        }
-    }
+    //impl IDT
+    //{
+        //#[inline(always)]
+        //const fn register_new<const interrupt_number: u64, const error_code: bool>(&mut self)
+        //{
+            //let handler: InterruptHandlerFn =
+                //if error_code { InterruptHandler::<interrupt_number>::interrupt_handler_prologue_error_code }
+                //else { InterruptHandler::<interrupt_number>::interrupt_handler_prologue };
+            //self.entries[interrupt_number as usize] = IDTEntry::new(handler);
+        //}
+    //}
 
-    #[no_mangle]
-    #[link_section = ".bss"]
-    pub static mut idt_data: IDT = IDT { entries: [IDTEntry::default(); idt_entry_count] };
+    //#[no_mangle]
+    //#[link_section = ".bss"]
+    //pub static mut idt_data: IDT = IDT { entries: [IDTEntry::default(); idt_entry_count] };
 
-    #[repr(align(0x10))]
-    pub struct CPULocalStorageMemory
-    {
-        memory: [u8; cpu_local_storage_size],
-    }
+    //#[repr(align(0x10))]
+    //pub struct CPULocalStorageMemory
+    //{
+        //memory: [u8; cpu_local_storage_size],
+    //}
 
-    pub const cpu_local_storage_size: usize = 0x2000;
-    #[no_mangle]
-    #[link_section = ".bss"]
-    pub static mut cpu_local_storage: CPULocalStorageMemory = CPULocalStorageMemory { memory: [0; cpu_local_storage_size] };
+    //pub const cpu_local_storage_size: usize = 0x2000;
+    //#[no_mangle]
+    //#[link_section = ".bss"]
+    //pub static mut cpu_local_storage: CPULocalStorageMemory = CPULocalStorageMemory { memory: [0; cpu_local_storage_size] };
 
-    global_asm!(
-        ".extern idt_data", 
-        ".section .data",
-        ".global idt",
-        "idt:",
-        "idt_base: .short {idt_base}",
-        "idt_limit: .quad idt_data",
-        idt_base = const idt_size - 1,
-    );
+    //global_asm!(
+        //".extern idt_data", 
+        //".section .data",
+        //".global idt",
+        //"idt:",
+        //"idt_base: .short {idt_base}",
+        //"idt_limit: .quad idt_data",
+        //idt_base = const idt_size - 1,
+    //);
 
     #[repr(C, packed)]
     pub struct GDTR
@@ -592,6 +589,44 @@ pub mod Arch
         }
     }
 
+    #[no_mangle]
+    #[naked]
+    #[link_section = ".text"]
+    pub extern "C" fn start()
+    {
+        //unsafe
+        //{
+            //asm!("mov {}, rsi", out(reg) kernel.arch.bootloader.id);
+            //asm!("mov {}, rdi", out(reg) kernel.arch.bootloader.offset);
+
+            //if kernel.arch.bootloader.offset != 0
+            //{
+                //*(0x7fe8 as *mut u64) = kernel.arch.bootloader.offset;
+            //}
+
+            //asm!("mov rsp, OFFSET stack + {}", const stack_size);
+
+            //kernel.arch.installation_id[0] = *((0x7ff0 + kernel.arch.bootloader.offset) as *mut u64);
+            //kernel.arch.installation_id[1] = *((0x7ff0 + kernel.arch.bootloader.offset + size_of::<u64>() as u64) as *mut u64);
+
+            //kernel.arch.installation_id[0] = *((0x7ff0 + kernel.arch.bootloader.offset) as *mut u64);
+            //*(0xFFFFFF7FBFDFE000 as *mut u64) = 0;
+            //asm!("and rsp, ~0xf");
+            //CR3::flush();
+            //PIC::disable();
+
+            //unreachable!();
+        //}
+
+        unreachable!();
+    }
+
+    pub struct EarlyKernelInfo
+    {
+        bootloader: Bootloader,
+        size: u32,
+    }
+
     pub struct Specific<'a>
     {
         physical_memory: PhysicalMemory<'a>,
@@ -622,268 +657,268 @@ pub mod Arch
         }
     }
 
-    fn install_interrupt_handlers()
-    {
-        unsafe
-        {
-            idt_data.register_new::<0,   false>();
-            idt_data.register_new::<1,   false>();
-            idt_data.register_new::<2,   false>();
-            idt_data.register_new::<3,   false>();
-            idt_data.register_new::<4,   false>();
-            idt_data.register_new::<5,   false>();
-            idt_data.register_new::<6,   false>();
-            idt_data.register_new::<7,   false>();
-            idt_data.register_new::<8,   true>();
-            idt_data.register_new::<9,   false>();
-            idt_data.register_new::<10,  true>();
-            idt_data.register_new::<11,  true>();
-            idt_data.register_new::<12,  true>();
-            idt_data.register_new::<13,  true>();
-            idt_data.register_new::<14,  true>();
-            idt_data.register_new::<15,  false>();
-            idt_data.register_new::<16,  false>();
-            idt_data.register_new::<17,  true>();
-            idt_data.register_new::<18,  false>();
-            idt_data.register_new::<19,  false>();
-            idt_data.register_new::<20,  false>();
-            idt_data.register_new::<21,  false>();
-            idt_data.register_new::<22,  false>();
-            idt_data.register_new::<23,  false>();
-            idt_data.register_new::<24,  false>();
-            idt_data.register_new::<25,  false>();
-            idt_data.register_new::<26,  false>();
-            idt_data.register_new::<27,  false>();
-            idt_data.register_new::<28,  false>();
-            idt_data.register_new::<29,  false>();
-            idt_data.register_new::<30,  false>();
-            idt_data.register_new::<31,  false>();
-            idt_data.register_new::<32,  false>();
-            idt_data.register_new::<33,  false>();
-            idt_data.register_new::<34,  false>();
-            idt_data.register_new::<35,  false>();
-            idt_data.register_new::<36,  false>();
-            idt_data.register_new::<37,  false>();
-            idt_data.register_new::<38,  false>();
-            idt_data.register_new::<39,  false>();
-            idt_data.register_new::<40,  false>();
-            idt_data.register_new::<41,  false>();
-            idt_data.register_new::<42,  false>();
-            idt_data.register_new::<43,  false>();
-            idt_data.register_new::<44,  false>();
-            idt_data.register_new::<45,  false>();
-            idt_data.register_new::<46,  false>();
-            idt_data.register_new::<47,  false>();
-            idt_data.register_new::<48,  false>();
-            idt_data.register_new::<49,  false>();
-            idt_data.register_new::<50,  false>();
-            idt_data.register_new::<51,  false>();
-            idt_data.register_new::<52,  false>();
-            idt_data.register_new::<53,  false>();
-            idt_data.register_new::<54,  false>();
-            idt_data.register_new::<55,  false>();
-            idt_data.register_new::<56,  false>();
-            idt_data.register_new::<57,  false>();
-            idt_data.register_new::<58,  false>();
-            idt_data.register_new::<59,  false>();
-            idt_data.register_new::<60,  false>();
-            idt_data.register_new::<61,  false>();
-            idt_data.register_new::<62,  false>();
-            idt_data.register_new::<63,  false>();
-            idt_data.register_new::<64,  false>();
-            idt_data.register_new::<65,  false>();
-            idt_data.register_new::<66,  false>();
-            idt_data.register_new::<67,  false>();
-            idt_data.register_new::<68,  false>();
-            idt_data.register_new::<69,  false>();
-            idt_data.register_new::<70,  false>();
-            idt_data.register_new::<71,  false>();
-            idt_data.register_new::<72,  false>();
-            idt_data.register_new::<73,  false>();
-            idt_data.register_new::<74,  false>();
-            idt_data.register_new::<75,  false>();
-            idt_data.register_new::<76,  false>();
-            idt_data.register_new::<77,  false>();
-            idt_data.register_new::<78,  false>();
-            idt_data.register_new::<79,  false>();
-            idt_data.register_new::<80,  false>();
-            idt_data.register_new::<81,  false>();
-            idt_data.register_new::<82,  false>();
-            idt_data.register_new::<83,  false>();
-            idt_data.register_new::<84,  false>();
-            idt_data.register_new::<85,  false>();
-            idt_data.register_new::<86,  false>();
-            idt_data.register_new::<87,  false>();
-            idt_data.register_new::<88,  false>();
-            idt_data.register_new::<89,  false>();
-            idt_data.register_new::<90,  false>();
-            idt_data.register_new::<91,  false>();
-            idt_data.register_new::<92,  false>();
-            idt_data.register_new::<93,  false>();
-            idt_data.register_new::<94,  false>();
-            idt_data.register_new::<95,  false>();
-            idt_data.register_new::<96,  false>();
-            idt_data.register_new::<97,  false>();
-            idt_data.register_new::<98,  false>();
-            idt_data.register_new::<99,  false>();
-            idt_data.register_new::<100, false>();
-            idt_data.register_new::<101, false>();
-            idt_data.register_new::<102, false>();
-            idt_data.register_new::<103, false>();
-            idt_data.register_new::<104, false>();
-            idt_data.register_new::<105, false>();
-            idt_data.register_new::<106, false>();
-            idt_data.register_new::<107, false>();
-            idt_data.register_new::<108, false>();
-            idt_data.register_new::<109, false>();
-            idt_data.register_new::<110, false>();
-            idt_data.register_new::<111, false>();
-            idt_data.register_new::<112, false>();
-            idt_data.register_new::<113, false>();
-            idt_data.register_new::<114, false>();
-            idt_data.register_new::<115, false>();
-            idt_data.register_new::<116, false>();
-            idt_data.register_new::<117, false>();
-            idt_data.register_new::<118, false>();
-            idt_data.register_new::<119, false>();
-            idt_data.register_new::<120, false>();
-            idt_data.register_new::<121, false>();
-            idt_data.register_new::<122, false>();
-            idt_data.register_new::<123, false>();
-            idt_data.register_new::<124, false>();
-            idt_data.register_new::<125, false>();
-            idt_data.register_new::<126, false>();
-            idt_data.register_new::<127, false>();
-            idt_data.register_new::<128, false>();
-            idt_data.register_new::<129, false>();
-            idt_data.register_new::<130, false>();
-            idt_data.register_new::<131, false>();
-            idt_data.register_new::<132, false>();
-            idt_data.register_new::<133, false>();
-            idt_data.register_new::<134, false>();
-            idt_data.register_new::<135, false>();
-            idt_data.register_new::<136, false>();
-            idt_data.register_new::<137, false>();
-            idt_data.register_new::<138, false>();
-            idt_data.register_new::<139, false>();
-            idt_data.register_new::<140, false>();
-            idt_data.register_new::<141, false>();
-            idt_data.register_new::<142, false>();
-            idt_data.register_new::<143, false>();
-            idt_data.register_new::<144, false>();
-            idt_data.register_new::<145, false>();
-            idt_data.register_new::<146, false>();
-            idt_data.register_new::<147, false>();
-            idt_data.register_new::<148, false>();
-            idt_data.register_new::<149, false>();
-            idt_data.register_new::<150, false>();
-            idt_data.register_new::<151, false>();
-            idt_data.register_new::<152, false>();
-            idt_data.register_new::<153, false>();
-            idt_data.register_new::<154, false>();
-            idt_data.register_new::<155, false>();
-            idt_data.register_new::<156, false>();
-            idt_data.register_new::<157, false>();
-            idt_data.register_new::<158, false>();
-            idt_data.register_new::<159, false>();
-            idt_data.register_new::<160, false>();
-            idt_data.register_new::<161, false>();
-            idt_data.register_new::<162, false>();
-            idt_data.register_new::<163, false>();
-            idt_data.register_new::<164, false>();
-            idt_data.register_new::<165, false>();
-            idt_data.register_new::<166, false>();
-            idt_data.register_new::<167, false>();
-            idt_data.register_new::<168, false>();
-            idt_data.register_new::<169, false>();
-            idt_data.register_new::<170, false>();
-            idt_data.register_new::<171, false>();
-            idt_data.register_new::<172, false>();
-            idt_data.register_new::<173, false>();
-            idt_data.register_new::<174, false>();
-            idt_data.register_new::<175, false>();
-            idt_data.register_new::<176, false>();
-            idt_data.register_new::<177, false>();
-            idt_data.register_new::<178, false>();
-            idt_data.register_new::<179, false>();
-            idt_data.register_new::<180, false>();
-            idt_data.register_new::<181, false>();
-            idt_data.register_new::<182, false>();
-            idt_data.register_new::<183, false>();
-            idt_data.register_new::<184, false>();
-            idt_data.register_new::<185, false>();
-            idt_data.register_new::<186, false>();
-            idt_data.register_new::<187, false>();
-            idt_data.register_new::<188, false>();
-            idt_data.register_new::<189, false>();
-            idt_data.register_new::<190, false>();
-            idt_data.register_new::<191, false>();
-            idt_data.register_new::<192, false>();
-            idt_data.register_new::<193, false>();
-            idt_data.register_new::<194, false>();
-            idt_data.register_new::<195, false>();
-            idt_data.register_new::<196, false>();
-            idt_data.register_new::<197, false>();
-            idt_data.register_new::<198, false>();
-            idt_data.register_new::<199, false>();
-            idt_data.register_new::<200, false>();
-            idt_data.register_new::<201, false>();
-            idt_data.register_new::<202, false>();
-            idt_data.register_new::<203, false>();
-            idt_data.register_new::<204, false>();
-            idt_data.register_new::<205, false>();
-            idt_data.register_new::<206, false>();
-            idt_data.register_new::<207, false>();
-            idt_data.register_new::<208, false>();
-            idt_data.register_new::<209, false>();
-            idt_data.register_new::<210, false>();
-            idt_data.register_new::<211, false>();
-            idt_data.register_new::<212, false>();
-            idt_data.register_new::<213, false>();
-            idt_data.register_new::<214, false>();
-            idt_data.register_new::<215, false>();
-            idt_data.register_new::<216, false>();
-            idt_data.register_new::<217, false>();
-            idt_data.register_new::<218, false>();
-            idt_data.register_new::<219, false>();
-            idt_data.register_new::<220, false>();
-            idt_data.register_new::<221, false>();
-            idt_data.register_new::<222, false>();
-            idt_data.register_new::<223, false>();
-            idt_data.register_new::<224, false>();
-            idt_data.register_new::<225, false>();
-            idt_data.register_new::<226, false>();
-            idt_data.register_new::<227, false>();
-            idt_data.register_new::<228, false>();
-            idt_data.register_new::<229, false>();
-            idt_data.register_new::<230, false>();
-            idt_data.register_new::<231, false>();
-            idt_data.register_new::<232, false>();
-            idt_data.register_new::<233, false>();
-            idt_data.register_new::<234, false>();
-            idt_data.register_new::<235, false>();
-            idt_data.register_new::<236, false>();
-            idt_data.register_new::<237, false>();
-            idt_data.register_new::<238, false>();
-            idt_data.register_new::<239, false>();
-            idt_data.register_new::<240, false>();
-            idt_data.register_new::<241, false>();
-            idt_data.register_new::<242, false>();
-            idt_data.register_new::<243, false>();
-            idt_data.register_new::<244, false>();
-            idt_data.register_new::<245, false>();
-            idt_data.register_new::<246, false>();
-            idt_data.register_new::<247, false>();
-            idt_data.register_new::<248, false>();
-            idt_data.register_new::<249, false>();
-            idt_data.register_new::<250, false>();
-            idt_data.register_new::<251, false>();
-            idt_data.register_new::<252, false>();
-            idt_data.register_new::<253, false>();
-            idt_data.register_new::<254, false>();
-            idt_data.register_new::<255, false>();
-        }
-    }
+    //fn install_interrupt_handlers()
+    //{
+        //unsafe
+        //{
+            //idt_data.register_new::<0,   false>();
+            //idt_data.register_new::<1,   false>();
+            //idt_data.register_new::<2,   false>();
+            //idt_data.register_new::<3,   false>();
+            //idt_data.register_new::<4,   false>();
+            //idt_data.register_new::<5,   false>();
+            //idt_data.register_new::<6,   false>();
+            //idt_data.register_new::<7,   false>();
+            //idt_data.register_new::<8,   true>();
+            //idt_data.register_new::<9,   false>();
+            //idt_data.register_new::<10,  true>();
+            //idt_data.register_new::<11,  true>();
+            //idt_data.register_new::<12,  true>();
+            //idt_data.register_new::<13,  true>();
+            //idt_data.register_new::<14,  true>();
+            //idt_data.register_new::<15,  false>();
+            //idt_data.register_new::<16,  false>();
+            //idt_data.register_new::<17,  true>();
+            //idt_data.register_new::<18,  false>();
+            //idt_data.register_new::<19,  false>();
+            //idt_data.register_new::<20,  false>();
+            //idt_data.register_new::<21,  false>();
+            //idt_data.register_new::<22,  false>();
+            //idt_data.register_new::<23,  false>();
+            //idt_data.register_new::<24,  false>();
+            //idt_data.register_new::<25,  false>();
+            //idt_data.register_new::<26,  false>();
+            //idt_data.register_new::<27,  false>();
+            //idt_data.register_new::<28,  false>();
+            //idt_data.register_new::<29,  false>();
+            //idt_data.register_new::<30,  false>();
+            //idt_data.register_new::<31,  false>();
+            //idt_data.register_new::<32,  false>();
+            //idt_data.register_new::<33,  false>();
+            //idt_data.register_new::<34,  false>();
+            //idt_data.register_new::<35,  false>();
+            //idt_data.register_new::<36,  false>();
+            //idt_data.register_new::<37,  false>();
+            //idt_data.register_new::<38,  false>();
+            //idt_data.register_new::<39,  false>();
+            //idt_data.register_new::<40,  false>();
+            //idt_data.register_new::<41,  false>();
+            //idt_data.register_new::<42,  false>();
+            //idt_data.register_new::<43,  false>();
+            //idt_data.register_new::<44,  false>();
+            //idt_data.register_new::<45,  false>();
+            //idt_data.register_new::<46,  false>();
+            //idt_data.register_new::<47,  false>();
+            //idt_data.register_new::<48,  false>();
+            //idt_data.register_new::<49,  false>();
+            //idt_data.register_new::<50,  false>();
+            //idt_data.register_new::<51,  false>();
+            //idt_data.register_new::<52,  false>();
+            //idt_data.register_new::<53,  false>();
+            //idt_data.register_new::<54,  false>();
+            //idt_data.register_new::<55,  false>();
+            //idt_data.register_new::<56,  false>();
+            //idt_data.register_new::<57,  false>();
+            //idt_data.register_new::<58,  false>();
+            //idt_data.register_new::<59,  false>();
+            //idt_data.register_new::<60,  false>();
+            //idt_data.register_new::<61,  false>();
+            //idt_data.register_new::<62,  false>();
+            //idt_data.register_new::<63,  false>();
+            //idt_data.register_new::<64,  false>();
+            //idt_data.register_new::<65,  false>();
+            //idt_data.register_new::<66,  false>();
+            //idt_data.register_new::<67,  false>();
+            //idt_data.register_new::<68,  false>();
+            //idt_data.register_new::<69,  false>();
+            //idt_data.register_new::<70,  false>();
+            //idt_data.register_new::<71,  false>();
+            //idt_data.register_new::<72,  false>();
+            //idt_data.register_new::<73,  false>();
+            //idt_data.register_new::<74,  false>();
+            //idt_data.register_new::<75,  false>();
+            //idt_data.register_new::<76,  false>();
+            //idt_data.register_new::<77,  false>();
+            //idt_data.register_new::<78,  false>();
+            //idt_data.register_new::<79,  false>();
+            //idt_data.register_new::<80,  false>();
+            //idt_data.register_new::<81,  false>();
+            //idt_data.register_new::<82,  false>();
+            //idt_data.register_new::<83,  false>();
+            //idt_data.register_new::<84,  false>();
+            //idt_data.register_new::<85,  false>();
+            //idt_data.register_new::<86,  false>();
+            //idt_data.register_new::<87,  false>();
+            //idt_data.register_new::<88,  false>();
+            //idt_data.register_new::<89,  false>();
+            //idt_data.register_new::<90,  false>();
+            //idt_data.register_new::<91,  false>();
+            //idt_data.register_new::<92,  false>();
+            //idt_data.register_new::<93,  false>();
+            //idt_data.register_new::<94,  false>();
+            //idt_data.register_new::<95,  false>();
+            //idt_data.register_new::<96,  false>();
+            //idt_data.register_new::<97,  false>();
+            //idt_data.register_new::<98,  false>();
+            //idt_data.register_new::<99,  false>();
+            //idt_data.register_new::<100, false>();
+            //idt_data.register_new::<101, false>();
+            //idt_data.register_new::<102, false>();
+            //idt_data.register_new::<103, false>();
+            //idt_data.register_new::<104, false>();
+            //idt_data.register_new::<105, false>();
+            //idt_data.register_new::<106, false>();
+            //idt_data.register_new::<107, false>();
+            //idt_data.register_new::<108, false>();
+            //idt_data.register_new::<109, false>();
+            //idt_data.register_new::<110, false>();
+            //idt_data.register_new::<111, false>();
+            //idt_data.register_new::<112, false>();
+            //idt_data.register_new::<113, false>();
+            //idt_data.register_new::<114, false>();
+            //idt_data.register_new::<115, false>();
+            //idt_data.register_new::<116, false>();
+            //idt_data.register_new::<117, false>();
+            //idt_data.register_new::<118, false>();
+            //idt_data.register_new::<119, false>();
+            //idt_data.register_new::<120, false>();
+            //idt_data.register_new::<121, false>();
+            //idt_data.register_new::<122, false>();
+            //idt_data.register_new::<123, false>();
+            //idt_data.register_new::<124, false>();
+            //idt_data.register_new::<125, false>();
+            //idt_data.register_new::<126, false>();
+            //idt_data.register_new::<127, false>();
+            //idt_data.register_new::<128, false>();
+            //idt_data.register_new::<129, false>();
+            //idt_data.register_new::<130, false>();
+            //idt_data.register_new::<131, false>();
+            //idt_data.register_new::<132, false>();
+            //idt_data.register_new::<133, false>();
+            //idt_data.register_new::<134, false>();
+            //idt_data.register_new::<135, false>();
+            //idt_data.register_new::<136, false>();
+            //idt_data.register_new::<137, false>();
+            //idt_data.register_new::<138, false>();
+            //idt_data.register_new::<139, false>();
+            //idt_data.register_new::<140, false>();
+            //idt_data.register_new::<141, false>();
+            //idt_data.register_new::<142, false>();
+            //idt_data.register_new::<143, false>();
+            //idt_data.register_new::<144, false>();
+            //idt_data.register_new::<145, false>();
+            //idt_data.register_new::<146, false>();
+            //idt_data.register_new::<147, false>();
+            //idt_data.register_new::<148, false>();
+            //idt_data.register_new::<149, false>();
+            //idt_data.register_new::<150, false>();
+            //idt_data.register_new::<151, false>();
+            //idt_data.register_new::<152, false>();
+            //idt_data.register_new::<153, false>();
+            //idt_data.register_new::<154, false>();
+            //idt_data.register_new::<155, false>();
+            //idt_data.register_new::<156, false>();
+            //idt_data.register_new::<157, false>();
+            //idt_data.register_new::<158, false>();
+            //idt_data.register_new::<159, false>();
+            //idt_data.register_new::<160, false>();
+            //idt_data.register_new::<161, false>();
+            //idt_data.register_new::<162, false>();
+            //idt_data.register_new::<163, false>();
+            //idt_data.register_new::<164, false>();
+            //idt_data.register_new::<165, false>();
+            //idt_data.register_new::<166, false>();
+            //idt_data.register_new::<167, false>();
+            //idt_data.register_new::<168, false>();
+            //idt_data.register_new::<169, false>();
+            //idt_data.register_new::<170, false>();
+            //idt_data.register_new::<171, false>();
+            //idt_data.register_new::<172, false>();
+            //idt_data.register_new::<173, false>();
+            //idt_data.register_new::<174, false>();
+            //idt_data.register_new::<175, false>();
+            //idt_data.register_new::<176, false>();
+            //idt_data.register_new::<177, false>();
+            //idt_data.register_new::<178, false>();
+            //idt_data.register_new::<179, false>();
+            //idt_data.register_new::<180, false>();
+            //idt_data.register_new::<181, false>();
+            //idt_data.register_new::<182, false>();
+            //idt_data.register_new::<183, false>();
+            //idt_data.register_new::<184, false>();
+            //idt_data.register_new::<185, false>();
+            //idt_data.register_new::<186, false>();
+            //idt_data.register_new::<187, false>();
+            //idt_data.register_new::<188, false>();
+            //idt_data.register_new::<189, false>();
+            //idt_data.register_new::<190, false>();
+            //idt_data.register_new::<191, false>();
+            //idt_data.register_new::<192, false>();
+            //idt_data.register_new::<193, false>();
+            //idt_data.register_new::<194, false>();
+            //idt_data.register_new::<195, false>();
+            //idt_data.register_new::<196, false>();
+            //idt_data.register_new::<197, false>();
+            //idt_data.register_new::<198, false>();
+            //idt_data.register_new::<199, false>();
+            //idt_data.register_new::<200, false>();
+            //idt_data.register_new::<201, false>();
+            //idt_data.register_new::<202, false>();
+            //idt_data.register_new::<203, false>();
+            //idt_data.register_new::<204, false>();
+            //idt_data.register_new::<205, false>();
+            //idt_data.register_new::<206, false>();
+            //idt_data.register_new::<207, false>();
+            //idt_data.register_new::<208, false>();
+            //idt_data.register_new::<209, false>();
+            //idt_data.register_new::<210, false>();
+            //idt_data.register_new::<211, false>();
+            //idt_data.register_new::<212, false>();
+            //idt_data.register_new::<213, false>();
+            //idt_data.register_new::<214, false>();
+            //idt_data.register_new::<215, false>();
+            //idt_data.register_new::<216, false>();
+            //idt_data.register_new::<217, false>();
+            //idt_data.register_new::<218, false>();
+            //idt_data.register_new::<219, false>();
+            //idt_data.register_new::<220, false>();
+            //idt_data.register_new::<221, false>();
+            //idt_data.register_new::<222, false>();
+            //idt_data.register_new::<223, false>();
+            //idt_data.register_new::<224, false>();
+            //idt_data.register_new::<225, false>();
+            //idt_data.register_new::<226, false>();
+            //idt_data.register_new::<227, false>();
+            //idt_data.register_new::<228, false>();
+            //idt_data.register_new::<229, false>();
+            //idt_data.register_new::<230, false>();
+            //idt_data.register_new::<231, false>();
+            //idt_data.register_new::<232, false>();
+            //idt_data.register_new::<233, false>();
+            //idt_data.register_new::<234, false>();
+            //idt_data.register_new::<235, false>();
+            //idt_data.register_new::<236, false>();
+            //idt_data.register_new::<237, false>();
+            //idt_data.register_new::<238, false>();
+            //idt_data.register_new::<239, false>();
+            //idt_data.register_new::<240, false>();
+            //idt_data.register_new::<241, false>();
+            //idt_data.register_new::<242, false>();
+            //idt_data.register_new::<243, false>();
+            //idt_data.register_new::<244, false>();
+            //idt_data.register_new::<245, false>();
+            //idt_data.register_new::<246, false>();
+            //idt_data.register_new::<247, false>();
+            //idt_data.register_new::<248, false>();
+            //idt_data.register_new::<249, false>();
+            //idt_data.register_new::<250, false>();
+            //idt_data.register_new::<251, false>();
+            //idt_data.register_new::<252, false>();
+            //idt_data.register_new::<253, false>();
+            //idt_data.register_new::<254, false>();
+            //idt_data.register_new::<255, false>();
+        //}
+    //}
 
     #[no_mangle]
     #[naked]
@@ -992,7 +1027,7 @@ pub mod Arch
             // @TODO: setup serial
             PIC::disable();
             self.physical_memory.setup(self.bootloader.offset);
-            install_interrupt_handlers();
+            //install_interrupt_handlers();
             self.gdtr.save();
             self.cpu_setup_1();
         }
@@ -1140,20 +1175,20 @@ pub mod Arch
 
             // Setup CPU local storage
             {
-                let cpu_local_storage_address = unsafe { (&mut cpu_local_storage as *mut CPULocalStorageMemory) as u64 };
-                let cpu_local_storage_low = (cpu_local_storage_address + self.cpu_local_storage_index) as u32;
-                let cpu_local_storage_high = (cpu_local_storage_address >> 32) as u32;
-                // Space for 4 8-byte values at gs:0 - gs:31
-                self.cpu_local_storage_index += 32;
-                GS_BASE.write(cpu_local_storage_low, cpu_local_storage_high);
+                //let cpu_local_storage_address = unsafe { (&mut cpu_local_storage as *mut CPULocalStorageMemory) as u64 };
+                //let cpu_local_storage_low = (cpu_local_storage_address + self.cpu_local_storage_index) as u32;
+                //let cpu_local_storage_high = (cpu_local_storage_address >> 32) as u32;
+                //// Space for 4 8-byte values at gs:0 - gs:31
+                //self.cpu_local_storage_index += 32;
+                //GS_BASE.write(cpu_local_storage_low, cpu_local_storage_high);
             }
 
             // Load IDT
             {
-                self.idtr.limit = idt_size - 1;
-                self.idtr.base = unsafe { (&mut idt_data as *mut IDT) as u64 };
-                self.idtr.load();
-                unsafe { asm!("sti", options(nomem, nostack)) };
+                //self.idtr.limit = idt_size - 1;
+                //self.idtr.base = unsafe { (&mut idt_data as *mut IDT) as u64 };
+                //self.idtr.load();
+                //unsafe { asm!("sti", options(nomem, nostack)) };
             }
 
             // Enable the APIC, which in x86_64 is always present
@@ -1185,41 +1220,6 @@ pub mod Arch
     }
 
 
-    global_asm!(
-        ".section .text",
-        ".global _start",
-        ".extern start",
-        ".extern stack",
-        "_start:",
-            "mov rax, 0x63",
-            "mov fs, ax",
-            "mov gs, ax",
-            "mov rsp, OFFSET stack + {stack_size}",
-            "jmp start",
-            stack_size = const stack_size,
-        );
-
-    pub struct EarlyKernelInfo
-    {
-        bootloader: Bootloader,
-        size: u32,
-    }
-
-    #[no_mangle]
-    pub extern "C" fn start(bootloader_information_offset: u64, bootloader_ID: u64, kernel_size: u32)
-    {
-        let early_kernel_info = EarlyKernelInfo
-        {
-            bootloader: Bootloader
-            {
-                offset: bootloader_information_offset,
-                id: bootloader_ID,
-            },
-            size: kernel_size,
-        };
-
-        unsafe { kernel.init(early_kernel_info) };
-    }
 
     pub struct PIC;
 
@@ -1556,6 +1556,7 @@ pub mod Arch
 
     impl CR3
     {
+        #[link_section = ".text"]
         #[inline(always)]
         fn flush()
         {
@@ -1638,7 +1639,7 @@ impl<'a> const Default for PhysicalMemory<'a>
     {
         fn setup(&mut self, bootloader_information_offset: u64)
         {
-            let physical_memory_region_ptr = (low_memory_map_start + 0x600000 + bootloader_information_offset) as *mut Memory::PhysicalRegion;
+            let physical_memory_region_ptr = (low_memory_map_start + 0x60000 + bootloader_information_offset) as *mut Memory::PhysicalRegion;
             let physical_memory_region_count =
             {
                 let mut region_count: usize = 0;
@@ -1668,9 +1669,8 @@ impl<'a> const Default for PhysicalMemory<'a>
                 region_count
             };
 
-            self.regions = unsafe { core::slice::from_raw_parts_mut(physical_memory_region_ptr, physical_memory_region_count) };
-            #[allow(unused_unsafe)]
-            unsafe { self.original_page_count = self.regions[self.regions.len()].page_count };
+            unsafe { self.original_page_count = physical_memory_region_ptr.add(physical_memory_region_count).read().page_count }
+            self.regions = unsafe { &mut *core::ptr::slice_from_raw_parts_mut(physical_memory_region_ptr, physical_memory_region_count) };
         }
     }
 

@@ -12,8 +12,53 @@ const ArrayList = std.ArrayList;
 const print = std.debug.print;
 const assert = std.debug.assert;
 
+const a_megabyte = 1024 * 1024;
+const disk_size: u64 = 64 * a_megabyte;
+const memory_size: u64 = disk_size;
+
 const build_rust = true;
-const rust_kernel_elf_path = "/home/david/git/os/target/rust_target/debug/renaissance-os";
+const cpp_kernel_elf = "cpp_kernel.elf";
+const rust_kernel_elf = "rust_kernel.elf";
+const rust_kernel_lib_path = "/home/david/git/os/target/rust_target/debug/librenaissance_os.a";
+
+const build_cache_dir = "zig-cache/";
+const build_output_dir = "zig-out/bin/";
+const bios_source_root_dir = "src/boot/x86/";
+
+const mbr_source_file = bios_source_root_dir ++ "mbr.S";
+const mbr_output_file = "mbr.bin";
+const mbr_output_path = build_cache_dir ++ mbr_output_file;
+
+const bios_stage_1_source_file = bios_source_root_dir ++ "bios_stage_1.S";
+const bios_stage_1_output_file = "bios_stage_1.bin";
+const bios_stage_1_output_path = build_cache_dir ++ bios_stage_1_output_file;
+
+const bios_stage_2_source_file = bios_source_root_dir ++ "bios_stage_2.S";
+const bios_stage_2_output_file = "bios_stage_2.bin";
+const bios_stage_2_output_path = build_cache_dir ++ bios_stage_2_output_file;
+
+const kernel_linker_script_path = "src/linker.ld";
+const rust_kernel_elf_path = build_cache_dir ++ rust_kernel_elf;
+const cpp_kernel_elf_path = build_cache_dir ++ cpp_kernel_elf;
+
+const disk_image_output_file = "disk.img";
+const disk_image_output_path = build_cache_dir ++ disk_image_output_file;
+
+const final_disk_image = build_output_dir ++ disk_image_output_file;
+const c_flags = &[_][]const u8
+{
+    "-ffreestanding",
+    "-fno-exceptions",
+    "-Wall",
+    "-Wextra",
+};
+
+const cross_target = CrossTarget
+{
+    .cpu_arch = .x86_64,
+    .os_tag = .freestanding,
+    .abi = .none,
+};
 
 pub fn build(b: *std.build.Builder) !void
 {
@@ -26,17 +71,10 @@ pub fn build(b: *std.build.Builder) !void
     const bios_stage_2 = nasm_compile_binary(b, bios_stage_2_source_file, bios_stage_2_output_path);
     b.default_step.dependOn(&bios_stage_2.step);
 
-    if (build_rust)
-    {
-        const cargo_cmd = b.addSystemCommand(&[_][]const u8 { "cargo", "build" });
-        b.default_step.dependOn(&cargo_cmd.step);
-
-    }
-    else
-    {
-        const kernel = build_kernel(b);
-        b.default_step.dependOn(&kernel.step);
-    }
+    const rust_kernel = build_rust_kernel(b);
+    b.default_step.dependOn(&rust_kernel.step);
+    const cpp_kernel = build_cpp_kernel(b);
+    b.default_step.dependOn(&cpp_kernel.step);
 
     const desktop = build_desktop(b);
     b.default_step.dependOn(&desktop.step);
@@ -56,7 +94,7 @@ pub fn build(b: *std.build.Builder) !void
                 "-device", "ide-hd,drive=mydisk,bus=ahci.0",
                 "-no-reboot", "-no-shutdown", "-M", "q35", "-cpu", "Haswell",
                 "-serial", "stdio",
-                "-d", "int,cpu_reset,in_asm",
+                //"-d", "int,cpu_reset,in_asm",
                 //"-D", "logging.txt",
                 //"-d", "guest_errors,int,cpu,cpu_reset,in_asm"
             };
@@ -82,36 +120,6 @@ pub fn build(b: *std.build.Builder) !void
     clear_step.dependOn(&remove_bin.step);
 }
 
-const build_cache_dir = "zig-cache/";
-const build_output_dir = "zig-out/bin/";
-const bios_source_root_dir = "src/boot/x86/";
-
-const mbr_source_file = bios_source_root_dir ++ "mbr.S";
-const mbr_output_file = "mbr.bin";
-const mbr_output_path = build_cache_dir ++ mbr_output_file;
-
-const bios_stage_1_source_file = bios_source_root_dir ++ "bios_stage_1.S";
-const bios_stage_1_output_file = "bios_stage_1.bin";
-const bios_stage_1_output_path = build_cache_dir ++ bios_stage_1_output_file;
-
-const bios_stage_2_source_file = bios_source_root_dir ++ "bios_stage_2.S";
-const bios_stage_2_output_file = "bios_stage_2.bin";
-const bios_stage_2_output_path = build_cache_dir ++ bios_stage_2_output_file;
-
-const kernel_source_file = "src/kernel/main.zig";
-const kernel_output_file = "kernel.elf";
-const kernel_output_path = build_cache_dir ++ kernel_output_file;
-const kernel_linker_script_path = "src/linker.ld";
-
-const disk_image_output_file = "disk.img";
-const disk_image_output_path = build_cache_dir ++ disk_image_output_file;
-
-    const final_disk_image =
-        if (true)
-            build_output_dir ++ disk_image_output_file
-        else 
-            "/home/david/git/essence/bin/drive";
-
 fn nasm_compile_elf_object(builder: *Builder, executable: *std.build.LibExeObjStep, comptime src: []const u8, comptime out: []const u8) void
 {
     const base_nasm_command = &[_][]const u8 { "nasm", "-felf64", "-g", "-F", "dwarf", src, "-o", out };
@@ -120,27 +128,17 @@ fn nasm_compile_elf_object(builder: *Builder, executable: *std.build.LibExeObjSt
     executable.step.dependOn(&nasm_command.step);
 }
 
-const c_flags = &[_][]const u8
-{
-    "-ffreestanding",
-    "-fno-exceptions",
-    "-Wall",
-    "-Wextra",
-};
 
-const cross_target = CrossTarget
-{
-    .cpu_arch = .x86_64,
-    .os_tag = .freestanding,
-    .abi = .none,
-};
-
-fn build_kernel(b: *Builder) *LibExeObjStep
+fn build_kernel_common(b: *Builder, kernel_output_file: []const u8) *LibExeObjStep
 {
     const kernel = b.addExecutable(kernel_output_file, null);
     kernel.red_zone = false;
     kernel.code_model = .kernel;
     kernel.disable_stack_probing = true;
+    kernel.link_function_sections = false;
+    kernel.setMainPkgPath("src");
+    kernel.setLinkerScriptPath(FileSource.relative(kernel_linker_script_path));
+    kernel.setOutputDir(build_cache_dir);
 
     var disabled_features = std.Target.Cpu.Feature.Set.empty;
     var enabled_features = std.Target.Cpu.Feature.Set.empty;
@@ -168,22 +166,32 @@ fn build_kernel(b: *Builder) *LibExeObjStep
     };
     kernel.setTarget(kernel_cross_target);
 
-        const c_source_files = &[_][]const u8
-        {
-            "src/kernel.cpp",
-        };
+    return kernel;
+}
 
-        kernel.addCSourceFiles(c_source_files, c_flags);
+fn build_cpp_kernel(b: *Builder) *LibExeObjStep
+{
+    const kernel = build_kernel_common(b, cpp_kernel_elf);
+    const c_source_files = &[_][]const u8
+    {
+        "src/kernel.cpp",
+    };
 
-    const compile_rust_kernel = b.addSystemCommand(&[_][]const u8 { "cargo", "build" });
-    kernel.step.dependOn(&compile_rust_kernel.step);
-    //kernel.addLibPath("rust_target/target/debug");
-    //kernel.linkSystemLibrary("renaissance-os");
-    kernel.addObjectFile("target/rust_target/debug/librenaissance_os.a");
+    kernel.addCSourceFiles(c_source_files, c_flags);
+
     nasm_compile_elf_object(b, kernel, "src/x86_64.S", "zig-cache/kernel_x86.o");
-    kernel.setMainPkgPath("src");
-    kernel.setLinkerScriptPath(FileSource.relative(kernel_linker_script_path));
-    kernel.setOutputDir(build_cache_dir);
+
+    return kernel;
+}
+
+fn build_rust_kernel(b: *Builder) *LibExeObjStep
+{
+    const kernel = build_kernel_common(b, rust_kernel_elf);
+    //nasm_compile_elf_object(b, kernel, "src/x86_64_new.S", "zig-cache/kernel_x86_new.o");
+
+    const cargo_build = b.addSystemCommand(&[_][]const u8 { "cargo", "build" });
+    kernel.step.dependOn(&cargo_build.step);
+    kernel.addObjectFile(rust_kernel_lib_path);
 
     return kernel;
 }
@@ -205,10 +213,6 @@ fn build_desktop(b: *Builder) *LibExeObjStep
 
     return desktop;
 }
-
-const a_megabyte = 1024 * 1024;
-const disk_size: u64 = 256 * a_megabyte;
-const memory_size: u64 = disk_size;
 
 const DiskImage = struct
 {
@@ -254,7 +258,7 @@ const DiskImage = struct
         self.file_buffer.items.len = kernel_offset;
         print("File offset: {}\n", .{self.file_buffer.items.len});
         var kernel_size: u32 = 0;
-        try self.copy_file(if (build_rust) rust_kernel_elf_path else kernel_output_path, null);
+        try self.copy_file(if (build_rust) rust_kernel_elf_path else cpp_kernel_elf_path, null);
         kernel_size = @intCast(u32, self.file_buffer.items.len - kernel_offset);
         var kernel_size_writer = @ptrCast(*align(1) u32, &self.file_buffer.items[MBR.Offset.kernel_size]);
         kernel_size_writer.* = kernel_size;
@@ -311,6 +315,7 @@ const DiskImage = struct
         const file = try std.fs.cwd().openFile(filename, .{});
         const file_size = try file.getEndPos();
         const file_buffer_offset = self.file_buffer.items.len;
+        assert(file_size < (disk_size - file_buffer_offset));
         self.file_buffer.items.len += file_size;
         const written_byte_count = try file.readAll(self.file_buffer.items[file_buffer_offset..]);
         assert(written_byte_count == file_size);

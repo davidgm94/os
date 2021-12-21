@@ -5,11 +5,25 @@
     "target-endian": "little",
     "target-pointer-width": "64",
     "target-c-int-width": "32",
+    "max-atomic-width": 64,
+    "atomic-cas": true,
+
+    "env": "none",
     "os": "none",
     "executables": true,
+
     "linker-flavor": "ld.lld",
     "linker": "rust-lld",
+
     "panic-strategy": "abort",
+    "trap-unreachable": true,
     "disable-redzone": true,
+    "stack-probes": { "kind": "none" },
+    "singlethread": false,
+    "code-model": "kernel",
+    "split-debuginfo": "packed",
+    "eh-frame-header": false,
+    "requires-uwtable": false,
+    "function-sections": false,
     "features": "-mmx,-sse,+soft-float"
 }

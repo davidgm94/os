@@ -3,8 +3,8 @@ name = "renaissance-os"
 version = "0.1.0"
 authors = ["David Gonzalez Martin <davidgm94.work@protonmail.com"]
 
-#[lib]
-#crate-type = ["bin"]
+[lib]
+crate-type = ["staticlib"]
 
 [dependencies.lazy_static]
 version = "1.4.0"
@@ -12,3 +12,9 @@ features = ["spin_no_std"]
 
 [dependencies.bitflags]
 version = "1.3.2"
+
+[profile.dev]
+panic = 'abort'
+
+[profile.release]
+panic = 'abort'
