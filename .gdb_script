@@ -2,6 +2,8 @@ set disassembly-flavor intel
 cd /home/david/git/os
 symbol-file zig-out/rust_kernel.elf
 
+break 0x600
+break 0x1000
 b _start
 b kernel_initialize
 b panic

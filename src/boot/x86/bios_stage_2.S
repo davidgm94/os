@@ -224,8 +224,6 @@ load_memory_map:
         .acpi: dd 0
     .total_memory: dq 0
 
-
-
 allocate_kernel_buffer:
     push ds
     push es

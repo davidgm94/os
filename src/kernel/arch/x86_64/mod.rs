@@ -1,5 +1,7 @@
 pub use kernel::*;
 
+use core::arch::x86_64::__cpuid;
+
 pub const page_bit_count: u16 = 12;
 pub const page_size: u16 = 1 << page_bit_count;
 //pub const K_PAGE_BITS (12)
@@ -22,14 +24,19 @@ pub const low_memory_limit: u64 = 0x100000000; // The first 4GB is mapped here.
 
 pub struct Specific<'a>
 {
-    pub gdt_descriptor: GDT::Descriptor,
-    pub idt_descriptor: IDT::Descriptor,
     pub physical_memory: PhysicalMemory<'a>,
+    pub support: Support,
     pub installation_id: u128,
     pub bootloader_id: u64,
     pub bootloader_information_offset: u64,
+    pub gdt_descriptor: GDT::Descriptor,
+    pub idt_descriptor: IDT::Descriptor,
     pub kernel_size: u32,
 }
+
+#[no_mangle]
+#[link_section = ".data"]
+pub static mut cpu_local_storage_index: u64 = 0;
 
 impl<'a> const Default for Specific<'a>
 {
@@ -47,10 +54,366 @@ impl<'a> const Default for Specific<'a>
                 region_index: 0,
                 highest: 0,
             },
+            support: Support
+            {
+                paging: Paging
+                {
+                    NXE: 1,
+                    PCID: 1,
+                    SMEP: 1,
+                    TCE: 1,
+                },
+                simd: SIMD
+                {
+                    SSE3: 1,
+                    SSSE3: 1,
+                }
+            },
             installation_id: 0,
             bootloader_id: 0,
             bootloader_information_offset: 0,
             kernel_size: 0
+        }
+    }
+}
+
+pub struct Paging
+{
+    pub NXE: u32,
+    pub PCID: u32,
+    pub SMEP: u32,
+    pub TCE: u32,
+}
+
+pub struct SIMD
+{
+    pub SSE3: u32,
+    pub SSSE3: u32,
+}
+
+pub struct Support
+{
+    pub paging: Paging,
+    pub simd: SIMD,
+}
+
+impl<'a> Specific<'a>
+{
+    fn setup_processor1(&mut self)
+    {
+        {
+            let cpuid = unsafe { __cpuid(0x80000001) };
+            let nxe = (cpuid.edx & (1 << 20)) >> 20;
+            self.support.paging.NXE &= nxe;
+
+            if nxe != 0
+            {
+                let mut efer = EFER.read();
+                efer.0 |= 1 << 11;
+                EFER.write(efer);
+            }
+        }
+
+        unsafe
+        {
+            #![allow(named_asm_labels)]
+            asm!(
+                "fninit",
+                "mov rax, OFFSET .cw",
+                "fldcw [rax]",
+                "jmp .cwa",
+                ".cw:",
+                ".short 0x037a",
+                ".cwa:",
+            );
+        }
+
+        {
+            let cpuid = unsafe { __cpuid(0) };
+            if cpuid.eax >= 7
+            {
+                let cpuid = unsafe { __cpuid(7) };
+                let smep = (cpuid.ebx & (1 << 7)) >> 7;
+                self.support.paging.SMEP &= smep;
+
+                if smep != 0
+                {
+                    self.support.paging.SMEP &= !0xffff;
+                    self.support.paging.SMEP |= 2;
+                    let mut cr4 = CR4::read();
+                    cr4 |= 1 << 20;
+                    CR4::write(cr4);
+                }
+            }
+        }
+
+        {
+            let cpuid = unsafe { __cpuid(1) };
+            let pcid = (cpuid.ecx & (1 << 17)) >> 17;
+            self.support.paging.PCID &= pcid;
+
+            if pcid != 0
+            {
+                let mut cr4 = CR4::read();
+                cr4 |= 1 << 17;
+                CR4::write(cr4);
+            }
+        }
+
+        // Enable global pages
+        {
+            let mut cr4 = CR4::read();
+            cr4 |= 1 << 7;
+            CR4::write(cr4);
+        }
+
+        {
+            let cpuid = unsafe { __cpuid(0x80000001) };
+            let tce = (cpuid.ecx & (1 << 17)) >> 17;
+            self.support.paging.TCE &= tce;
+
+            if tce != 0
+            {
+                let mut efer = EFER.read();
+                efer.0 |= 1 << 15;
+                EFER.write(efer);
+            }
+        }
+
+        // Enable write-protect
+        {
+            let mut cr0 = CR0::read();
+            cr0 |= 1 << 16;
+            CR0::write(cr0);
+        }
+
+        // Enable MMX, SSE and SSE2
+        {
+            let cr0 = (CR0::read() & !4) | 2;
+            let cr4 = CR4::read() | (512 + 1024);
+            CR0::write(cr0);
+            CR4::write(cr4);
+        }
+
+        // Detect SSE3 and SSSE3, if available
+        {
+            let cpuid = unsafe { __cpuid(1) };
+
+            if (cpuid.ecx & (1 << 0)) == 0
+            {
+                self.support.simd.SSE3 &= !0xff;
+            }
+
+            if (cpuid.ecx & (1 << 9)) == 0
+            {
+                self.support.simd.SSSE3 &= !0xff;
+            }
+        }
+
+        // Enable system-call extensions (syscall and sysret)
+        {
+            let mut efer = EFER.read();
+            efer.0 |= 1;
+            EFER.write(efer);
+
+            let mut star = STAR.read();
+            star.1 = 0x005b0048;
+            STAR.write(star);
+
+            LSTAR.write_u64(syscall_entry as u64);
+
+            let mut sfmask = SFMASK.read();
+            // Clear direction and interrupt flags when entering ring 0
+            sfmask.0 = (1 << 10) | (1 << 9);
+            SFMASK.write(sfmask);
+        }
+
+        // Assign PAT2 to WC
+        {
+            let mut pat2 = PAT2.read();
+            pat2.0 &= 0xfff8ffff;
+            pat2.0 |= 0x00010000;
+            PAT2.write(pat2);
+        }
+
+        // Setup CPU local storage
+        {
+            let cpu_local_storage_address = unsafe { (&mut cpu_local_storage as *mut CPULocalStorage) as u64 };
+            let low = (cpu_local_storage_address + unsafe { cpu_local_storage_index }) as u32;
+            let high = (cpu_local_storage_address >> 32) as u32;
+            //unsafe { cpu_local_storage_index += 32 }
+            GS_BASE.write_custom(low, high);
+        }
+
+        // Load IDT
+        {
+            self.idt_descriptor.load();
+            interrupts_enable();
+        }
+
+        // Enable APIC
+        {
+            let mut apic = APIC_BASE.read();
+            apic.0 |= 0x800;
+            APIC_BASE.write(apic);
+
+            let offset: u64 = low_memory_map_start + ((APIC_BASE.0 & !0xfff) as u64);
+            unsafe
+            {
+                // Set the spurious interrupt vector to 0xff
+                *((offset + 0xf0) as *mut u32) |= 0x1ff;
+                // Use the flat processor addressing model
+                *((offset + 0xe0) as *mut u32) = 0xffffffff;
+            }
+
+            CR8::write(0);
+        }
+    }
+}
+
+pub struct MSR(u32);
+
+pub const APIC_BASE: MSR = MSR(0x1b);
+pub const PAT2: MSR = MSR(0x277);
+pub const EFER: MSR = MSR(0xc0000080);
+pub const STAR: MSR = MSR(0xc0000081);
+pub const LSTAR: MSR = MSR(0xc0000082);
+pub const SFMASK: MSR = MSR(0xc0000084);
+pub const FS_BASE: MSR = MSR(0xc0000100);
+pub const GS_BASE: MSR = MSR(0xc0000101);
+
+impl MSR
+{
+    #[inline(always)]
+    pub fn read(self) -> (u32, u32)
+    {
+        let (high, low): (u32, u32);
+
+        unsafe
+        {
+            asm!(
+                "rdmsr",
+                in("ecx") self.0,
+                out("eax") low, out("edx") high,
+                options(nomem, nostack, preserves_flags)
+            )
+        }
+
+        (low, high)
+    }
+
+    #[inline(always)]
+    pub fn write(self, value: (u32, u32))
+    {
+        self.write_custom(value.0, value.1);
+    }
+
+    #[inline(always)]
+    pub fn write_custom(self, low: u32, high: u32)
+    {
+        unsafe
+        {
+            asm!(
+                "wrmsr",
+                in("ecx") self.0,
+                in("eax") low, in("edx") high,
+                options(nostack, preserves_flags),
+            );
+        }
+    }
+
+    #[inline(always)]
+    pub fn write_u64(self, value: u64)
+    {
+        let low = value as u32;
+        let high = (value >> 32) as u32;
+        self.write_custom(low, high);
+    }
+}
+
+pub struct CR0;
+pub struct CR2;
+pub struct CR3;
+pub struct CR4;
+pub struct CR8;
+
+impl CR0
+{
+    #[inline(always)]
+    fn read() -> u64
+    {
+        let mut value: u64;
+        unsafe
+        {
+            asm!("mov {}, cr0", out(reg) value, options(nomem, nostack, preserves_flags))
+        }
+        value
+    }
+
+    #[inline(always)]
+    fn write(value: u64)
+    {
+        unsafe
+        {
+            asm!("mov cr0, {}", in(reg) value, options(nostack, preserves_flags))
+        }
+    }
+}
+
+impl CR3
+{
+    #[inline(always)]
+    fn flush()
+    {
+        unsafe
+        {
+            asm!( "mov rax, cr3", "mov cr3, rax")
+        }
+    }
+}
+
+impl CR4
+{
+    #[inline(always)]
+    fn read() -> u64
+    {
+        let mut value: u64;
+        unsafe
+        {
+            asm!("mov {}, cr4", out(reg) value, options(nomem, nostack, preserves_flags))
+        }
+        value
+    }
+
+    #[inline(always)]
+    fn write(value: u64)
+    {
+        unsafe
+        {
+            asm!("mov cr4, {}", in(reg) value, options(nostack, preserves_flags))
+        }
+    }
+}
+
+impl CR8
+{
+    #[inline(always)]
+    fn read() -> u64
+    {
+        let mut value: u64;
+        unsafe
+        {
+            asm!("mov {}, cr8", out(reg) value, options(nomem, nostack, preserves_flags))
+        }
+        value
+    }
+
+    #[inline(always)]
+    fn write(value: u64)
+    {
+        unsafe
+        {
+            asm!("mov cr8, {}", in(reg) value, options(nostack, preserves_flags))
         }
     }
 }
@@ -100,19 +463,6 @@ impl<'a> PhysicalMemory<'a>
     }
 }
 
-pub struct CR3;
-
-impl CR3
-{
-    #[inline(always)]
-    fn flush()
-    {
-        unsafe
-        {
-            asm!( "mov rax, cr3", "mov cr3, rax")
-        }
-    }
-}
 
 #[repr(C, align(0x10))]
 pub struct Stack
@@ -120,9 +470,19 @@ pub struct Stack
     memory: [u8; 0x4000],
 }
 
+#[repr(C, align(0x10))]
+pub struct CPULocalStorage
+{
+    memory: [u8; 0x2000],
+}
+
 #[no_mangle]
 #[link_section = ".bss"]
 pub static mut stack: Stack = Stack { memory: [0; 0x4000] };
+
+#[no_mangle]
+#[link_section = ".bss"]
+pub static mut cpu_local_storage: CPULocalStorage = CPULocalStorage { memory: [0; 0x2000] };
 
 #[naked]
 #[no_mangle]
@@ -157,10 +517,59 @@ pub extern "C" fn _start()
         kernel.arch.installation_id = *((kernel.arch.bootloader_information_offset + 0x7ff0) as *mut u128);
 
         *(0xFFFFFF7FBFDFE000 as *mut u64) = 0;
-        CR3::flush();
-        IO::PIC::disable();
-        kernel.arch.physical_memory.setup();
-        IDT::setup();
+    }
+
+    CR3::flush();
+    IO::PIC::disable();
+    unsafe { kernel.arch.physical_memory.setup() };
+    IDT::setup();
+    unsafe
+    {
+        kernel.arch.gdt_descriptor.save();
+        kernel.arch.setup_processor1();
+
+        asm!("and rsp, ~0xf");
+        kernel.init();
+        asm!("jmp {}", sym CPU::ready);
+    }
+
+    unreachable!();
+}
+
+pub struct CPU;
+
+fn next_timer(_: u64)
+{
+    unimplemented!();
+}
+
+impl CPU
+{
+    #[naked]
+    extern "C" fn ready()
+    {
+        next_timer(1);
+        unsafe
+        {
+            asm!("jmp {}", sym CPU::idle)
+        }
+        unreachable!();
+    }
+
+    #[naked]
+    extern "C" fn idle()
+    {
+        unsafe
+        {
+            asm!(
+                "sti",
+                "hlt",
+                "jmp {}",
+                sym CPU::idle,
+            )
+        }
+
+        unreachable!();
     }
 }
 
@@ -202,7 +611,7 @@ pub mod IO
         {
             unsafe
             {
-                let value: u8;
+                let mut value: u8;
                 asm!("in al, dx", out("al") value, in("dx") self.port, options(nomem, nostack, preserves_flags));
                 value
             }
@@ -349,6 +758,25 @@ pub extern "C" fn asm_interrupt_handler()
     unreachable!();
 }
 
+#[inline(always)]
+pub fn interrupts_enable()
+{
+    unsafe
+    {
+        asm!("sti", options(nomem, nostack))
+    }
+    unreachable!();
+}
+
+#[inline(always)]
+pub fn interrupts_disable()
+{
+    unsafe
+    {
+        asm!("cli", options(nomem, nostack))
+    }
+}
+
 pub struct InterruptContext
 {
 }
@@ -400,6 +828,18 @@ mod IDT
         pub base: u64,
     }
 
+    impl Descriptor
+    {
+        #[inline(always)]
+        pub fn load(&self)
+        {
+            unsafe
+            {
+                asm!("lidt [{}]", in(reg) self, options(readonly, nostack, preserves_flags))
+            }
+        }
+    }
+
     pub const size: usize = 0x1000;
     pub const entry_count: usize = size as usize / size_of::<Entry>();
 
@@ -409,8 +849,9 @@ mod IDT
         entries: [Entry; entry_count],
     }
 
+    #[no_mangle]
+    #[link_section = ".bss"]
     pub static mut data: Data = Data { entries: [Entry { foo1: 0, foo2: 0, foo3: 0, foo4: 0, handler: 0 }; entry_count] };
-
 
     impl Data
     {
@@ -722,10 +1163,31 @@ mod IDT
 
 mod GDT
 {
+    use kernel::*;
+
     #[repr(C, packed)]
     pub struct Descriptor
     {
         pub limit: u16,
         pub base: u64,
     }
+
+    impl Descriptor
+    {
+        #[inline(always)]
+        pub fn save(&mut self)
+        {
+            unsafe
+            {
+                asm!("sgdt [{}]", in(reg) self, options(nostack, preserves_flags))
+            }
+        }
+    }
+}
+
+#[naked]
+#[no_mangle]
+pub extern "C" fn syscall_entry()
+{
+    unimplemented!();
 }
