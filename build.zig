@@ -12,6 +12,8 @@ const InstallFileStep = std.build.InstallFileStep;
 const ArrayList = std.ArrayList;
 const print = std.debug.print;
 const assert = std.debug.assert;
+const panic = std.debug.panic;
+const allocPrint = std.fmt.allocPrint;
 
 const a_megabyte = 1024 * 1024;
 
@@ -207,11 +209,12 @@ const BIOS = struct
 
     const Image = struct
     {
+        const Self = @This();
+
         const size: u64 = 64 * a_megabyte;
         const memory_size: u64 = size;
         const output_file = "bios_disk.img";
         const final_path = build_cache_dir ++ output_file;
-        const Self = @This();
         var step: *Step = undefined;
 
         step: Step,
@@ -336,12 +339,14 @@ const BIOS = struct
 
 const UEFI = struct
 {
+    const app_out_path = Bootloader.output_dir ++ Bootloader.out_file ++ ".efi";
+    const OVMF_path = "binaries/OVMF.fd";
+
     const Bootloader = struct
     {
         const src_file = "src/uefi.zig";
         const out_file = "bootx64";
         const output_dir = build_cache_dir;
-        const app_out_path = output_dir ++ out_file ++ ".efi";
 
         const loader_target = CrossTarget
         {
@@ -357,6 +362,7 @@ const UEFI = struct
             uefi_loader.subsystem = .EfiApplication;
             uefi_loader.setOutputDir(output_dir);
             uefi_loader.red_zone = false;
+            uefi_loader.install();
 
             b.default_step.dependOn(&uefi_loader.step);
         }
@@ -365,8 +371,19 @@ const UEFI = struct
     const Image = struct
     {
         const Self = @This();
+
+        // @TODO: work on non-script build so we can have fast build times
+        const script = true;
         const output_file = "uefi_disk.img";
+        const partition_tmp_file = "efi_fat32_partition.img";
+        const partition_tmp_path = build_cache_dir ++ partition_tmp_file;
         const final_path = build_cache_dir ++ output_file;
+        const block_size = 512;
+        const block_count = 93750;
+        const partition_block_start = 2048;
+        const partition_block_end = 93716;
+        const files_to_copy = &[_][]const u8 { app_out_path };
+        const directories_to_copy_them_to = &[_][]const u8 { "/EFI/BOOT" };
         var step: *Step = undefined;
 
         step: Step,
@@ -375,24 +392,291 @@ const UEFI = struct
 
         fn create(b: *Builder) void
         {
-            var self = b.allocator.create(Self) catch @panic("out of memory");
-            self.* = Self
+            if (script)
             {
-                .step = Step.init(.custom, "uefi", b.allocator, Self.build),
-                .builder = b,
-                .file_buffer = undefined,
-            };
+                const script_build = Script
+                {
+                    .block_size = block_size,
+                    .block_count = block_count,
+                    .partition_block_start = partition_block_start,
+                    .partition_block_end = partition_block_end,
+                    .files_to_copy = files_to_copy,
+                    .directories_to_copy_them_to = directories_to_copy_them_to,
+                };
+                script_build.build(b, partition_tmp_path, Image.final_path) catch |err| panic("Failed to do scripted build: {}\n", .{err});
+            }
+            else
+            {
+                var self = b.allocator.create(Self) catch @panic("out of memory");
+                self.* = Self
+                {
+                    .step = Step.init(.custom, "uefi", b.allocator, Self.build),
+                    .builder = b,
+                    .file_buffer = undefined,
+                };
 
-            step = &self.step;
-            step.dependOn(b.default_step);
+                step = &self.step;
+                step.dependOn(b.default_step);
+            }
         }
 
+        // @INFO: this is just for scripting builds, which are the only one available right now
+
+        // @INFO: this is just for non-script builds, which are not mature yet
         fn build(_step: *Step) !void
         {
             const self = @fieldParentPtr(Self, "step", _step);
             _ = self;
             unreachable;
         }
+
+        const Script = struct
+        {
+            block_size: u64,
+            block_count: u64,
+            partition_block_start: u64,
+            partition_block_end: u64,
+            files_to_copy: []const []const u8,
+            directories_to_copy_them_to: []const []const u8,
+
+//pub const mdisk_str = "my_disk.img";
+//pub const nmdisk_str = "not_my_disk.img";
+//pub const mpartition_str = "my_partition.img";
+//pub const nmpartition_str = "not_my_partition.img";
+
+//pub const efi_partition_block_count = efi_partition_end - efi_partition_start + 1;
+//pub const directory_to_copy_them_to = &[_][]const u8 { "/EFI/BOOT" };
+
+            fn build(self: *const Script, b: *Builder, comptime partition_image_str: []const u8, comptime disk_image_str: []const u8) !void
+            {
+                const partition_block_count = self.partition_block_end - self.partition_block_start + 1;
+                // Partition
+                const partition_step = blk:
+                {
+                    const partition_create_zero_blob = b.addSystemCommand(
+                        &[_][]const u8
+                        {
+                            "dd",
+                            "if=/dev/zero",
+                            "of=" ++ partition_image_str,
+                            try allocPrint(b.allocator, "bs={}", .{block_size}),
+                            try allocPrint(b.allocator, "count={}", .{partition_block_count}),
+                        }
+                    );
+
+                    const partition_format = b.addSystemCommand(
+                        &[_][]const u8
+                        {
+                            "mformat",
+                            "-i",
+                            partition_image_str,
+                            "-F",
+                            "::",
+                        }
+                    );
+                    partition_format.step.dependOn(&partition_create_zero_blob.step);
+
+                    const file_count = self.files_to_copy.len;
+                    assert(file_count == self.directories_to_copy_them_to.len);
+                    const directory_steps = try b.allocator.alloc(*Step, file_count);
+
+                    var created_directories = ArrayList([]const u8).init(b.allocator);
+
+                    for (self.directories_to_copy_them_to) |directory, i|
+                    {
+                        var composed = false;
+
+                        var previous_steps = ArrayList(*Step).init(b.allocator);
+
+                        for (directory) |db, di|
+                        {
+                            if (db == '/' and di != 0)
+                            {
+                                composed = true;
+                                const d = directory[0..di];
+
+                                if (allocate_if_not_found(b, partition_image_str, &created_directories, d)) |partition_create_directory|
+                                {
+                                    partition_create_directory.dependOn(&partition_create_zero_blob.step);
+                                    partition_create_directory.dependOn(&partition_format.step);
+
+                                    for (previous_steps.items) |previous_step|
+                                    {
+                                        partition_create_directory.dependOn(previous_step);
+                                    }
+
+                                    previous_steps.append(partition_create_directory) catch unreachable;
+                                }
+                            }
+                        }
+
+                        if (allocate_if_not_found(b, partition_image_str, &created_directories, directory)) |partition_create_directory|
+                        {
+                            partition_create_directory.dependOn(&partition_create_zero_blob.step);
+                            partition_create_directory.dependOn(&partition_format.step);
+
+                            for (previous_steps.items) |previous_step|
+                            {
+                                partition_create_directory.dependOn(previous_step);
+                            }
+
+                            previous_steps.append(partition_create_directory) catch unreachable;
+
+                            directory_steps[i] = partition_create_directory;
+
+                            if (!composed)
+                            {
+                                directory_steps[i].dependOn(directory_steps[i - @boolToInt(i != 0)]);
+                            }
+                        }
+                    }
+
+                    var previous_command_step: ?*Step = null;
+                    {
+                        for (self.files_to_copy) |file, i|
+                        {
+                            const directory = self.directories_to_copy_them_to[i];
+                            const partition_copy_efi_file = b.addSystemCommand(
+                                &[_][]const u8
+                                {
+                                    "mcopy",
+                                    "-i",
+                                    partition_image_str,
+                                    file,
+                                    try allocPrint(b.allocator, "::{s}", .{directory}),
+                                }
+                            );
+                            partition_copy_efi_file.step.dependOn(b.default_step);
+                            partition_copy_efi_file.step.dependOn(&partition_create_zero_blob.step);
+                            partition_copy_efi_file.step.dependOn(&partition_format.step);
+                            partition_copy_efi_file.step.dependOn(directory_steps[i]);
+
+                            if (previous_command_step != null)
+                            {
+                                previous_command_step.?.dependOn(&partition_copy_efi_file.step);
+                            }
+                            previous_command_step = &partition_copy_efi_file.step;
+                        }
+                    }
+
+                    break :blk previous_command_step.?;
+                };
+
+                // Disk
+                const disk_step = blk:
+                {
+                    const disk_create_zero_blob = b.addSystemCommand(
+                        &[_][]const u8
+                        {
+                            "dd",
+                            "if=/dev/zero",
+                            "of=" ++ disk_image_str,
+                            try allocPrint(b.allocator, "bs={}", .{block_size}),
+                            try allocPrint(b.allocator, "count={}", .{block_count}),
+                        }
+                    );
+
+                    const disk_make_label = b.addSystemCommand(
+                        &[_][]const u8
+                        {
+                            "parted",
+                            disk_image_str,
+                            "-s",
+                            "-a",
+                            "minimal",
+                            "mklabel",
+                            "gpt",
+                        }
+                    );
+                    disk_make_label.step.dependOn(&disk_create_zero_blob.step);
+
+                    const disk_make_partition = b.addSystemCommand(
+                        &[_][]const u8
+                        {
+                            "parted",
+                            disk_image_str,
+                            "-s",
+                            "-a",
+                            "minimal",
+                            "mkpart",
+                            "EFI",
+                            "FAT32",
+                            try allocPrint(b.allocator, "{}s", .{self.partition_block_start}),
+                            try allocPrint(b.allocator, "{}s", .{self.partition_block_end}),
+                        }
+                    );
+                    disk_make_partition.step.dependOn(&disk_make_label.step);
+
+                    const disk_toggle_boot = b.addSystemCommand(
+                        &[_][]const u8
+                        {
+                            "parted",
+                            disk_image_str,
+                            "-s",
+                            "-a",
+                            "minimal",
+                            "toggle",
+                            "1",
+                            "boot",
+                        }
+                    );
+                    disk_toggle_boot.step.dependOn(&disk_make_partition.step);
+
+                    const partition_write_into_disk = b.addSystemCommand(
+                        &[_][]const u8
+                        {
+                            "dd",
+                            try allocPrint(b.allocator, "if={s}", .{partition_image_str}),
+                            try allocPrint(b.allocator, "of={s}", .{disk_image_str}),
+                            try allocPrint(b.allocator, "bs={}", .{block_size}),
+                            try allocPrint(b.allocator, "count={}", .{partition_block_count}),
+                            try allocPrint(b.allocator, "seek={}", .{partition_block_start}),
+                            "conv=notrunc",
+                        }
+                    );
+
+                    partition_write_into_disk.step.dependOn(partition_step);
+                    partition_write_into_disk.step.dependOn(&disk_toggle_boot.step);
+
+                    break :blk &partition_write_into_disk.step;
+                };
+
+                Image.step = b.step("uefi", "Create disk and partition images from scratch");
+                Image.step.dependOn(disk_step);
+            }
+
+            fn allocate_if_not_found(b: *Builder, partition_image_str: []const u8, created_directories: *ArrayList([]const u8), dir: []const u8) ?*Step
+            {
+                var found = false;
+                for (created_directories.items) |cd|
+                {
+                    if (std.mem.eql(u8, dir, cd))
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+
+                if (!found)
+                {
+                    const make_dir = b.addSystemCommand(
+                        &[_][]const u8
+                        {
+                            "mmd",
+                            "-i",
+                            partition_image_str,
+                            allocPrint(b.allocator, "::{s}", .{dir}) catch unreachable,
+                        }
+                    );
+
+                    created_directories.append(dir) catch unreachable;
+
+                    return &make_dir.step;
+                }
+
+                return null;
+            }
+        };
     };
 };
 
@@ -424,6 +708,37 @@ const Desktop = struct
 
 const loader = Loader.UEFI;
 const kernel_version = Kernel.Version.Rust;
+const final_image = switch (loader)
+{
+    .BIOS => BIOS.Image.final_path,
+    .UEFI => UEFI.Image.final_path,
+};
+
+const qemu_base_command_str = &[_][]const u8
+{
+    "qemu-system-x86_64",
+    "-device", "ich9-ahci,id=ahci",
+    "-device", "ide-hd,drive=mydisk,bus=ahci.0",
+    "-no-reboot", "-no-shutdown", "-M", "q35", "-cpu", "Haswell",
+    "-serial", "stdio",
+    "-d", "int,cpu_reset,in_asm",
+    //"-D", "logging.txt",
+    //"-d", "guest_errors,int,cpu,cpu_reset,in_asm"
+};
+
+const qemu_command_str = blk:
+{
+    const result = qemu_base_command_str ++ &[_][]const u8 { "-drive", "file=" ++ final_image ++ ",if=none,id=mydisk,format=raw,media=disk,index=0" };
+
+    if (loader == .UEFI)
+        break :blk (result ++
+            &[_][]const u8
+            {
+                "-bios",
+                UEFI.OVMF_path,
+            })
+    else break :blk result;
+};
 
 pub fn build(b: *Builder) !void
 {
@@ -445,25 +760,6 @@ pub fn build(b: *Builder) !void
     {
         .BIOS => BIOS.Image.step,
         .UEFI => UEFI.Image.step,
-    };
-
-    const qemu_command_str = &[_][]const u8
-    {
-        "qemu-system-x86_64",
-        "-drive", "file=" ++ 
-            switch (loader)
-            {
-                .BIOS => BIOS.Image.final_path,
-                .UEFI => UEFI.Image.final_path,
-            }
-            ++ ",if=none,id=mydisk,format=raw,media=disk,index=0",
-        "-device", "ich9-ahci,id=ahci",
-        "-device", "ide-hd,drive=mydisk,bus=ahci.0",
-        "-no-reboot", "-no-shutdown", "-M", "q35", "-cpu", "Haswell",
-        "-serial", "stdio",
-        "-d", "int,cpu_reset,in_asm",
-        //"-D", "logging.txt",
-        //"-d", "guest_errors,int,cpu,cpu_reset,in_asm"
     };
 
     // "run" step

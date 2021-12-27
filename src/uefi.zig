@@ -28,6 +28,21 @@ fn print(comptime format: []const u8, args: anytype) void
 pub fn main() noreturn
 {
     stdout = .{ .protocol = uefi.system_table.con_out.? };
+    _ = stdout.protocol.clearScreen();
     stdout.write("UEFI hello world\r\n");
-    while (true) {}
+
+    cpu_stop();
+}
+
+pub fn cpu_stop() callconv(.Inline) noreturn
+{
+    @setRuntimeSafety(false);
+    asm volatile(
+        \\.intel_syntax noprefix
+        \\.loop:
+        \\cli
+        \\hlt
+        \\jmp .loop
+    );
+    unreachable;
 }
