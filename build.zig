@@ -137,7 +137,7 @@ const Kernel = struct
     {
         base: Base,
 
-        const elf_name = "rust_kernel.elf";
+        const elf_name = "renaissance-os";
         const out_path = "target/rust_target/debug/";
         //const rust_kernel_lib_path = rust_out_path ++ "librenaissance_os.a";
         //const rust_kernel_bin_path = rust_out_path ++ "renaissance-os";
@@ -382,8 +382,22 @@ const UEFI = struct
         const block_count = 93750;
         const partition_block_start = 2048;
         const partition_block_end = 93716;
-        const files_to_copy = &[_][]const u8 { app_out_path };
-        const directories_to_copy_them_to = &[_][]const u8 { "/EFI/BOOT" };
+        const files_to_copy = &[_][]const u8
+        {
+            app_out_path,
+            switch (kernel_version)
+            {
+                .Rust => Kernel.rust.base.elf_path,
+                .CPP => Kernel.cpp.base.elf_path,
+            },
+            Desktop.out_elf_path,
+        };
+        const directories_to_copy_them_to = &[_][]const u8
+        {
+            "/EFI/BOOT",
+            "/",
+            "/",
+        };
         var step: *Step = undefined;
 
         step: Step,
@@ -439,14 +453,6 @@ const UEFI = struct
             files_to_copy: []const []const u8,
             directories_to_copy_them_to: []const []const u8,
 
-//pub const mdisk_str = "my_disk.img";
-//pub const nmdisk_str = "not_my_disk.img";
-//pub const mpartition_str = "my_partition.img";
-//pub const nmpartition_str = "not_my_partition.img";
-
-//pub const efi_partition_block_count = efi_partition_end - efi_partition_start + 1;
-//pub const directory_to_copy_them_to = &[_][]const u8 { "/EFI/BOOT" };
-
             fn build(self: *const Script, b: *Builder, comptime partition_image_str: []const u8, comptime disk_image_str: []const u8) !void
             {
                 const partition_block_count = self.partition_block_end - self.partition_block_start + 1;
@@ -478,88 +484,108 @@ const UEFI = struct
 
                     const file_count = self.files_to_copy.len;
                     assert(file_count == self.directories_to_copy_them_to.len);
-                    const directory_steps = try b.allocator.alloc(*Step, file_count);
 
+                    var directory_steps = ArrayList(*Step).init(b.allocator);
                     var created_directories = ArrayList([]const u8).init(b.allocator);
+                    var previous_steps = ArrayList(*Step).init(b.allocator);
 
-                    for (self.directories_to_copy_them_to) |directory, i|
+                    for (self.directories_to_copy_them_to) |directory|
                     {
-                        var composed = false;
-
-                        var previous_steps = ArrayList(*Step).init(b.allocator);
-
-                        for (directory) |db, di|
+                        if (!std.mem.eql(u8, directory, "/"))
                         {
-                            if (db == '/' and di != 0)
+                            var composed = false;
+
+                            for (directory) |db, di|
                             {
-                                composed = true;
-                                const d = directory[0..di];
-
-                                if (allocate_if_not_found(b, partition_image_str, &created_directories, d)) |partition_create_directory|
+                                if (db == '/')
                                 {
-                                    partition_create_directory.dependOn(&partition_create_zero_blob.step);
-                                    partition_create_directory.dependOn(&partition_format.step);
-
-                                    for (previous_steps.items) |previous_step|
+                                    if (di != 0)
                                     {
-                                        partition_create_directory.dependOn(previous_step);
+                                        composed = true;
+                                        const d = directory[0..di];
+
+                                        if (allocate_if_not_found(b, partition_image_str, &created_directories, d)) |partition_create_directory|
+                                        {
+                                            partition_create_directory.dependOn(&partition_create_zero_blob.step);
+                                            partition_create_directory.dependOn(&partition_format.step);
+
+                                            for (previous_steps.items) |previous_step|
+                                            {
+                                                partition_create_directory.dependOn(previous_step);
+                                            }
+
+                                            directory_steps.append(partition_create_directory) catch unreachable;
+                                            previous_steps.append(partition_create_directory) catch unreachable;
+                                        }
                                     }
-
-                                    previous_steps.append(partition_create_directory) catch unreachable;
                                 }
                             }
-                        }
 
-                        if (allocate_if_not_found(b, partition_image_str, &created_directories, directory)) |partition_create_directory|
-                        {
-                            partition_create_directory.dependOn(&partition_create_zero_blob.step);
-                            partition_create_directory.dependOn(&partition_format.step);
-
-                            for (previous_steps.items) |previous_step|
+                            if (allocate_if_not_found(b, partition_image_str, &created_directories, directory)) |partition_create_directory|
                             {
-                                partition_create_directory.dependOn(previous_step);
-                            }
+                                partition_create_directory.dependOn(&partition_create_zero_blob.step);
+                                partition_create_directory.dependOn(&partition_format.step);
 
-                            previous_steps.append(partition_create_directory) catch unreachable;
-
-                            directory_steps[i] = partition_create_directory;
-
-                            if (!composed)
-                            {
-                                directory_steps[i].dependOn(directory_steps[i - @boolToInt(i != 0)]);
-                            }
-                        }
-                    }
-
-                    var previous_command_step: ?*Step = null;
-                    {
-                        for (self.files_to_copy) |file, i|
-                        {
-                            const directory = self.directories_to_copy_them_to[i];
-                            const partition_copy_efi_file = b.addSystemCommand(
-                                &[_][]const u8
+                                for (previous_steps.items) |previous_step|
                                 {
-                                    "mcopy",
-                                    "-i",
-                                    partition_image_str,
-                                    file,
-                                    try allocPrint(b.allocator, "::{s}", .{directory}),
+                                    partition_create_directory.dependOn(previous_step);
                                 }
-                            );
-                            partition_copy_efi_file.step.dependOn(b.default_step);
-                            partition_copy_efi_file.step.dependOn(&partition_create_zero_blob.step);
-                            partition_copy_efi_file.step.dependOn(&partition_format.step);
-                            partition_copy_efi_file.step.dependOn(directory_steps[i]);
 
-                            if (previous_command_step != null)
-                            {
-                                previous_command_step.?.dependOn(&partition_copy_efi_file.step);
+                                directory_steps.append(partition_create_directory) catch unreachable;
+                                previous_steps.append(partition_create_directory) catch unreachable;
                             }
-                            previous_command_step = &partition_copy_efi_file.step;
                         }
                     }
 
-                    break :blk previous_command_step.?;
+                    assert(created_directories.items.len == directory_steps.items.len);
+
+                    var previous_command_step: *Step = undefined;
+
+                    for (self.files_to_copy) |file, i|
+                    {
+                        const directory = self.directories_to_copy_them_to[i];
+
+                        const partition_copy_efi_file = b.addSystemCommand(
+                            &[_][]const u8
+                            {
+                                "mcopy",
+                                "-i",
+                                partition_image_str,
+                                file,
+                                try allocPrint(b.allocator, "::{s}", .{directory}),
+                            }
+                        );
+                        partition_copy_efi_file.step.dependOn(b.default_step);
+                        partition_copy_efi_file.step.dependOn(&partition_create_zero_blob.step);
+                        partition_copy_efi_file.step.dependOn(&partition_format.step);
+
+                        if (!std.mem.eql(u8, directory, "/"))
+                        {
+                            var found = false;
+                            for (created_directories.items) |cd, cdi|
+                            {
+                                if (std.mem.eql(u8, directory, cd))
+                                {
+                                    partition_copy_efi_file.step.dependOn(directory_steps.items[cdi]);
+                                    found = true;
+                                    break;
+                                }
+                            }
+
+                            if (!found) panic("Unable to get directory step\n", .{});
+                        }
+
+                        if (i != 0)
+                        {
+                            partition_copy_efi_file.step.dependOn(previous_command_step);
+                        }
+
+                        previous_command_step = &partition_copy_efi_file.step;
+                    }
+
+                    assert(@ptrToInt(previous_command_step) != 0);
+
+                    break :blk previous_command_step;
                 };
 
                 // Disk
@@ -688,6 +714,7 @@ const Desktop = struct
     const zig_src_file = "src/desktop.zig";
     const asm_src_file = "src/desktop.S";
     const asm_out_file = build_cache_dir ++ "desktop_asm.o";
+    const out_elf_path = build_cache_dir ++ exe_name;
 
     fn build(b: *Builder) void
     {
@@ -704,14 +731,6 @@ const Desktop = struct
 
         b.default_step.dependOn(&desktop.step);
     }
-};
-
-const loader = Loader.UEFI;
-const kernel_version = Kernel.Version.Rust;
-const final_image = switch (loader)
-{
-    .BIOS => BIOS.Image.final_path,
-    .UEFI => UEFI.Image.final_path,
 };
 
 const qemu_base_command_str = &[_][]const u8
@@ -738,6 +757,14 @@ const qemu_command_str = blk:
                 UEFI.OVMF_path,
             })
     else break :blk result;
+};
+
+const loader = Loader.UEFI;
+const kernel_version = Kernel.Version.Rust;
+const final_image = switch (loader)
+{
+    .BIOS => BIOS.Image.final_path,
+    .UEFI => UEFI.Image.final_path,
 };
 
 pub fn build(b: *Builder) !void
