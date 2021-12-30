@@ -65,6 +65,7 @@ const Kernel = struct
         elf_name: []const u8,
         out_path: []const u8,
         elf_path: []const u8,
+        stripped: []const u8,
     };
 
     const Version = enum
@@ -80,6 +81,7 @@ const Kernel = struct
             .elf_name = Rust.elf_name,
             .out_path = Rust.out_path,
             .elf_path = Rust.out_path ++ Rust.elf_name,
+            .stripped = Rust.out_path ++ Rust.elf_name ++ ".stripped",
         }
     };
 
@@ -90,6 +92,7 @@ const Kernel = struct
             .elf_name = CPP.elf_name,
             .out_path = build_cache_dir,
             .elf_path = build_cache_dir ++ CPP.elf_name,
+            .stripped = build_cache_dir ++ CPP.elf_name ++ ".stripped",
         },
     };
 
@@ -260,8 +263,8 @@ const BIOS = struct
             try self.copy_file(
                 switch (kernel_version)
                 {
-                    .Rust => Kernel.rust.base.out_path,
-                    .CPP => Kernel.cpp.base.out_path,
+                    .Rust => Kernel.rust.base.stripped,
+                    .CPP => Kernel.cpp.base.stripped,
                 },
                 null);
             kernel_size = @intCast(u32, self.file_buffer.items.len - kernel_offset);
@@ -309,8 +312,10 @@ const BIOS = struct
                 .file_buffer = undefined,
             };
 
-            step = &self.step;
-            step.dependOn(b.default_step);
+            self.step.dependOn(b.default_step);
+
+            step = b.step("bios", "Create BIOS image");
+            step.dependOn(&self.step);
         }
 
         fn copy_file(self: *Self, filename: []const u8, expected_length: ?u64) !void
@@ -340,6 +345,7 @@ const BIOS = struct
 const UEFI = struct
 {
     const app_out_path = Bootloader.output_dir ++ Bootloader.out_file ++ ".efi";
+    const asm_out_path = "zig-cache/uefi_asm.bin";
     const OVMF_path = "binaries/OVMF.fd";
 
     const Bootloader = struct
@@ -364,7 +370,9 @@ const UEFI = struct
             uefi_loader.red_zone = false;
             uefi_loader.install();
 
+            const uefi_loader_asm = NASM.build_flat_binary(b, "src/uefi.S", asm_out_path);
             b.default_step.dependOn(&uefi_loader.step);
+            b.default_step.dependOn(&uefi_loader_asm.step);
         }
     };
 
@@ -387,14 +395,16 @@ const UEFI = struct
             app_out_path,
             switch (kernel_version)
             {
-                .Rust => Kernel.rust.base.elf_path,
-                .CPP => Kernel.cpp.base.elf_path,
+                .Rust => Kernel.rust.base.stripped,
+                .CPP => Kernel.cpp.base.stripped,
             },
             Desktop.out_elf_path,
+            UEFI.asm_out_path,
         };
         const directories_to_copy_them_to = &[_][]const u8
         {
             "/EFI/BOOT",
+            "/",
             "/",
             "/",
         };
@@ -537,6 +547,23 @@ const UEFI = struct
                         }
                     }
 
+                    const strip_symbols = b.addSystemCommand(&[_][]const u8
+                        {
+                            "objcopy",
+                            "--strip-debug",
+                            switch (kernel_version)
+                            {
+                                .CPP => Kernel.cpp.base.elf_path,
+                                .Rust => Kernel.rust.base.elf_path,
+                            },
+                            switch (kernel_version)
+                            {
+                                .CPP => Kernel.cpp.base.stripped,
+                                .Rust => Kernel.rust.base.stripped,
+                            },
+                        });
+                    strip_symbols.step.dependOn(b.default_step);
+
                     assert(created_directories.items.len == directory_steps.items.len);
 
                     var previous_command_step: *Step = undefined;
@@ -556,6 +583,7 @@ const UEFI = struct
                             }
                         );
                         partition_copy_efi_file.step.dependOn(b.default_step);
+                        partition_copy_efi_file.step.dependOn(&strip_symbols.step);
                         partition_copy_efi_file.step.dependOn(&partition_create_zero_blob.step);
                         partition_copy_efi_file.step.dependOn(&partition_format.step);
 
@@ -738,7 +766,9 @@ const qemu_base_command_str = &[_][]const u8
     "qemu-system-x86_64",
     "-device", "ich9-ahci,id=ahci",
     "-device", "ide-hd,drive=mydisk,bus=ahci.0",
-    "-no-reboot", "-no-shutdown", "-M", "q35", "-cpu", "Haswell",
+    "-no-reboot", "-no-shutdown",
+    "-M", "q35", "-cpu", "Haswell",
+    "-m", "4096",
     "-serial", "stdio",
     "-d", "int,cpu_reset,in_asm",
     //"-D", "logging.txt",

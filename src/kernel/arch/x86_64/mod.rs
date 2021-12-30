@@ -1,26 +1,22 @@
-pub use kernel::*;
+use kernel::*;
 
 use core::arch::x86_64::__cpuid;
 
-pub const page_bit_count: u16 = 12;
-pub const page_size: u16 = 1 << page_bit_count;
-//pub const K_PAGE_BITS (12)
-//pub const K_PAGE_SIZE (0x1000)
-//pub const
-//pub const MM_CORE_REGIONS_START (0xFFFF8001F0000000)
-//pub const MM_CORE_REGIONS_COUNT ((0xFFFF800200000000 - 0xFFFF8001F0000000) / sizeof(MMRegion))
-//pub const MM_KERNEL_SPACE_START (0xFFFF900000000000)
-//pub const MM_KERNEL_SPACE_SIZE  (0xFFFFF00000000000 - 0xFFFF900000000000)
-//pub const MM_MODULES_START      (0xFFFFFFFF90000000)
-//pub const MM_MODULES_SIZE	      (0xFFFFFFFFC0000000 - 0xFFFFFFFF90000000)
-//pub const
-//pub const MM_CORE_SPACE_START   (0xFFFF800100000000)
-//pub const MM_CORE_SPACE_SIZE    (0xFFFF8001F0000000 - 0xFFFF800100000000)
-//pub const MM_USER_SPACE_START   (0x100000000000)
-//pub const MM_USER_SPACE_SIZE    (0xF00000000000 - 0x100000000000)
-
+pub const core_memory_region_start: u64 = 0xFFFF8001F0000000;
+pub const core_memory_region_count: u64 = (0xFFFF800200000000 - 0xFFFF8001F0000000) / size_of::<memory::Region>() as u64;
+pub const kernel_address_space_start: u64 = 0xFFFF900000000000;
+pub const kernel_address_space_size: u64 = 0xFFFFF00000000000 - 0xFFFF900000000000;
+pub const module_memory_start: u64 = 0xFFFFFFFF90000000;
+pub const module_memory_size: u64 = 0xFFFFFFFFC0000000 - 0xFFFFFFFF90000000;
+pub const core_address_space_start: u64 = 0xFFFF800100000000;
+pub const core_address_space_size: u64 = 0xFFFF8001F0000000 - 0xFFFF800100000000;
+pub const user_address_space_start: u64 = 0x100000000000;
+pub const user_address_space_size: u64 = 0xF00000000000 - 0x100000000000;
 pub const low_memory_map_start: u64 = 0xFFFFFE0000000000;
 pub const low_memory_limit: u64 = 0x100000000; // The first 4GB is mapped here.
+
+pub const page_size: u16 = 0x1000;
+pub const page_bit_count: u8 = 12;
 
 pub struct Specific<'a>
 {
@@ -528,7 +524,7 @@ pub extern "C" fn _start()
         kernel.arch.gdt_descriptor.save();
         kernel.arch.setup_processor1();
 
-        asm!("and rsp, ~0xf");
+        //asm!("and rsp, ~0xf");
         kernel.init();
         asm!("jmp {}", sym CPU::ready);
     }
@@ -655,14 +651,54 @@ pub mod IO
     }
 }
 
-#[no_mangle]
-#[naked]
-pub extern "C" fn asm_interrupt_handler()
+//#[no_mangle]
+//#[naked]
+//pub extern "C" fn asm_interrupt_handler()
+//{
+    //unsafe
+    //{
+        //#![allow(named_asm_labels)]
+        //asm!(
+        //);
+    //}
+    //unreachable!();
+//}
+
+#[inline(always)]
+pub fn interrupts_enable()
 {
     unsafe
     {
-        #![allow(named_asm_labels)]
+        asm!("sti", options(nomem, nostack))
+    }
+}
+
+#[inline(always)]
+pub fn interrupts_disable()
+{
+    unsafe
+    {
+        asm!("cli", options(nomem, nostack))
+    }
+}
+
+pub struct InterruptContext
+{
+}
+
+pub extern "C" fn interrupt_handler(_: &InterruptContext)
+{
+    unimplemented!();
+}
+
+#[naked]
+pub extern "C" fn interrupt_handler_prologue<const interrupt_number: u64>()
+{
+    unsafe
+    {
         asm!(
+            "push 0",
+            "push {}",
             "cld",
             "push rax",
             "push rbx",
@@ -708,7 +744,7 @@ pub extern "C" fn asm_interrupt_handler()
             "mov rsp,rbx",
             "xor rax,rax",
 
-            "return_from_interrupt_handler:",
+            //"return_from_interrupt_handler:",
             "add rsp,8",
             "pop rbx",
             "mov ds,bx",
@@ -720,15 +756,15 @@ pub extern "C" fn asm_interrupt_handler()
             "fxrstor [rbx - 512]",
 
             "cmp al,0",
-            "je .old_thread",
+            "je 2f",
             "fninit", // New thread - initialise FPU.",
-            ".old_thread:",
+            "2:",
 
             "pop rax",
             "mov rbx,0x123456789ABCDEF",
             "cmp rax,rbx",
-            ".infinite_loop:",
-            "jne .infinite_loop",
+            "3:",
+            "jne 3b",
 
             "cli",
             "pop rax",
@@ -752,65 +788,112 @@ pub extern "C" fn asm_interrupt_handler()
 
             "add rsp,16",
             "iretq",
-            sym interrupt_handler
+            const interrupt_number,
+            sym interrupt_handler,
         );
     }
+
     unreachable!();
-}
-
-#[inline(always)]
-pub fn interrupts_enable()
-{
-    unsafe
-    {
-        asm!("sti", options(nomem, nostack))
-    }
-    unreachable!();
-}
-
-#[inline(always)]
-pub fn interrupts_disable()
-{
-    unsafe
-    {
-        asm!("cli", options(nomem, nostack))
-    }
-}
-
-pub struct InterruptContext
-{
-}
-
-pub extern "C" fn interrupt_handler(_: &InterruptContext)
-{
-    unimplemented!();
 }
 
 #[naked]
-pub extern "C" fn interrupt_handler_prologue<const interrupt_number: u64>()
-{
-    unsafe
-    {
-        asm!(
-            "push 0",
-            "push {}",
-            "jmp {}",
-            const interrupt_number,
-            sym asm_interrupt_handler,
-        );
-    }
-    unreachable!();
-}
-
 pub extern "C" fn interrupt_handler_prologue_error_code<const interrupt_number: u64>()
 {
     unsafe
     {
         asm!(
             "push {}",
-            "jmp {}",
+            "cld",
+            "push rax",
+            "push rbx",
+            "push rcx",
+            "push rdx",
+            "push rsi",
+            "push rdi",
+            "push rbp",
+            "push r8",
+            "push r9",
+            "push r10",
+            "push r11",
+            "push r12",
+            "push r13",
+            "push r14",
+            "push r15",
+
+            "mov rax,cr8",
+            "push rax",
+
+            "mov rax,0x123456789ABCDEF",
+            "push rax",
+
+            "mov rbx,rsp",
+            "and rsp,~0xF",
+            "fxsave [rsp - 512]",
+            "mov rsp,rbx",
+            "sub rsp,512 + 16",
+
+            "xor rax,rax",
+            "mov ax,ds",
+            "push rax",
+            "mov ax,0x10",
+            "mov ds,ax",
+            "mov es,ax",
+            "mov rax,cr2",
+            "push rax",
+
+            "mov rdi,rsp",
+            "mov rbx,rsp",
+            "and rsp,~0xF",
+            "call {}",
+            "mov rsp,rbx",
+            "xor rax,rax",
+
+            //"return_from_interrupt_handler:",
+            "add rsp,8",
+            "pop rbx",
+            "mov ds,bx",
+            "mov es,bx",
+
+            "add rsp,512 + 16",
+            "mov rbx,rsp",
+            "and rbx,~0xF",
+            "fxrstor [rbx - 512]",
+
+            "cmp al,0",
+            "je 2f",
+            "fninit", // New thread - initialise FPU.",
+            "2:",
+
+            "pop rax",
+            "mov rbx,0x123456789ABCDEF",
+            "cmp rax,rbx",
+            "3:",
+            "jne 3b",
+
+            "cli",
+            "pop rax",
+            "mov cr8,rax",
+
+            "pop r15",
+            "pop r14",
+            "pop r13",
+            "pop r12",
+            "pop r11",
+            "pop r10",
+            "pop r9",
+            "pop r8",
+            "pop rbp",
+            "pop rdi",
+            "pop rsi",
+            "pop rdx",
+            "pop rcx",
+            "pop rbx",
+            "pop rax",
+
+            "add rsp,16",
+            "iretq",
             const interrupt_number,
-            sym asm_interrupt_handler,
+            sym interrupt_handler,
         );
     }
     unreachable!();
@@ -1182,6 +1265,22 @@ mod GDT
                 asm!("sgdt [{}]", in(reg) self, options(nostack, preserves_flags))
             }
         }
+    }
+}
+
+pub mod Memory
+{
+    use kernel::*;
+
+    // Arch-specific part of address spaces
+    pub struct AddressSpace
+    {
+        pub cr3: u64,
+    }
+
+    pub fn init(k: &mut Kernel)
+    {
+        unreachable!();
     }
 }
 

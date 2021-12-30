@@ -1,6 +1,6 @@
 set disassembly-flavor intel
 cd /home/david/git/os
-symbol-file zig-out/rust_kernel.elf
+symbol-file target/rust_target/debug/renaissance-os
 
 break 0x600
 break 0x1000

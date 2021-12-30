@@ -9118,6 +9118,7 @@ void MMInitialise() {
 		MMFaultRange((uintptr_t) globalData, sizeof(GlobalData), MM_HANDLE_PAGE_FAULT_FOR_SUPERVISOR);
 	}
 }
+
 void MMSpaceCloseReference(MMSpace *space) {
 	if (space == kernelMMSpace) {
 		return;
