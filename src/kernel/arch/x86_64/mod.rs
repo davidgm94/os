@@ -1,6 +1,7 @@
 use kernel::*;
 
-use core::arch::x86_64::__cpuid;
+use core::arch::x86_64::{__cpuid, _rdtsc};
+use kernel::scheduler::ThreadTerminatableState;
 
 pub const core_memory_region_start: u64 = 0xFFFF8001F0000000;
 pub const core_memory_region_count: u64 = (0xFFFF800200000000 - 0xFFFF8001F0000000) / size_of::<memory::Region>() as u64;
@@ -234,7 +235,7 @@ impl<'a> Specific<'a>
 
         // Setup CPU local storage
         {
-            let cpu_local_storage_address = unsafe { (&mut cpu_local_storage as *mut CPULocalStorage) as u64 };
+            let cpu_local_storage_address = unsafe { (&mut _cpu_local_storage as *mut _CPULocalStorage) as u64 };
             let low = (cpu_local_storage_address + unsafe { cpu_local_storage_index }) as u32;
             let high = (cpu_local_storage_address >> 32) as u32;
             //unsafe { cpu_local_storage_index += 32 }
@@ -244,7 +245,7 @@ impl<'a> Specific<'a>
         // Load IDT
         {
             self.idt_descriptor.load();
-            interrupts_enable();
+            interrupts::only_enable();
         }
 
         // Enable APIC
@@ -461,24 +462,24 @@ impl<'a> PhysicalMemory<'a>
 
 
 #[repr(C, align(0x10))]
-pub struct Stack
+pub struct _Stack
 {
     memory: [u8; 0x4000],
 }
 
 #[repr(C, align(0x10))]
-pub struct CPULocalStorage
+pub struct _CPULocalStorage
 {
     memory: [u8; 0x2000],
 }
 
 #[no_mangle]
 #[link_section = ".bss"]
-pub static mut stack: Stack = Stack { memory: [0; 0x4000] };
+pub static mut _stack: _Stack = _Stack { memory: [0; 0x4000] };
 
 #[no_mangle]
 #[link_section = ".bss"]
-pub static mut cpu_local_storage: CPULocalStorage = CPULocalStorage { memory: [0; 0x2000] };
+pub static mut _cpu_local_storage: _CPULocalStorage = _CPULocalStorage { memory: [0; 0x2000] };
 
 #[naked]
 #[no_mangle]
@@ -506,8 +507,8 @@ pub extern "C" fn _start()
 
         asm!(
             "mov rsp, OFFSET {} + {}",
-            sym stack,
-            const size_of::<Stack>()
+            sym _stack,
+            const size_of::<_Stack>()
         );
 
         kernel.arch.installation_id = *((kernel.arch.bootloader_information_offset + 0x7ff0) as *mut u128);
@@ -529,7 +530,7 @@ pub extern "C" fn _start()
         asm!("jmp {}", sym CPU::ready);
     }
 
-    unreachable!();
+    unsafe { unreachable() }
 }
 
 pub struct CPU;
@@ -542,30 +543,29 @@ fn next_timer(_: u64)
 impl CPU
 {
     #[naked]
-    extern "C" fn ready()
+    extern "C" fn ready() -> !
     {
         next_timer(1);
         unsafe
         {
-            asm!("jmp {}", sym CPU::idle)
+            asm!("jmp {}", sym CPU::idle);
+            unreachable();
         }
-        unreachable!();
     }
 
     #[naked]
-    extern "C" fn idle()
+    extern "C" fn idle() -> !
     {
-        unsafe
+        loop
         {
-            asm!(
-                "sti",
-                "hlt",
-                "jmp {}",
-                sym CPU::idle,
-            )
+            unsafe
+            {
+                asm!(
+                    "sti",
+                    "hlt",
+                )
+            }
         }
-
-        unreachable!();
     }
 }
 
@@ -651,44 +651,394 @@ pub mod IO
     }
 }
 
-//#[no_mangle]
-//#[naked]
-//pub extern "C" fn asm_interrupt_handler()
-//{
-    //unsafe
-    //{
-        //#![allow(named_asm_labels)]
-        //asm!(
-        //);
-    //}
-    //unreachable!();
-//}
-
-#[inline(always)]
-pub fn interrupts_enable()
+pub fn halt() -> !
 {
-    unsafe
+    loop
     {
-        asm!("sti", options(nomem, nostack))
+        unsafe
+        {
+            asm!("cli",
+                 "hlt")
+        }
     }
 }
 
-#[inline(always)]
-pub fn interrupts_disable()
+pub mod interrupts
 {
-    unsafe
+    use kernel::*;
+    use super::CR8;
+
+    pub const vector_MSI_start: u64 = 0x70;
+    pub const vector_MSI_count: u64 = 0x40;
+    pub const vector_MSI_end: u64 = vector_MSI_start + vector_MSI_count;
+
+    #[inline(always)]
+    pub fn only_enable()
     {
-        asm!("cli", options(nomem, nostack))
+        unsafe
+        {
+            asm!("sti", options(nomem, nostack))
+        }
+    }
+
+    #[inline(always)]
+    pub fn only_disable()
+    {
+        unsafe
+        {
+            asm!("cli", options(nomem, nostack))
+        }
+    }
+
+    #[inline(always)]
+    pub fn enable()
+    {
+        // @WARNING: Changing this mechanism also requires update when deciding if we should
+        // re-enable interrupts on exception
+        CR8::write(0); // Still allow important IPIs to go through
+        unsafe { asm!("sti") } // @TODO: Where is this necessary? Is it a performance issue?
+    }
+
+    #[inline(always)]
+    pub fn disable()
+    {
+        CR8::write(14);
+        unsafe { asm!("sti") } // @TODO: Where is this necessary? Is it a performance issue?
+    }
+
+    // This function does more than checking
+    #[naked]
+    pub extern "C" fn are_enabled() -> bool
+    {
+        unsafe
+        {
+            asm!(
+                "pushf",
+                "pop rax",
+                "and rax, 0x200",
+                "shr rax, 9",
+
+                "mov rdx, cr8",
+                "cmp rdx, 0",
+                "je 2f",
+                "mov rax, 0",
+                "2:",
+                "ret",
+            );
+            unreachable();
+        }
     }
 }
 
-pub struct InterruptContext
+pub struct LocalStorage
 {
+    pub current_thread: *mut Thread,
+    pub panic_context: *const InterruptContext,
+    pub spinlock_count: u64,
 }
 
-pub extern "C" fn interrupt_handler(_: &InterruptContext)
+#[naked]
+pub extern "C" fn get_local_storage() -> *mut LocalStorage
+{
+    unsafe
+    {
+        asm!(
+            "mov rax, qword ptr gs:0",
+            "ret"
+        );
+        unreachable();
+    }
+}
+
+#[naked]
+pub extern "C" fn get_current_thread() -> *mut Thread
+{
+    unsafe
+    {
+        asm!(
+            "mov rax, qword ptr gs:16",
+            "ret"
+        );
+        unreachable();
+    }
+}
+
+bitflags!
+{
+    struct HandlePageFaultFlags: u32
+    {
+        const write = 1 << 0;
+        const lock_acquired = 1 << 1;
+        const for_supervisor = 1 << 2;
+    }
+
+    struct MapPageFlags: u32
+    {
+        const not_cacheable = 1 << 0;
+        const user = 1 << 1;
+        const overwrite = 1 << 2;
+        const commit_tables_now = 1 << 3;
+        const read_only = 1 << 4;
+        const copied = 1 << 5;
+        const no_new_tables = 1 << 6;
+        const frame_lock_acquired = 1 << 7;
+        const write_combining = 1 << 8;
+        const ignore_if_mapped = 1 << 9;
+    }
+}
+
+// arch_handle_page_fault
+fn handle_page_fault(fault_address: u64, flags: HandlePageFaultFlags) -> bool
+{
+    let address = fault_address & !(page_size as u64 - 1);
+    let for_supervisor = flags.contains(HandlePageFaultFlags::for_supervisor);
+
+    if !interrupts::are_enabled()
+    {
+        panic("Page fault with interrupts disabled\n");
+    }
+
+    let low_address = address < page_size as u64;
+    if !low_address
+    {
+        if address >= low_memory_map_start && address < low_memory_map_start + low_memory_limit && for_supervisor
+        {
+            unimplemented!();
+        }
+        else if address >= core_memory_region_start && address < core_memory_region_start + (core_memory_region_count * size_of::<memory::Region>() as u64) && for_supervisor
+        {
+        }
+        else if address >= core_address_space_start && address < core_address_space_start + core_address_space_size && for_supervisor
+        {
+            unimplemented!();
+        }
+        else if address >= kernel_address_space_start && address < kernel_address_space_start + kernel_address_space_size && for_supervisor
+        {
+            unimplemented!();
+        }
+        else if address >= module_memory_start && address < module_memory_start + module_memory_size && for_supervisor
+        {
+            unimplemented!();
+        }
+        else
+        {
+            unimplemented!();
+        }
+    }
+
+    return false;
+}
+
+fn map_page(space: &mut memory::AddressSpace, physical_address: u64, virtual_address: u64, flags: MapPageFlags) -> bool
 {
     unimplemented!();
+}
+
+#[repr(C)]
+pub struct InterruptContext
+{
+    cr2: u64,
+    ds: u64,
+    fxsave: [u8; 512 + 16],
+    _check: u64,
+    cr8: u64,
+    r15: u64,
+    r14: u64,
+    r13: u64,
+    r12: u64,
+    r11: u64,
+    r10: u64,
+    r9: u64,
+    r8: u64,
+    rbp: u64,
+    rdi: u64,
+    rsi: u64,
+    rdx: u64,
+    rcx: u64,
+    rbx: u64,
+    rax: u64,
+    interrupt_number: u64,
+    error_code: u64,
+    rip: u64,
+    cs: u64,
+    flags: u64,
+    rsp: u64,
+    ss: u64,
+}
+
+impl InterruptContext
+{
+    // @TODO: we are assuming InterruptContext can't be null, this maybe a problem?
+    fn sanity_check(&self)
+    {
+        if self.cs > 0x100 ||
+            self.ds > 0x100 ||
+            self.ss > 0x100 ||
+            (self.rip >= 0x1000000000000 && self.rip < 0xFFFF000000000000) ||
+            (self.rip < 0xFFFF800000000000 && self.cs == 0x48)
+        {
+            panic("Corrupt interrupt context\n");
+        }
+    }
+}
+
+pub extern "C" fn interrupt_handler(context: &mut InterruptContext)
+{
+    let interrupt_number = context.interrupt_number;
+    if unsafe { kernel.scheduler.panic } && interrupt_number != 2 { return }
+
+    if interrupts::are_enabled() { panic("Interrupts were enabled at the start of an interrupt handler\n") }
+
+    let mut local = get_local_storage();
+
+    if let Some(local_storage) = unsafe { local.as_mut() }
+    {
+        if let Some(current_thread) = unsafe { local_storage.current_thread.as_mut() }
+        {
+            current_thread.last_interrupt_timestamp = unsafe { _rdtsc() };
+        }
+
+        if local_storage.spinlock_count != 0 && context.cr8 != 0xe
+        {
+            panic("Local spinlock count is not zero but interrupts were enabled");
+        }
+    }
+
+    match interrupt_number
+    {
+        0..0x20 =>
+        {
+            if interrupt_number == 2
+            {
+                unsafe { local.as_mut() }.unwrap().panic_context = context;
+                halt();
+            }
+
+            let supervisor = context.cs & 3 == 0;
+
+            if !supervisor
+            {
+                if context.cs != 0x5b && context.cs != 0x6b
+                {
+                    panic("Unexpected value of CS\n");
+                }
+
+                let current_thread = unsafe { get_current_thread().as_mut() }.unwrap();
+                if current_thread.is_kernel_thread
+                {
+                    panic("Kernel thread executing user code\n");
+                }
+
+                let previous_terminatable_state = current_thread.terminatable_state;
+                current_thread.terminatable_state = ThreadTerminatableState::in_syscall;
+
+                if let Some(local_storage) = unsafe { local.as_ref() }
+                {
+                    if local_storage.spinlock_count != 0
+                    {
+                        panic("User exception ocurred with spinlock acquired\n");
+                    }
+                }
+
+                interrupts::enable();
+                local = null_mut();
+
+                if interrupt_number == 14
+                {
+                    let success = self::handle_page_fault(context.cr2,
+                        {
+                            if context.error_code & 2 != 0 { HandlePageFaultFlags::write }
+                            else { HandlePageFaultFlags::empty() }
+                        });
+                    if success
+                    {
+                        panic("goto resolved");
+                    }
+                }
+
+                unimplemented!();
+                //if interrupt_number == 0x13
+                //{
+                //}
+            }
+            else
+            {
+                if context.cs != 0x48
+                {
+                    panic("unexpected value of CS\n");
+                }
+
+                if interrupt_number == 14
+                {
+                    if (context.error_code & (1 << 3)) != 0 { panic("unreachable") }
+
+                    if let Some(local_storage) = unsafe { local.as_ref() }
+                    {
+                        if local_storage.spinlock_count != 0 && (context.cr2 >= 0xffff900000000000 && context.cr2 < 0xffff900000000000)
+                        {
+                            panic("page fault with spinlocks active\n");
+                        }
+                    }
+
+                    if (context.flags & 0x200) != 0 && context.cr8 != 0xe
+                    {
+                        interrupts::enable();
+                        local = null_mut();
+                    }
+
+                    if !self::handle_page_fault(context.cr2, HandlePageFaultFlags::for_supervisor | 
+                    {
+                            if context.error_code & 2 != 0 { HandlePageFaultFlags::write }
+                            else { HandlePageFaultFlags::empty() }
+                    })
+                    {
+                        let current_thread = unsafe { get_current_thread().as_mut() }.unwrap();
+                        if current_thread.in_safe_copy && context.cr2 < 0x8000000000000000
+                        {
+                            context.rip = context.r8;
+                        }
+                        else
+                        {
+                            panic("unreachable\n");
+                        }
+                    }
+
+                    interrupts::disable();
+                }
+                else
+                {
+                    panic("unreachable\n");
+                }
+            }
+        }
+        0xff => { }
+        0x20..0x30 => { }
+        0xf0..0xfe =>
+        {
+            unimplemented!();
+        }
+        interrupts::vector_MSI_start..interrupts::vector_MSI_end =>
+        {
+            if let Some(local_storage) = unsafe { local.as_mut() }
+            {
+                unimplemented!();
+            }
+        }
+        _ =>
+        {
+            if let Some(local_storage) = unsafe { local.as_mut() }
+            {
+                unimplemented!();
+            }
+        }
+    }
+
+    context.sanity_check();
+
+    if interrupts::are_enabled()
+    {
+        panic("Interrupts were enabled while returning from an interrupt handler\n");
+    }
 }
 
 #[naked]
@@ -699,6 +1049,7 @@ pub extern "C" fn interrupt_handler_prologue<const interrupt_number: u64>()
         asm!(
             "push 0",
             "push {}",
+            // asm interrupt handler
             "cld",
             "push rax",
             "push rbx",
@@ -793,7 +1144,7 @@ pub extern "C" fn interrupt_handler_prologue<const interrupt_number: u64>()
         );
     }
 
-    unreachable!();
+    unsafe { unreachable() }
 }
 
 #[naked]
@@ -803,6 +1154,7 @@ pub extern "C" fn interrupt_handler_prologue_error_code<const interrupt_number: 
     {
         asm!(
             "push {}",
+            // asm interrupt handler
             "cld",
             "push rax",
             "push rbx",
@@ -896,7 +1248,7 @@ pub extern "C" fn interrupt_handler_prologue_error_code<const interrupt_number: 
             sym interrupt_handler,
         );
     }
-    unreachable!();
+    unsafe { unreachable() }
 }
 
 mod IDT
@@ -1280,7 +1632,7 @@ pub mod Memory
 
     pub fn init(k: &mut Kernel)
     {
-        unreachable!();
+        unimplemented!();
     }
 }
 

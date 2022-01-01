@@ -27,6 +27,22 @@ pub enum ProcessKind
     desktop,
 }
 
+#[derive(Copy, Clone)]
+pub enum ThreadTerminatableState
+{
+    invalid_TS,
+    terminatable,
+    in_syscall,
+    user_block_request,
+}
+pub struct Thread
+{
+    pub in_safe_copy: bool,
+    pub last_interrupt_timestamp: u64,
+    pub terminatable_state: ThreadTerminatableState,
+    pub is_kernel_thread: bool,
+}
+
 bitflags!
 {
     pub struct ProcessPermissions: u64

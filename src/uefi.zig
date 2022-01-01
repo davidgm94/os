@@ -252,6 +252,29 @@ const GDT = extern struct
 };
 
 const uefi_asm_address = 0x180000;
+
+const fault_address = 0xffffffff800d9000;
+fn in_range(ph: *ELF.ProgramHeader) bool
+{
+    return _in_range(ph.virtual_address, ph.size_in_memory);
+}
+
+fn _in_range(va: u64, size: u64) bool
+{
+    return va <= fault_address and va + size >= fault_address;
+}
+
+//fn page_range(va: u64) bool
+//{
+    //return va 
+//}
+
+var kernel_pages: [0x10000]u64 = undefined;
+var kernel_page_count: u64 = 0;
+
+var kernel_program_headers: [0x100]u64 = undefined;
+var kernel_program_header_count: u64 = 0;
+
 pub fn main() noreturn
 {
     stdout = .{ .protocol = uefi.system_table.con_out.? };
@@ -387,12 +410,7 @@ pub fn main() noreturn
 
             if (descriptor.type == .ConventionalMemory and descriptor.physical_start >= 0x300000)
             {
-                memory_regions[memory_region_count].base_address = descriptor.physical_start;
-                memory_regions[memory_region_count].page_count = descriptor.number_of_pages;
-                memory_region_count += 1;
-            }
-        }
-
+                memory_regions[memory_region_count].base_address = descriptor.physical_start; memory_regions[memory_region_count].page_count = descriptor.number_of_pages; memory_region_count += 1; } }
         memory_regions[memory_region_count].base_address = 0;
 
         efi_check(boot_services.exitBootServices(uefi.handle, map_key),
@@ -436,21 +454,28 @@ pub fn main() noreturn
     // Allocate and map memory for the kernel
     {
         var next_page_table: u64 = 0x1c0000;
-        _ = next_page_table;
         const elf_header = @intToPtr(*ELF.Header, kernel_address);
-        const program_header_offset = kernel_address + elf_header.program_header_table_offset;
-        const program_header_entry_size = elf_header.program_header_entry_size;
 
-        var entry_i: u64 = 0;
-        const ph_entry_count = elf_header.program_header_entry_count;
+        assert(elf_header.program_header_entry_size == @sizeOf(ELF.ProgramHeader));
 
-        while (entry_i < ph_entry_count) : (entry_i += 1)
+        const program_headers = @intToPtr([*]ELF.ProgramHeader, kernel_address + elf_header.program_header_table_offset)[0..elf_header.program_header_entry_count];
+
+        //print("Program header entry count: {}\n", .{elf_header.program_header_entry_count});
+        var boolean = false;
+        for (program_headers) |*program_header|
         {
-            const program_header = @intToPtr(*ELF.ProgramHeader, program_header_offset + (program_header_entry_size * entry_i));
-
+            //print("Header type: {}\n", .{program_header.type});
             if (program_header.type != .load) continue;
+            // Program is not prepared to take unaligned segment virtual addresses at the moment
+            if (program_header.virtual_address & 0xfff != 0)
+            {
+                //panic("Program header virtual address must be page-aligned\n", .{});
+                cpu_stop();
+            }
 
-            const page_to_allocate_count = (program_header.size_in_memory >> 12) + @boolToInt(program_header.size_in_memory & 0xfff != 0);
+            // @TODO: this should be or or and?
+            const page_to_allocate_count = (program_header.size_in_memory >> page_bit_count) + @boolToInt(program_header.size_in_memory & 0xfff != 0) + @boolToInt(program_header.virtual_address & 0xfff != 0);
+            //print("PH address: 0x{x}. Size: 0x{x}. Page count: {}\n", .{program_header.virtual_address, program_header.size_in_memory, page_to_allocate_count});
 
             var physical_address = blk:
             {
@@ -463,7 +488,7 @@ pub fn main() noreturn
                         region.page_count -= page_to_allocate_count;
                         region.base_address += page_to_allocate_count << 12;
 
-                        break :blk result;
+                        break :blk result & 0xFFFFFFFFFFFFF000;
                     }
                 }
 
@@ -479,8 +504,17 @@ pub fn main() noreturn
                     physical_address += page_size;
                     })
             {
-                const virtual_address = (program_header.virtual_address + (page_i * page_size)) & 0x0000FFFFFFFFF000;
-                physical_address &= 0xFFFFFFFFFFFFF000;
+                const _base = (program_header.virtual_address + (page_i * page_size));
+                if (in_range(program_header))
+                {
+                    //print("Base: 0x{x}\n", .{_base});
+                    if (_base >= fault_address and _base - fault_address < 0x1000)
+                    {
+                        boolean = true;
+                        //print("Base: 0x{x}. Physical address: 0x{x}\n", .{_base, physical_address});
+                    }
+                }
+                const virtual_address = _base & 0x0000FFFFFFFFF000;
 
                 const index_L4: u64 = (virtual_address >> (page_bit_count + entry_per_page_table_bit_count * 3)) & (entry_per_page_table_count - 1);
                 const index_L3 = (virtual_address >> (page_bit_count + entry_per_page_table_bit_count * 2)) & (entry_per_page_table_count - 1);
@@ -488,7 +522,6 @@ pub fn main() noreturn
                 const index_L1 = (virtual_address >> (page_bit_count + entry_per_page_table_bit_count * 0)) & (entry_per_page_table_count - 1);
 
                 var table_L4 = @intToPtr([*]u64, 0x140000);
-
                 if (table_L4[index_L4] & 1 == 0)
                 {
                     table_L4[index_L4] = next_page_table | 0b111;
@@ -497,7 +530,6 @@ pub fn main() noreturn
                 }
 
                 var table_L3 = @intToPtr([*]u64, table_L4[index_L4] & ~@as(u64, page_size - 1));
-
                 if (table_L3[index_L3] & 1 == 0)
                 {
                     table_L3[index_L3] = next_page_table | 0b111;
@@ -506,7 +538,6 @@ pub fn main() noreturn
                 }
 
                 var table_L2 = @intToPtr([*]u64, table_L3[index_L3] & ~@as(u64, page_size - 1));
-
                 if (table_L2[index_L2] & 1 == 0)
                 {
                     table_L2[index_L2] = next_page_table | 0b111;
@@ -517,8 +548,75 @@ pub fn main() noreturn
                 var table_L1 = @intToPtr([*]u64, table_L2[index_L2] & ~@as(u64, page_size - 1));
                 table_L1[index_L1] = physical_address | 0b11;
             }
+
+            if (in_range(program_header))
+            {
+                //print("0x{x} -- 0x{x}\n", .{program_header.virtual_address, program_header.virtual_address + program_header.size_in_memory});
+            }
         }
     }
+
+    //{
+        //const elf_header = @intToPtr(*ELF.Header, kernel_address);
+        //assert(elf_header.program_header_entry_size == @sizeOf(ELF.ProgramHeader));
+
+        //const program_headers = @intToPtr([*]ELF.ProgramHeader, kernel_address + elf_header.program_header_table_offset)[0..elf_header.program_header_entry_count];
+
+        ////print("Program header entry count: {}\n", .{elf_header.program_header_entry_count});
+        //for (program_headers) |*program_header|
+        //{
+            ////print("Header type: {}\n", .{program_header.type});
+            //if (program_header.type != .load) continue;
+
+            //// @TODO: this should be or or and?
+            //var page_to_allocate_count = (program_header.size_in_memory >> page_bit_count) + @boolToInt(program_header.size_in_memory & 0xfff != 0) + @boolToInt(program_header.virtual_address & 0xfff != 0);
+
+            //var base_virtual_address = program_header.virtual_address & 0x0000FFFFFFFFF000;
+            //for (kernel_pages[0..kernel_page_count]) |kernel_page|
+            //{
+                //if (kernel_page >= base_virtual_address)
+                //{
+                    //base_virtual_address += page_size;
+                    //page_to_allocate_count -= 1;
+                //}
+            //}
+
+            //var virtual_address_it: u64 = base_virtual_address;
+            //const top_address = base_virtual_address + (page_size * page_to_allocate_count);
+            //while (virtual_address_it < top_address) : (virtual_address_it += page_size)
+            //{
+                //kernel_pages[kernel_page_count] = virtual_address_it;
+                //kernel_page_count += 1;
+            //}
+        //}
+
+        ////const base_physical_address = blk:
+        ////{
+            ////for (memory_regions) |*region|
+            ////{
+                ////if (region.base_address == 0) break;
+                ////if (region.page_count >= page_to_allocate_count)
+                ////{
+                    ////const result = region.base_address;
+                    ////region.page_count -= page_to_allocate_count;
+                    ////region.base_address += page_to_allocate_count << 12;
+
+                    ////break :blk result & 0xFFFFFFFFFFFFF000;
+                ////}
+            ////}
+
+            ////// panic
+            ////@intToPtr(*u32, provisional_video_information.framebuffer + @sizeOf(u32)).* = 0xffff00ff;
+            ////while (true) {}
+        ////};
+    //}
+
+    //print("Kernel page count: {}\n", .{kernel_page_count});
+
+
+    //print("Page to allocate count: {}\n", .{count});
+
+    //if (true) cpu_stop();
 
     // Copy the memory region information across
     {

@@ -60,45 +60,45 @@ const NASM = struct
 
 const Kernel = struct
 {
-    const Base = struct
-    {
-        elf_name: []const u8,
-        out_path: []const u8,
-        elf_path: []const u8,
-        stripped: []const u8,
-    };
+    elf_name: []const u8,
+    out_path: []const u8,
+    elf_path: []const u8,
+    stripped: []const u8,
 
     const Version = enum
     {
         Rust,
         CPP,
+        Zig,
     };
 
-    const rust = Rust
+    const rust = Kernel
     {
-        .base = Kernel.Base
-        {
-            .elf_name = Rust.elf_name,
-            .out_path = Rust.out_path,
-            .elf_path = Rust.out_path ++ Rust.elf_name,
-            .stripped = Rust.out_path ++ Rust.elf_name ++ ".stripped",
-        }
+        .elf_name = Rust.elf_name,
+        .out_path = Rust.out_path,
+        .elf_path = Rust.out_path ++ Rust.elf_name,
+        .stripped = Rust.out_path ++ Rust.elf_name ++ ".stripped",
     };
 
-    const cpp = CPP
+    const cpp = Kernel
     {
-        .base = Kernel.Base
-        {
-            .elf_name = CPP.elf_name,
-            .out_path = build_cache_dir,
-            .elf_path = build_cache_dir ++ CPP.elf_name,
-            .stripped = build_cache_dir ++ CPP.elf_name ++ ".stripped",
-        },
+        .elf_name = CPP.elf_name,
+        .out_path = build_cache_dir,
+        .elf_path = build_cache_dir ++ CPP.elf_name,
+        .stripped = undefined
     };
 
-    fn build_kernel_common(b: *Builder, kernel_output_file: []const u8) *LibExeObjStep
+    const zig = Kernel
     {
-        const kernel = b.addExecutable(kernel_output_file, null);
+        .elf_name = Zig.elf_name,
+        .out_path = build_cache_dir,
+        .elf_path = build_cache_dir ++ Zig.elf_name,
+        .stripped = undefined
+    };
+
+    fn build_kernel_common(b: *Builder, kernel_zig_file: ?[]const u8, kernel_output_file: []const u8) *LibExeObjStep
+    {
+        const kernel = b.addExecutable(kernel_output_file, kernel_zig_file);
         kernel.red_zone = false;
         kernel.code_model = .kernel;
         kernel.disable_stack_probing = true;
@@ -138,13 +138,8 @@ const Kernel = struct
 
     const Rust = struct
     {
-        base: Base,
-
         const elf_name = "renaissance-os";
         const out_path = "target/rust_target/debug/";
-        //const rust_kernel_lib_path = rust_out_path ++ "librenaissance_os.a";
-        //const rust_kernel_bin_path = rust_out_path ++ "renaissance-os";
-        //
 
         fn build(b: *Builder) void
         {
@@ -155,11 +150,9 @@ const Kernel = struct
 
     const CPP = struct
     {
-        base: Base,
-
         fn build(b: *Builder) void
         {
-            const kernel = build_kernel_common(b, cpp.base.elf_name);
+            const kernel = build_kernel_common(b, null, cpp.elf_name);
 
             kernel.addCSourceFiles(c_source_files, common_c_flags);
 
@@ -173,6 +166,19 @@ const Kernel = struct
         {
             "src/kernel.cpp",
         };
+    };
+
+    const Zig = struct
+    {
+        const elf_name = "zig_kernel.elf";
+        const src_file = "src/kernel.zig";
+
+        fn build(b: *Builder) void
+        {
+            const kernel = build_kernel_common(b, Zig.src_file, zig.elf_name);
+            kernel.addAssemblyFile("src/arch.S");
+            b.default_step.dependOn(&kernel.step);
+        }
     };
 
     const linker_script_path = "src/linker.ld";
@@ -263,8 +269,9 @@ const BIOS = struct
             try self.copy_file(
                 switch (kernel_version)
                 {
-                    .Rust => Kernel.rust.base.stripped,
-                    .CPP => Kernel.cpp.base.stripped,
+                    .Rust => Kernel.rust.stripped,
+                    .CPP => Kernel.cpp.elf_path,
+                    .Zig => Kernel.zig.elf_path,
                 },
                 null);
             kernel_size = @intCast(u32, self.file_buffer.items.len - kernel_offset);
@@ -368,7 +375,6 @@ const UEFI = struct
             uefi_loader.subsystem = .EfiApplication;
             uefi_loader.setOutputDir(output_dir);
             uefi_loader.red_zone = false;
-            uefi_loader.install();
 
             const uefi_loader_asm = NASM.build_flat_binary(b, "src/uefi.S", asm_out_path);
             b.default_step.dependOn(&uefi_loader.step);
@@ -395,8 +401,9 @@ const UEFI = struct
             app_out_path,
             switch (kernel_version)
             {
-                .Rust => Kernel.rust.base.stripped,
-                .CPP => Kernel.cpp.base.stripped,
+                .Rust => Kernel.rust.stripped,
+                .CPP => Kernel.cpp.elf_path,
+                .Zig => Kernel.zig.elf_path,
             },
             Desktop.out_elf_path,
             UEFI.asm_out_path,
@@ -547,22 +554,32 @@ const UEFI = struct
                         }
                     }
 
-                    const strip_symbols = b.addSystemCommand(&[_][]const u8
+                    const strip_symbols: ?*RunStep = strip:
+                    {
+                        if (kernel_version == .Rust)
                         {
-                            "objcopy",
-                            "--strip-debug",
-                            switch (kernel_version)
-                            {
-                                .CPP => Kernel.cpp.base.elf_path,
-                                .Rust => Kernel.rust.base.elf_path,
-                            },
-                            switch (kernel_version)
-                            {
-                                .CPP => Kernel.cpp.base.stripped,
-                                .Rust => Kernel.rust.base.stripped,
-                            },
-                        });
-                    strip_symbols.step.dependOn(b.default_step);
+                            const result = b.addSystemCommand(&[_][]const u8
+                                {
+                                    "objcopy",
+                                    "--strip-debug",
+                                    switch (kernel_version)
+                                    {
+                                        .CPP => Kernel.cpp.elf_path,
+                                        .Rust => Kernel.rust.elf_path,
+                                        .Zig => Kernel.zig.elf_path,
+                                    },
+                                    switch (kernel_version)
+                                    {
+                                        .CPP => Kernel.cpp.stripped,
+                                        .Rust => Kernel.rust.stripped,
+                                        .Zig => Kernel.zig.stripped,
+                                    },
+                                    });
+                            result.step.dependOn(b.default_step);
+                            break :strip result;
+                        }
+                        else break :strip null;
+                    };
 
                     assert(created_directories.items.len == directory_steps.items.len);
 
@@ -583,7 +600,7 @@ const UEFI = struct
                             }
                         );
                         partition_copy_efi_file.step.dependOn(b.default_step);
-                        partition_copy_efi_file.step.dependOn(&strip_symbols.step);
+                        if (strip_symbols) |strip| partition_copy_efi_file.step.dependOn(&strip.step);
                         partition_copy_efi_file.step.dependOn(&partition_create_zero_blob.step);
                         partition_copy_efi_file.step.dependOn(&partition_format.step);
 
@@ -801,17 +818,27 @@ pub fn build(b: *Builder) !void
 {
     // Default build command
     {
-        BIOS.Bootloader.build(b);
-        UEFI.Bootloader.build(b);
-        Kernel.CPP.build(b);
-        Kernel.Rust.build(b);
+        switch (loader)
+        {
+            .BIOS => BIOS.Bootloader.build(b),
+            .UEFI => UEFI.Bootloader.build(b),
+        }
+        switch (kernel_version)
+        {
+            .CPP  => Kernel.CPP.build(b),
+            .Rust => Kernel.Rust.build(b),
+            .Zig  => Kernel.Zig.build(b),
+        }
         Desktop.build(b);
     }
 
-    // "bios" step
-    BIOS.Image.create(b);
-    // "uefi" step
-    UEFI.Image.create(b);
+    switch (loader)
+    {
+        // "bios" step
+        .BIOS => BIOS.Image.create(b),
+        // "uefi" step
+        .UEFI => UEFI.Image.create(b),
+    }
 
     const image_step = switch (loader)
     {

@@ -2,8 +2,7 @@ pub mod arch;
 pub mod memory;
 pub mod scheduler;
 
-pub use self::scheduler::Process;
-use self::scheduler::Scheduler;
+use self::scheduler::{Scheduler, Process, Thread};
 
 extern crate bitflags;
 pub use self::bitflags::bitflags;
@@ -11,6 +10,8 @@ pub use self::bitflags::bitflags;
 pub use core::sync::atomic::*;
 pub use core::arch::asm;
 pub use core::mem::{size_of, transmute};
+pub use core::intrinsics::unreachable;
+pub use core::ptr::{null, null_mut};
 
 pub struct Kernel<'a>
 {
@@ -67,3 +68,14 @@ pub static mut kernel: Kernel = Kernel
     },
     arch: arch::Specific::default(),
 };
+
+fn _panic(_: &str)
+{
+    
+}
+
+pub fn panic(msg: &str) -> !
+{
+    _panic(msg);
+    loop{}
+}

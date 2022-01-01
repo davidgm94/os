@@ -12,6 +12,10 @@ SECTIONS
 	{
 		*(.rodata)
 	}
+    .data.rel.ro ALIGN(4K) : AT(ADDR(.data.rel.ro) - virtual_base)
+    {
+        *(.data.rel.ro)
+    }
 	.data ALIGN(4K) : AT(ADDR(.data) - virtual_base)
 	{
 		*(.data)

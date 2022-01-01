@@ -12,6 +12,7 @@
 #![feature(link_llvm_intrinsics)]
 #![feature(integer_atomics)]
 #![feature(core_intrinsics)]
+#![feature(exclusive_range_pattern)]
 
 #![feature(asm_const)]
 #![feature(asm_sym)]
