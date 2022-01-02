@@ -34,7 +34,8 @@ mod kernel;
 use core::panic::PanicInfo;
 
 #[panic_handler]
-pub extern "C" fn panic(_ : &PanicInfo) -> !
+#[cold]
+pub extern "C" fn panic(_: &PanicInfo) -> !
 {
     loop{}
 }

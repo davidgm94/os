@@ -1,5 +1,6 @@
-use kernel::*;
+#![allow(non_snake_case)]
 
+use kernel::*;
 use core::arch::x86_64::{__cpuid, _rdtsc};
 use kernel::scheduler::ThreadTerminatableState;
 
@@ -735,6 +736,8 @@ pub struct LocalStorage
     pub current_thread: *mut Thread,
     pub panic_context: *const InterruptContext,
     pub spinlock_count: u64,
+    pub processor_ID: u32,
+    pub scheduler_ready: bool,
 }
 
 #[naked]
@@ -790,7 +793,7 @@ bitflags!
 // arch_handle_page_fault
 fn handle_page_fault(fault_address: u64, flags: HandlePageFaultFlags) -> bool
 {
-    let address = fault_address & !(page_size as u64 - 1);
+    let virtual_address = fault_address & !(page_size as u64 - 1);
     let for_supervisor = flags.contains(HandlePageFaultFlags::for_supervisor);
 
     if !interrupts::are_enabled()
@@ -798,25 +801,28 @@ fn handle_page_fault(fault_address: u64, flags: HandlePageFaultFlags) -> bool
         panic("Page fault with interrupts disabled\n");
     }
 
-    let low_address = address < page_size as u64;
+    let low_address = virtual_address < page_size as u64;
     if !low_address
     {
-        if address >= low_memory_map_start && address < low_memory_map_start + low_memory_limit && for_supervisor
+        if virtual_address >= low_memory_map_start && virtual_address < low_memory_map_start + low_memory_limit && for_supervisor
+        {
+            let physical_address = virtual_address - low_memory_map_start;
+            self::map_page(unsafe { &mut kernel.process.address_space }, physical_address, virtual_address, MapPageFlags::commit_tables_now);
+        }
+        else if virtual_address >= core_memory_region_start && virtual_address < core_memory_region_start + (core_memory_region_count * size_of::<memory::Region>() as u64) && for_supervisor
+        {
+            let physical_address = unsafe { kernel.physical_allocator.allocate_with_flags(memory::Physical::Flags::zeroed) };
+            self::map_page(unsafe { &mut kernel.process.address_space }, physical_address, virtual_address, MapPageFlags::commit_tables_now);
+        }
+        else if virtual_address >= core_address_space_start && virtual_address < core_address_space_start + core_address_space_size && for_supervisor
         {
             unimplemented!();
         }
-        else if address >= core_memory_region_start && address < core_memory_region_start + (core_memory_region_count * size_of::<memory::Region>() as u64) && for_supervisor
-        {
-        }
-        else if address >= core_address_space_start && address < core_address_space_start + core_address_space_size && for_supervisor
+        else if virtual_address >= kernel_address_space_start && virtual_address < kernel_address_space_start + kernel_address_space_size && for_supervisor
         {
             unimplemented!();
         }
-        else if address >= kernel_address_space_start && address < kernel_address_space_start + kernel_address_space_size && for_supervisor
-        {
-            unimplemented!();
-        }
-        else if address >= module_memory_start && address < module_memory_start + module_memory_size && for_supervisor
+        else if virtual_address >= module_memory_start && virtual_address < module_memory_start + module_memory_size && for_supervisor
         {
             unimplemented!();
         }
@@ -910,7 +916,7 @@ pub extern "C" fn interrupt_handler(context: &mut InterruptContext)
         {
             if interrupt_number == 2
             {
-                unsafe { local.as_mut() }.unwrap().panic_context = context;
+                unsafe { local.as_mut().unwrap().panic_context = context }
                 halt();
             }
 
@@ -923,14 +929,14 @@ pub extern "C" fn interrupt_handler(context: &mut InterruptContext)
                     panic("Unexpected value of CS\n");
                 }
 
-                let current_thread = unsafe { get_current_thread().as_mut() }.unwrap();
+                let current_thread = unsafe { get_current_thread().as_mut() .unwrap() };
                 if current_thread.is_kernel_thread
                 {
                     panic("Kernel thread executing user code\n");
                 }
 
-                let previous_terminatable_state = current_thread.terminatable_state;
-                current_thread.terminatable_state = ThreadTerminatableState::in_syscall;
+                let previous_terminatable_state = current_thread.terminatable_state.read();
+                current_thread.terminatable_state.write(ThreadTerminatableState::in_syscall);
 
                 if let Some(local_storage) = unsafe { local.as_ref() }
                 {
@@ -992,7 +998,7 @@ pub extern "C" fn interrupt_handler(context: &mut InterruptContext)
                             else { HandlePageFaultFlags::empty() }
                     })
                     {
-                        let current_thread = unsafe { get_current_thread().as_mut() }.unwrap();
+                        let current_thread = unsafe { get_current_thread().as_mut() .unwrap() };
                         if current_thread.in_safe_copy && context.cr2 < 0x8000000000000000
                         {
                             context.rip = context.r8;

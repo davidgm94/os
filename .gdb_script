@@ -11,6 +11,7 @@ b panic
 b KernelInitialise
 b KernelPanic
 b KernelMain
+b core::panicking::panic
 
 target remote localhost:1234
 

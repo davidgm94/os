@@ -96,6 +96,34 @@ const Kernel = struct
         .stripped = undefined
     };
 
+    fn strip_symbols(b: *Builder) ?*RunStep
+    {
+        if (kernel_version == .Rust)
+        {
+            const result = b.addSystemCommand(&[_][]const u8
+                {
+                    "objcopy",
+                    "--strip-debug",
+                    switch (kernel_version)
+                    {
+                        .CPP => Kernel.cpp.elf_path,
+                        .Rust => Kernel.rust.elf_path,
+                        .Zig => Kernel.zig.elf_path,
+                    },
+                    switch (kernel_version)
+                    {
+                        .CPP => Kernel.cpp.stripped,
+                        .Rust => Kernel.rust.stripped,
+                        .Zig => Kernel.zig.stripped,
+                    },
+                    });
+            result.step.dependOn(b.default_step);
+            return result;
+        }
+
+        return null;
+    }
+
     fn build_kernel_common(b: *Builder, kernel_zig_file: ?[]const u8, kernel_output_file: []const u8) *LibExeObjStep
     {
         const kernel = b.addExecutable(kernel_output_file, kernel_zig_file);
@@ -280,7 +308,7 @@ const BIOS = struct
 
             self.align_buffer(0x200);
 
-            try self.copy_file("zig-cache/desktop.elf", null);
+            try self.copy_file(Desktop.out_elf_path, null);
 
             // @TODO: continue writing to the disk
             print("Writing image disk to {s}\n", .{Image.final_path});
@@ -320,6 +348,11 @@ const BIOS = struct
             };
 
             self.step.dependOn(b.default_step);
+
+            if (Kernel.strip_symbols(b)) |strip_symbols|
+            {
+                self.step.dependOn(&strip_symbols.step);
+            }
 
             step = b.step("bios", "Create BIOS image");
             step.dependOn(&self.step);
@@ -554,32 +587,7 @@ const UEFI = struct
                         }
                     }
 
-                    const strip_symbols: ?*RunStep = strip:
-                    {
-                        if (kernel_version == .Rust)
-                        {
-                            const result = b.addSystemCommand(&[_][]const u8
-                                {
-                                    "objcopy",
-                                    "--strip-debug",
-                                    switch (kernel_version)
-                                    {
-                                        .CPP => Kernel.cpp.elf_path,
-                                        .Rust => Kernel.rust.elf_path,
-                                        .Zig => Kernel.zig.elf_path,
-                                    },
-                                    switch (kernel_version)
-                                    {
-                                        .CPP => Kernel.cpp.stripped,
-                                        .Rust => Kernel.rust.stripped,
-                                        .Zig => Kernel.zig.stripped,
-                                    },
-                                    });
-                            result.step.dependOn(b.default_step);
-                            break :strip result;
-                        }
-                        else break :strip null;
-                    };
+                    const strip_symbols = Kernel.strip_symbols(b);
 
                     assert(created_directories.items.len == directory_steps.items.len);
 
@@ -806,7 +814,7 @@ const qemu_command_str = blk:
     else break :blk result;
 };
 
-const loader = Loader.UEFI;
+const loader = Loader.BIOS;
 const kernel_version = Kernel.Version.Rust;
 const final_image = switch (loader)
 {

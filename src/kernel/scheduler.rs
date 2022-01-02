@@ -11,7 +11,7 @@ pub struct Process
 
 pub struct Scheduler
 {
-
+    pub dispatch_spinlock: Spinlock,
     pub next_process_id: AtomicU64,
 
     // @TODO: volatile
@@ -27,7 +27,23 @@ pub enum ProcessKind
     desktop,
 }
 
-#[derive(Copy, Clone)]
+pub struct Writer
+{
+    lock: VolatilePointer<WriterLock>,
+    kind: bool,
+}
+
+#[derive(Copy, Clone, PartialEq)]
+pub enum ThreadState
+{
+    active,
+    waiting_for_mutex,
+    waiting_for_event,
+    waiting_for_writer_lock,
+    terminated,
+}
+
+#[derive(Copy, Clone, PartialEq)]
 pub enum ThreadTerminatableState
 {
     invalid_TS,
@@ -35,12 +51,49 @@ pub enum ThreadTerminatableState
     in_syscall,
     user_block_request,
 }
+
+#[derive(Copy, Clone)]
+pub struct ThreadVolatile
+{
+}
+
+#[derive(Copy, Clone)]
+pub struct ThreadWriterLock
+{
+    lock: WriterLock,
+    kind: bool,
+}
+
+pub const max_wait_count: usize = 8;
+
+#[derive(Copy, Clone)]
+pub struct ThreadEvent
+{
+    threads: VolatilePointer<LinkedItem<Thread>>,
+    events: [VolatilePointer<Event>; max_wait_count],
+    event_count: Volatile<u64>,
+}
+
+#[derive(Copy, Clone)]
+pub struct ThreadBlocking
+{
+    pub mutex: VolatilePointer<Mutex>,
+    pub writer: ThreadWriterLock,
+    pub event: ThreadEvent,
+}
+
+#[derive(Copy, Clone)]
 pub struct Thread
 {
     pub in_safe_copy: bool,
     pub last_interrupt_timestamp: u64,
-    pub terminatable_state: ThreadTerminatableState,
     pub is_kernel_thread: bool,
+
+    pub state: Volatile<ThreadState>,
+    pub terminatable_state: Volatile<ThreadTerminatableState>,
+    pub executing: Volatile<bool>,
+    pub terminating: Volatile<bool>,
+    pub blocking: ThreadBlocking,
 }
 
 bitflags!
