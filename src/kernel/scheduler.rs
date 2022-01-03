@@ -88,6 +88,7 @@ pub struct Thread
     pub in_safe_copy: bool,
     pub last_interrupt_timestamp: u64,
     pub is_kernel_thread: bool,
+    pub is_page_generator: bool,
 
     pub state: Volatile<ThreadState>,
     pub terminatable_state: Volatile<ThreadTerminatableState>,

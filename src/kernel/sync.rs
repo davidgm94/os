@@ -1,6 +1,8 @@
 use kernel::*;
 use crate::kernel::scheduler::{ThreadState, ThreadTerminatableState};
 
+pub const no_timeout: u64 = u64::MAX;
+
 pub struct Spinlock
 {
     state: Volatile<AtomicU8>,
@@ -228,8 +230,36 @@ impl Mutex
         return true
     }
 
+    pub fn release(&mut self)
+    {
+        unimplemented!();
+    }
+
     pub fn assert_locked(&self)
     {
         unimplemented!();
+    }
+}
+
+impl Event
+{
+    pub fn set(&mut self, already_set: bool) -> bool
+    {
+        unimplemented!()
+    }
+
+    pub fn reset(&mut self)
+    {
+        unimplemented!()
+    }
+
+    pub fn poll(&mut self) -> bool
+    {
+        unimplemented!()
+    }
+
+    pub fn wait(&mut self, timeout_ms: u64) -> bool
+    {
+        unimplemented!()
     }
 }

@@ -17,7 +17,7 @@ pub const user_address_space_size: u64 = 0xF00000000000 - 0x100000000000;
 pub const low_memory_map_start: u64 = 0xFFFFFE0000000000;
 pub const low_memory_limit: u64 = 0x100000000; // The first 4GB is mapped here.
 
-pub const page_size: u16 = 0x1000;
+pub const page_size: u64 = 0x1000;
 pub const page_bit_count: u8 = 12;
 
 pub struct Specific<'a>
@@ -775,25 +775,12 @@ bitflags!
         const for_supervisor = 1 << 2;
     }
 
-    struct MapPageFlags: u32
-    {
-        const not_cacheable = 1 << 0;
-        const user = 1 << 1;
-        const overwrite = 1 << 2;
-        const commit_tables_now = 1 << 3;
-        const read_only = 1 << 4;
-        const copied = 1 << 5;
-        const no_new_tables = 1 << 6;
-        const frame_lock_acquired = 1 << 7;
-        const write_combining = 1 << 8;
-        const ignore_if_mapped = 1 << 9;
-    }
 }
 
 // arch_handle_page_fault
 fn handle_page_fault(fault_address: u64, flags: HandlePageFaultFlags) -> bool
 {
-    let virtual_address = fault_address & !(page_size as u64 - 1);
+    let virtual_address = fault_address & !(page_size - 1);
     let for_supervisor = flags.contains(HandlePageFaultFlags::for_supervisor);
 
     if !interrupts::are_enabled()
@@ -801,18 +788,18 @@ fn handle_page_fault(fault_address: u64, flags: HandlePageFaultFlags) -> bool
         panic("Page fault with interrupts disabled\n");
     }
 
-    let low_address = virtual_address < page_size as u64;
+    let low_address = virtual_address < page_size;
     if !low_address
     {
         if virtual_address >= low_memory_map_start && virtual_address < low_memory_map_start + low_memory_limit && for_supervisor
         {
             let physical_address = virtual_address - low_memory_map_start;
-            self::map_page(unsafe { &mut kernel.process.address_space }, physical_address, virtual_address, MapPageFlags::commit_tables_now);
+            self::map_page(unsafe { &mut kernel.process.address_space }, physical_address, virtual_address, memory::MapPageFlags::commit_tables_now);
         }
         else if virtual_address >= core_memory_region_start && virtual_address < core_memory_region_start + (core_memory_region_count * size_of::<memory::Region>() as u64) && for_supervisor
         {
             let physical_address = unsafe { kernel.physical_allocator.allocate_with_flags(memory::Physical::Flags::zeroed) };
-            self::map_page(unsafe { &mut kernel.process.address_space }, physical_address, virtual_address, MapPageFlags::commit_tables_now);
+            self::map_page(unsafe { &mut kernel.process.address_space }, physical_address, virtual_address, memory::MapPageFlags::commit_tables_now);
         }
         else if virtual_address >= core_address_space_start && virtual_address < core_address_space_start + core_address_space_size && for_supervisor
         {
@@ -835,9 +822,14 @@ fn handle_page_fault(fault_address: u64, flags: HandlePageFaultFlags) -> bool
     return false;
 }
 
-fn map_page(space: &mut memory::AddressSpace, physical_address: u64, virtual_address: u64, flags: MapPageFlags) -> bool
+pub fn map_page(space: &mut memory::AddressSpace, physical_address: u64, virtual_address: u64, flags: memory::MapPageFlags) -> bool
 {
     unimplemented!();
+}
+
+pub fn early_allocate_page() -> u64
+{
+    unimplemented!()
 }
 
 #[repr(C)]

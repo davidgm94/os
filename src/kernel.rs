@@ -1,13 +1,18 @@
+#[macro_use]
+
 pub mod arch;
 pub mod memory;
 pub mod scheduler;
 pub mod sync;
 
-use self::scheduler::{Scheduler, Process, Thread};
-use self::sync::{Mutex, Spinlock, WriterLock, Event};
+pub use self::scheduler::{Scheduler, Process, Thread};
+pub use self::sync::{Mutex, Spinlock, WriterLock, Event};
+pub use self::arch::{page_size, page_bit_count};
 
 extern crate bitflags;
 pub use self::bitflags::bitflags;
+
+extern crate scopeguard;
 
 pub use core::sync::atomic::*;
 pub use core::arch::asm;
@@ -31,7 +36,7 @@ macro_rules! expr { ($e: expr) => { $e } } // tt hack
 macro_rules! defer
 {
     ($($data: tt)*) => (
-        let _scope_call = ::ScopeCall {
+        let _scope_call = ScopeCall {
             c: Some(|| -> () { ::expr!({ $($data)* }) })
         };
     )
@@ -46,12 +51,12 @@ pub struct Volatile<T>
 
 impl<T> Volatile<T>
 {
-    fn read(&self) -> T
+    fn read_volatile(&self) -> T
     {
         unsafe { core::ptr::read_volatile(&self.value) }
     }
 
-    fn write(&mut self, value: T)
+    fn write_volatile(&mut self, value: T)
     {
         unsafe { core::ptr::write_volatile(&mut self.value, value) }
     }
@@ -74,12 +79,12 @@ pub struct VolatilePointer<T>
 
 impl<T> VolatilePointer<T>
 {
-    fn read(self) -> T
+    fn deref_volatile(self) -> T
     {
         unsafe { core::ptr::read_volatile(self.ptr) }
     }
 
-    fn write(self, value: T)
+    fn write_volatile(self, value: T)
     {
         unsafe { core::ptr::write_volatile(self.ptr, value) }
     }
@@ -245,6 +250,85 @@ impl<T> LinkedList<T>
     }
 }
 
+const bitset_group_size: u64 = 0x1000;
+pub struct Bitset<'a>
+{
+    single_usage: &'a mut [u32],
+    group_usage: &'a mut [u16],
+}
+
+impl<'a> Bitset<'a>
+{
+    pub fn init(&mut self, count: u64, map_all: bool)
+    {
+        let single_count = (count + 31) & !31;
+        let group_count = single_count / bitset_group_size + 1;
+
+        let byte_count = (single_count >> 3) + (group_count * 2);
+        let flags =
+        {
+            if map_all { memory::RegionFlags::fixed }
+            else { memory::RegionFlags::empty() }
+        };
+        let single_usage = unsafe { kernel.process.address_space.standard_allocate(byte_count, flags) };
+        let group_usage = single_usage + ((single_count >> 4) * size_of::<u16>() as u64);
+
+        self.single_usage = unsafe { &mut *core::ptr::slice_from_raw_parts_mut(single_usage as *mut u32, single_count as usize) };
+        self.group_usage = unsafe { &mut *core::ptr::slice_from_raw_parts_mut(group_usage as *mut u16, group_count as usize) };
+    }
+
+    pub fn put_all(&mut self)
+    {
+        let single_count = self.single_usage.len();
+        let mut i: usize = 0;
+
+        while i < single_count
+        {
+            self.group_usage[i / bitset_group_size as usize] += 32;
+            self.single_usage[i / 32] |= 0xffffffff;
+            i += 32;
+        }
+    }
+
+    pub fn get(&mut self, maybe_count: u64, maybe_alignment: u64, maybe_below: u64) -> u64
+    {
+        let result = u64::MAX;
+
+        let below = 
+        {
+            if maybe_below != 0
+            {
+                if maybe_below < maybe_count { return result }
+                maybe_below - maybe_count
+            }
+            else
+            {
+                maybe_below
+            }
+        };
+
+        unimplemented!()
+    }
+
+    pub fn read(&mut self, index: u64) -> bool
+    {
+        (self.single_usage[index as usize >> 5] & (1 << (index as usize & 31))) != 0
+    }
+
+    pub fn take(&mut self, index: u64)
+    {
+        let group = (index / bitset_group_size) as usize;
+        self.group_usage[group] -= 1;
+        self.single_usage[index as usize >> 5] &= !(1 << (index & 31));
+    }
+
+    pub fn put(&mut self, index: u64)
+    {
+        self.single_usage[index as usize >> 5] |= 1 << (index & 31);
+        self.group_usage[(index / bitset_group_size) as usize] += 1;
+    }
+}
+
 pub struct Kernel<'a>
 {
     core: Core<'a>,
@@ -258,6 +342,7 @@ pub struct Core<'a>
 {
     regions: &'a mut[memory::Region],
     region_commit_count: u64,
+    address_space: memory::AddressSpace,
 }
 
 impl<'a> Kernel<'a>
@@ -276,6 +361,7 @@ pub static mut kernel: Kernel = Kernel
     {
         regions: &mut[],
         region_commit_count: 0,
+        address_space: memory::AddressSpace::default(),
     },
     scheduler: Scheduler
     {
@@ -289,14 +375,7 @@ pub static mut kernel: Kernel = Kernel
     {
         id: 0,
         handle_count: 0,
-        address_space: memory::AddressSpace
-        {
-            arch: arch::Memory::AddressSpace
-            {
-                cr3: 0,
-            },
-            reference_count: 0,
-        },
+        address_space: memory::AddressSpace::default(),
         permissions: scheduler::ProcessPermissions::empty(),
         kind: scheduler::ProcessKind::kernel,
     },
@@ -305,6 +384,23 @@ pub static mut kernel: Kernel = Kernel
         pageframes: &mut[],
         commit_mutex: Mutex::default(),
         pageframe_mutex: Mutex::default(),
+
+        first_free_page: 0,
+        first_zeroed_page: 0,
+        first_standby_page: 0,
+        last_standby_page: 0,
+
+        zeroed_page_count: 0,
+        free_page_count: 0,
+        standby_page_count: 0,
+        active_page_count: 0,
+
+        commit_fixed: 0,
+        commit_pageable: 0,
+        commit_fixed_limit: 0,
+        commit_limit: 0,
+
+        approximate_total_object_cache_byte_count: 0,
     },
     arch: arch::Specific::default(),
 };
