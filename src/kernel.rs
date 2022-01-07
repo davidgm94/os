@@ -18,7 +18,17 @@ pub use core::sync::atomic::*;
 pub use core::arch::asm;
 pub use core::mem::{size_of, transmute};
 pub use core::intrinsics::unreachable;
-pub use core::ptr::{null, null_mut};
+pub use core::ptr::{null, null_mut, addr_of, addr_of_mut};
+
+pub fn take_slice<'a, T>(ptr: *mut T, count: usize) -> &'a mut[T]
+{
+    unsafe { &mut *core::ptr::slice_from_raw_parts_mut(ptr, count) } 
+}
+
+pub fn take_byte_slice<'a, T>(ptr: *mut T, count: usize) -> &'a mut[u8]
+{
+    take_slice(ptr as *mut u8, count)
+}
 
 pub struct ScopeCall<F: FnOnce()> {
     c: Option<F>
@@ -79,12 +89,16 @@ pub struct VolatilePointer<T>
 
 impl<T> VolatilePointer<T>
 {
+    /// This method is named diferently in order to differentiate it from the Volatile struct,
+    /// which does not involve pointers
     fn deref_volatile(self) -> T
     {
         unsafe { core::ptr::read_volatile(self.ptr) }
     }
 
-    fn write_volatile(self, value: T)
+    /// This method is named diferently in order to differentiate it from the Volatile struct,
+    /// which does not involve pointers
+    fn write_volatile_at_address(self, value: T)
     {
         unsafe { core::ptr::write_volatile(self.ptr, value) }
     }
@@ -122,11 +136,19 @@ pub struct LinkedItem<T>
     item: *mut T,
 }
 
+#[derive(Copy, Clone)]
 pub struct LinkedList<T>
 {
     first: *mut LinkedItem<T>,
     last: *mut LinkedItem<T>,
     count: u64,
+}
+
+impl<T> const Default for LinkedList<T>
+{
+    fn default() -> Self {
+        Self { first: null_mut(), last: null_mut(), count: 0 }
+    }
 }
 
 impl<T> LinkedItem<T>
@@ -257,6 +279,12 @@ pub struct Bitset<'a>
     group_usage: &'a mut [u16],
 }
 
+impl<'a> const Default for Bitset<'a> {
+    fn default() -> Self {
+        Self { single_usage: &mut[], group_usage: &mut[] }
+    }
+}
+
 impl<'a> Bitset<'a>
 {
     pub fn init(&mut self, count: u64, map_all: bool)
@@ -329,11 +357,238 @@ impl<'a> Bitset<'a>
     }
 }
 
+pub mod AVL
+{
+    use kernel::*;
+
+    pub enum TreeSearchMode
+    {
+        exact,
+        smallest_above_or_equal,
+        largest_below_or_equal,
+    }
+
+    type Key = u64;
+
+    #[derive(Copy)]
+    pub struct Item<T>
+    {
+        this: *mut T,
+        children: [*mut Self; 2],
+        parent: *mut Self,
+        tree: *mut Tree<T>,
+        key: Key,
+        height: i32,
+    }
+
+    pub enum DuplicateKeyPolicy
+    {
+        panic,
+        allow,
+        fail,
+    }
+
+    #[derive(Copy, Clone)]
+    pub struct Tree<T>
+    {
+        root: *mut Item<T>,
+        modcheck: bool,
+    }
+
+    impl<T> Clone for Item<T>
+    {
+        fn clone(&self) -> Self {
+            Self { this: self.this.clone(), children: self.children.clone(), parent: self.parent.clone(), tree: self.tree.clone(), key: self.key.clone(), height: self.height.clone() }
+        }
+    }
+    impl<T> Item<T>
+    {
+        fn relink(&mut self, new_location: &mut Self)
+        {
+            let parent = unsafe { self.parent.as_mut().unwrap() };
+            parent.children[(parent.children[1] == self as *mut _) as usize] = new_location;
+            if let Some(left) = unsafe { self.children[0].as_mut() }
+            {
+                left.parent = new_location;
+            }
+            if let Some(right) = unsafe { self.children[1].as_mut() }
+            {
+                right.parent = new_location;
+            }
+        }
+
+        pub fn swap(&mut self, other: &mut Self)
+        {
+            unsafe
+            {
+                (*self.parent).children[((*self.parent).children[1] == self as *mut _) as usize] = other;
+                (*other.parent).children[((*other.parent).children[1] == other as *mut _) as usize] = self;
+            }
+
+            let tmp_self = self.clone();
+            let tmp_other = other.clone();
+
+            self.parent = tmp_other.parent;
+            other.parent = tmp_self.parent;
+
+            self.height = tmp_other.height;
+            other.height = self.height;
+
+            self.children[0] = tmp_other.children[0];
+            self.children[1] = tmp_other.children[1];
+            other.children[0] = tmp_self.children[0];
+            other.children[1] = tmp_self.children[1];
+
+            if let Some(self_left_child) = unsafe { self.children[0].as_mut() } { self_left_child.parent = self }
+            if let Some(self_right_child) = unsafe { self.children[1].as_mut() } { self_right_child.parent = self }
+            if let Some(other_left_child) = unsafe { other.children[0].as_mut() } { other_left_child.parent = other }
+            if let Some(other_right_child) = unsafe { other.children[1].as_mut() } { other_right_child.parent = other }
+        }
+
+        pub fn compare(&self, other: &Self) -> i32
+        {
+            if self.key < other.key { return -1 }
+            if self.key > other.key { return 1; }
+            return 0
+        }
+
+        pub fn rotate_left(&mut self) -> *mut Self
+        {
+            let x = self;
+            let y = x.children[1];
+            let t = unsafe { (*y).children[0] };
+            unsafe { (*y).children[0] = x; };
+            x.children[1] = t;
+
+            x.parent = y;
+            if let Some(t_unwrapped) = unsafe { t.as_mut() } { t_unwrapped.parent = x }
+
+            x.height = x.compute_height();
+            unsafe { y.as_mut().unwrap().height =  y.as_ref().unwrap().compute_height() }
+
+            y
+        }
+
+        pub fn rotate_right(&mut self) -> *mut Self
+        {
+            let y = self;
+            let x = unsafe { y.children[0].as_mut().unwrap() };
+            let t = x.children[1];
+            x.children[1] = y;
+            y.children[0] = t;
+
+            y.parent = x;
+            if let Some(t_unwrapped) = unsafe { t.as_mut() } { t_unwrapped.parent = y }
+
+            y.height = y.compute_height();
+            x.height = x.compute_height();
+
+            return x;
+        }
+
+        fn compute_height(&self) -> i32
+        {
+            let left_height =
+            {
+                if let Some(left) = unsafe { self.children[0].as_mut() } { left.height }
+                else { 0 }
+            };
+            let right_height =
+            {
+                if let Some(right) = unsafe { self.children[1].as_mut() } { right.height }
+                else { 0 }
+            };
+            let balance = left_height - right_height;
+            let height =
+            {
+                if balance > 0 { left_height }
+                else { right_height }
+            } + 1;
+
+            height
+        }
+
+        fn validate(&self, tree: &Tree<T>, parent: *mut Self)
+        {
+            unimplemented!()
+        }
+    }
+
+    impl<T> Tree<T>
+    {
+        pub fn insert(&mut self, item: &mut Item<T>, this: &mut T, key: Key, duplicate_key_policy: DuplicateKeyPolicy) -> bool
+        {
+            if self.modcheck { panic("concurrent modification\n") }
+            self.modcheck = true;
+
+            let mut success = true;
+
+            unsafe { self.root.as_mut().unwrap().validate(self, null_mut()) };
+
+            if !item.tree.is_null() { panic("item already in a tree\n") }
+            item.tree = self;
+
+            item.key = key;
+            item.children[0] = null_mut();
+            item.children[1] = null_mut();
+            item.this = this;
+            item.height = 1;
+
+            let mut link = addr_of_mut!(self.root);
+            let mut parent: *mut Item<T> = null_mut();
+
+            while let Some(node) = unsafe { (*link).as_mut() }
+            {
+                if item.compare(node) == 0
+                {
+                    match duplicate_key_policy
+                    {
+                        DuplicateKeyPolicy::panic => { panic("duplicate keys\n") }
+                        DuplicateKeyPolicy::fail => { success = false; break; }
+                        DuplicateKeyPolicy::allow => { }
+                    }
+                }
+
+                let child_index = (item.compare(node) > 0) as usize;
+                link = addr_of_mut!(node.children[child_index]);
+                parent = node;
+            }
+
+            if success
+            {
+                unsafe
+                {
+                    *link = item;
+                    item.parent = parent;
+                }
+
+                let mut fake_root = unsafe { core::mem::zeroed::<Item<T>>() };
+                unsafe { self.root.as_mut().unwrap().parent = addr_of_mut!(fake_root) };
+                fake_root.tree = self;
+                fake_root.key = 0;
+                fake_root.children[0] = self.root;
+
+                let it = item.parent;
+
+                while it != addr_of_mut!(fake_root)
+                {
+                    unimplemented!()
+                }
+                unimplemented!()
+            }
+            else
+            {
+                return false;
+            }
+        }
+    }
+}
+
 pub struct Kernel<'a>
 {
     core: Core<'a>,
     scheduler: Scheduler,
-    process: Process,
+    process: Process<'a>,
     physical_allocator: memory::Physical::Allocator<'a>,
     arch: arch::Specific<'a>,
 }
@@ -342,7 +597,8 @@ pub struct Core<'a>
 {
     regions: &'a mut[memory::Region],
     region_commit_count: u64,
-    address_space: memory::AddressSpace,
+    address_space: memory::AddressSpace<'a>,
+    heap: memory::Heap,
 }
 
 impl<'a> Kernel<'a>
@@ -362,6 +618,7 @@ pub static mut kernel: Kernel = Kernel
         regions: &mut[],
         region_commit_count: 0,
         address_space: memory::AddressSpace::default(),
+        heap: memory::Heap::default(),
     },
     scheduler: Scheduler
     {
@@ -385,21 +642,22 @@ pub static mut kernel: Kernel = Kernel
         commit_mutex: Mutex::default(),
         pageframe_mutex: Mutex::default(),
 
+        free_or_zeroed_page_bitset: Bitset::default(),
         first_free_page: 0,
         first_zeroed_page: 0,
         first_standby_page: 0,
-        last_standby_page: 0,
 
+        last_standby_page: 0,
         zeroed_page_count: 0,
         free_page_count: 0,
         standby_page_count: 0,
-        active_page_count: 0,
 
+        active_page_count: 0,
         commit_fixed: 0,
         commit_pageable: 0,
         commit_fixed_limit: 0,
-        commit_limit: 0,
 
+        commit_limit: 0,
         approximate_total_object_cache_byte_count: 0,
     },
     arch: arch::Specific::default(),

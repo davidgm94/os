@@ -1,13 +1,17 @@
+use core::mem::transmute_copy;
+
 use kernel::*;
 
-pub struct AddressSpace
+use super::arch::{kernel_address_space_start, kernel_address_space_size};
+
+pub struct AddressSpace<'a>
 {
     pub reserve_mutex: Mutex,
-    pub arch: arch::Memory::AddressSpace,
+    pub arch: arch::Memory::AddressSpace<'a>,
     pub reference_count: u64,
 }
 
-impl const Default for AddressSpace
+impl<'a> const Default for AddressSpace<'a>
 {
     fn default() -> Self {
         Self
@@ -16,6 +20,16 @@ impl const Default for AddressSpace
             arch: arch::Memory::AddressSpace
             {
                 cr3: 0,
+
+                L1_commit: &mut[],
+                L1_commit_commit: [0; arch::Memory::L1_commit_commit_size],
+                L2_commit: [0; arch::Memory::L2_commit_size],
+                L3_commit: [0; arch::Memory::L3_commit_size],
+
+                commited_page_table_count: 0,
+                active_page_table_count: 0,
+
+                mutex: Mutex::default(),
             },
             reference_count: 0,
         }
@@ -25,7 +39,7 @@ impl const Default for AddressSpace
 // @TODO: properly formalize this
 pub const shared_entry_present: u64 = 1;
 
-impl AddressSpace
+impl<'a> AddressSpace<'a>
 {
     pub fn standard_allocate_extended(&mut self, byte_count: u64, flags: RegionFlags, base_address: u64, commit_all: bool) -> u64
     {
@@ -105,10 +119,10 @@ impl AddressSpace
 
 pub struct Region
 {
-    base_address: u64,
-    page_count: u64,
-    flags: RegionFlags,
-    used: bool,
+    pub base_address: u64,
+    pub page_count: u64,
+    pub flags: RegionFlags,
+    pub used: bool,
 }
 
 bitflags!
@@ -146,6 +160,203 @@ bitflags!
     }
 }
 
+#[repr(C)]
+pub union HeapRegionFirstUnion
+{
+    next: u16,
+    size: u16,
+}
+
+#[repr(C)]
+pub union HeapRegionSecondUnion
+{
+    allocation_size: u64,
+    region_list_next: *mut HeapRegion,
+}
+
+#[repr(C)]
+pub struct HeapRegion
+{
+    u1: HeapRegionFirstUnion,
+    previous: u16,
+    offset: u16,
+    used: u16,
+    u2: HeapRegionSecondUnion,
+    region_list_reference: *mut *mut HeapRegion,
+}
+
+impl HeapRegion
+{
+    fn get_address(&self) -> u64
+    {
+        (self as *const Self) as u64
+    }
+    fn get_header(&self) -> *mut Self
+    {
+       (self.get_address() - used_heap_region_header_size as u64) as *mut Self
+    }
+
+    fn get_data(&self) -> u64
+    {
+        self.get_address() + used_heap_region_header_size as u64
+    }
+
+    fn get_next(&self) -> *mut HeapRegion
+    {
+        (self.get_address() + unsafe { self.u1.next } as u64) as *mut Self
+    }
+
+    fn get_previous(&self) -> *mut HeapRegion
+    {
+        if self.previous != 0
+        {
+            return (self.get_address() - self.previous as u64) as *mut Self
+        }
+
+        null_mut()
+    }
+}
+#[repr(C)]
+pub struct Heap
+{
+    mutex: Mutex,
+
+    regions: [*mut HeapRegion; 12],
+    allocation_count: Volatile<u64>,
+    size: Volatile<u64>,
+    block_count: Volatile<u64>,
+    blocks: [*mut HeapRegion; 16],
+    cannot_validate: bool,
+}
+
+pub const used_heap_region_header_size: usize = size_of::<HeapRegion>() - size_of::<*mut *mut HeapRegion>();
+pub const free_heap_region_header_size: usize = size_of::<HeapRegion>();
+pub const large_allocation_threshold: u64 = 32768;
+pub const used_heap_region_magic: u16 = 0xabcd;
+
+impl const Default for Heap
+{
+    fn default() -> Self {
+        Self { mutex: Mutex::default(), regions: [null_mut(); 12], allocation_count: Volatile::new(0), size: Volatile::new(0), block_count: Volatile::new(0), blocks: [null_mut(); 16], cannot_validate: false }
+    }
+}
+
+impl Heap
+{
+    pub fn allocate(&mut self, asked_size: u64, zero_memory: bool) -> u64
+    {
+        if asked_size == 0 { return 0 }
+        
+        if unsafe { transmute_copy::<u64, i64>(&asked_size) } < 0
+        {
+            panic("heap panic\n");
+        }
+
+        let mut size = asked_size;
+        size += used_heap_region_header_size as u64;
+        size = (size + 0x1f) & !0x1f;
+
+        if size >= large_allocation_threshold
+        {
+            if let Some(region) = unsafe { (self.allocate_call(size) as *mut HeapRegion).as_mut() }
+            {
+                region.used = used_heap_region_magic;
+                region.u1.size = 0;
+                region.u2.allocation_size = asked_size;
+                unsafe { transmute::<&mut u64, AtomicU64>(&mut self.size.value).fetch_add(asked_size, Ordering::SeqCst) };
+
+                return region.get_data();
+            }
+            else
+            {
+                return 0;
+            }
+        }
+
+        self.mutex.acquire();
+
+        self.validate();
+
+        unimplemented!();
+    }
+
+    fn validate(&self)
+    {
+        if self.cannot_validate { return }
+
+        let block_count = self.block_count.read_volatile() as usize;
+        assert!(block_count <= self.blocks.len());
+
+        for &block in self.blocks[0..block_count].iter()
+        {
+            if let Some(start) = unsafe { block.as_ref() }
+            {
+                let end = (block as u64 + 65536) as *mut HeapRegion;
+                let mut previous: *const HeapRegion = null_mut();
+                let mut region = start;
+
+                while (region as *const HeapRegion) < end
+                {
+                    if let Some(_) = unsafe { previous.as_ref() }
+                    {
+                        if previous != region.get_previous()
+                        {
+                            panic("heap panic\n");
+                        }
+                    }
+                    else if region.previous != 0
+                    {
+                        panic("heap panic\n");
+                    }
+
+                    if unsafe { region.u1.size & 31 != 0 } { panic("heap panic\n") }
+
+                    if (region.get_address() - (start as *const _) as u64) as u16 != region.offset
+                    {
+                        panic("heap panic\n");
+                    }
+
+                    if region.used != used_heap_region_magic && region.used != 0
+                    {
+                        panic("heap panic\n");
+                    }
+
+                    if region.used == 0 && unsafe { region.u2.region_list_next.is_null() }
+                    {
+                        panic("heap panic\n");
+                    }
+
+                    if region.used == 0 && unsafe { !region.u2.region_list_next.is_null() } && unsafe { region.u2.region_list_next.as_ref().unwrap().region_list_reference as u64 } != ((unsafe { &region.u2.region_list_next }) as *const _) as u64
+                    {
+                        panic("heap panic\n");
+                    }
+
+                    previous = &*region;
+                    region = unsafe { region.get_next().as_mut().unwrap() };
+                }
+
+                if region as *const _ != end
+                {
+                    panic("heap panic\n");
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn allocate_call(&mut self, size: u64) -> u64
+    {
+        if self as *mut Self == unsafe { (&mut kernel.core.heap) as *mut Self }
+        {
+            unsafe { kernel.core.address_space.standard_allocate(size, RegionFlags::fixed) }
+        }
+        else
+        {
+            unsafe { kernel.process.address_space.standard_allocate(size, RegionFlags::fixed) }
+        }
+    }
+
+}
 
 pub mod Physical
 {
@@ -161,6 +372,7 @@ pub mod Physical
     }
     static mut early_zero_buffer: EarlyZeroBuffer = EarlyZeroBuffer { memory: [0;page_size as usize] };
 
+    #[derive(PartialEq)]
     pub enum PageFrameState
     {
         unusable,
@@ -190,10 +402,10 @@ pub mod Physical
 
     pub struct PageFrame
     {
-        state: Volatile<PageFrameState>,
-        flags: Volatile<u8>,
-        cache_reference: VolatilePointer<u64>,
-        union: PageFrameUnion,
+        pub state: Volatile<PageFrameState>,
+        pub flags: Volatile<u8>,
+        pub cache_reference: VolatilePointer<u64>,
+        pub union: PageFrameUnion,
     }
 
     pub struct Allocator<'a>
@@ -245,12 +457,6 @@ pub mod Physical
             {
                 self.pageframe_mutex.acquire();
             }
-            scopeguard::defer! (
-                if !mutex_already_acquired
-                {
-                    self.pageframe_mutex.release()
-                }
-            );
 
             let commit_now = 
             {
@@ -273,10 +479,12 @@ pub mod Physical
                     0
                 }
             };
+            let mut failed = false;
+            let mut result: u64 = 0;
 
             let simple = count == 1 && alignment == 1 && below == 0;
 
-            if self.pageframes.len() == 0
+            if self.pageframes.is_empty()
             {
                 if !simple { panic("non-simple allocation before initializing the pageframe database\n") }
 
@@ -288,25 +496,21 @@ pub mod Physical
                     unsafe { early_zero_buffer.memory.fill(0) };
                 }
 
-                if !mutex_already_acquired
-                {
-                    self.pageframe_mutex.release()
-                }
-                return page;
+                result = page;
             }
             else if !simple
             {
-                // Slow path. // TODO: standby pages
+                // Slow path.
+                // TODO: standby pages
                 let pages = self.free_or_zeroed_page_bitset.get(count, alignment, below);
-                if pages == u64::MAX
+                let failed = pages == u64::MAX;
+                if !failed
                 {
-                    // @TODO: fail and put defers properly
-                    unimplemented!()
+                    self.activate_pages(pages, count);
+                    let address = pages << page_bit_count;
+                    if flags.contains(Flags::zeroed) { unimplemented!() }
+                    result = address;
                 }
-                self.activate_pages(pages, count);
-                let address = pages << page_bit_count;
-                if flags.contains(Flags::zeroed) { unimplemented!() }
-                return address;
             }
             else
             {
@@ -316,44 +520,56 @@ pub mod Physical
                 if page == 0 { page = self.first_zeroed_page }
                 if page == 0 { page = self.first_free_page; not_zeroed = true; }
                 if page == 0 { page = self.last_standby_page; not_zeroed = true; }
-                if page == 0
-                {
-                    // @TODO: fail and put defers properly
-                    unimplemented!()
-                }
+                failed = page == 0;
 
-                let frame = &mut self.pageframes[page as usize];
-                match frame.state.read_volatile()
+                if !failed
                 {
-                    PageFrameState::active =>
+                    let frame = &mut self.pageframes[page as usize];
+                    match frame.state.read_volatile()
                     {
-                        panic("corrupt pageframe database\n")
-                    }
-                    PageFrameState::standby =>
-                    {
-                        if frame.cache_reference.deref_volatile() != ((page << page_bit_count) | super::shared_entry_present)
+                        PageFrameState::active =>
                         {
-                            panic("corrupt shared reference back pointer in frame\n");
+                            panic("corrupt pageframe database\n")
                         }
+                        PageFrameState::standby =>
+                        {
+                            if frame.cache_reference.deref_volatile() != ((page << page_bit_count) | super::shared_entry_present)
+                            {
+                                panic("corrupt shared reference back pointer in frame\n");
+                            }
 
-                        frame.cache_reference.write_volatile(0);
+                            frame.cache_reference.write_volatile_at_address(0);
+                        }
+                        _ =>
+                        {
+                            self.free_or_zeroed_page_bitset.take(page);
+                        }
                     }
-                    _ =>
+
+                    self.activate_pages(page, 1);
+                    let address = page << page_bit_count;
+                    if not_zeroed && flags.contains(Flags::zeroed)
                     {
-                        self.free_or_zeroed_page_bitset.take(page);
+                        unimplemented!()
                     }
+                    result = address;
                 }
-
-                self.activate_pages(page, 1);
-                let address = page << page_bit_count;
-                if not_zeroed && flags.contains(Flags::zeroed)
-                {
-                    unimplemented!()
-                }
-                return address;
             }
-            // @TODO: implement defer and fail
-            unimplemented!()
+
+            if failed
+            {
+                if flags.contains(Flags::can_fail)
+                {
+                    panic("physical page allocation failed: out of memory\n");
+                }
+                self.decommit(commit_now, true);
+                result = 0;
+            }
+            if !mutex_already_acquired
+            {
+                self.pageframe_mutex.release()
+            }
+            result
         }
 
         pub fn allocate_with_flags(&mut self, flags: Flags) -> u64
@@ -368,27 +584,27 @@ pub mod Physical
 
         fn get_available_page_count(&self) -> u64
         {
-            return self.zeroed_page_count + self.free_page_count + self.standby_page_count;
+            self.zeroed_page_count + self.free_page_count + self.standby_page_count
         }
 
         fn get_remaining_commit(&self) -> i64
         {
-            return self.commit_limit - self.commit_pageable - self.commit_fixed;
+            self.commit_limit - self.commit_pageable - self.commit_fixed
         }
 
         fn should_trim_object_cache(&self) -> bool
         {
-            return (self.approximate_total_object_cache_byte_count / page_size) as i64 > self.get_maximum_page_count_object_cache();
+            (self.approximate_total_object_cache_byte_count / page_size) as i64 > self.get_maximum_page_count_object_cache()
         }
 
         fn get_maximum_page_count_object_cache(&self) -> i64
         {
-            return self.commit_limit - self.get_non_cache_memory_page_count();
+            self.commit_limit - self.get_non_cache_memory_page_count()
         }
 
         fn get_non_cache_memory_page_count(&self) -> i64
         {
-            return self.commit_fixed + self.commit_pageable - (self.approximate_total_object_cache_byte_count / page_size) as i64;
+            self.commit_fixed + self.commit_pageable - (self.approximate_total_object_cache_byte_count / page_size) as i64
         }
 
         pub fn commit(&mut self, byte_count: u64, fixed: bool) -> bool
@@ -399,9 +615,7 @@ pub mod Physical
             }
 
             self.commit_mutex.acquire();
-            ::defer!(
-                self.commit_mutex.release()
-            );
+            let mut succedeed = true;
 
             let needed_page_count = (byte_count / page_size) as i64;
 
@@ -409,21 +623,17 @@ pub mod Physical
             {
                 if fixed
                 {
-                    if needed_page_count > self.commit_fixed_limit - self.commit_fixed
-                    {
-                        return false;
-                    }
+                    let failed = (needed_page_count > self.commit_fixed_limit - self.commit_fixed) || (self.get_available_page_count() as i64 - needed_page_count < critical_available_page_count_threshold as i64 && unsafe { arch::get_current_thread().as_mut().unwrap().is_page_generator }); 
+                    succedeed = !failed;
 
-                    if self.get_available_page_count() as i64 - needed_page_count < critical_available_page_count_threshold as i64 && unsafe { arch::get_current_thread().as_mut().unwrap().is_page_generator }
+                    if succedeed
                     {
-                        return false;
+                        self.commit_fixed += needed_page_count;
                     }
-
-                    self.commit_fixed += needed_page_count;
                 }
                 else
                 {
-                    if needed_page_count > (self.get_remaining_commit() -
+                    succedeed = !(needed_page_count > (self.get_remaining_commit() -
                         {
                             if unsafe { arch::get_current_thread().as_mut().unwrap().is_page_generator }
                             {
@@ -433,27 +643,38 @@ pub mod Physical
                             {
                                 critical_remaining_commit_threshold as i64
                             }
-                        })
+                        }));
+
+                    if succedeed
                     {
-                        return false;
+                        self.commit_pageable += needed_page_count;
+                    }
+                }
+
+                if succedeed
+                {
+                    if self.should_trim_object_cache()
+                    {
+                        unimplemented!();
                     }
 
-                    self.commit_pageable += needed_page_count;
+                    unimplemented!();
                 }
-
-                if self.should_trim_object_cache()
-                {
-                }
-
-                unimplemented!();
             }
             // else -> We haven't started tracking commit counts yet
 
-            true
+            // @TODO: log either if succedeed or failed
+
+            self.commit_mutex.release();
+            succedeed
+        }
+
+        fn decommit(&self, bytes_to_decomit: u64, fixed: bool)
+        {
+            todo!()
         }
     }
 }
-
 
 impl<'a> Kernel<'a>
 {
@@ -464,5 +685,9 @@ impl<'a> Kernel<'a>
         self.core.regions[0].base_address = arch::core_address_space_start;
         self.core.regions[0].page_count = arch::core_address_space_size / page_size as u64;
         arch::Memory::init(self);
+
+        let region = unsafe { (self.core.heap.allocate(size_of::<Region>() as u64, true) as *mut Region).as_mut().unwrap() };
+        region.base_address = kernel_address_space_start;
+        region.page_count = kernel_address_space_size / page_size;
     }
 }

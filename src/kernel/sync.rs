@@ -26,6 +26,7 @@ impl const Default for Spinlock
 pub struct Mutex
 {
     pub owner: VolatilePointer<Thread>,
+    pub blocked_threads: LinkedList<Thread>,
 }
 
 impl const Default for Mutex
@@ -34,6 +35,7 @@ impl const Default for Mutex
         Self
         {
             owner: VolatilePointer::<Thread>::new(0 as *mut Thread),
+            blocked_threads: LinkedList::<Thread>::default(),
         }
     }
 }
@@ -68,12 +70,12 @@ impl Spinlock
         while self.state.value.compare_and_swap(0, 1, Ordering::SeqCst) != 0 { }
         fence(Ordering::SeqCst);
 
-        self.interrupts_enabled.write(interrupts_enabled);
+        self.interrupts_enabled.write_volatile(interrupts_enabled);
 
         if let Some(local_storage) = unsafe { storage.as_mut() }
         {
             // @TODO: possible error?
-            self.owner_CPU.write(local_storage.processor_ID as u8);
+            self.owner_CPU.write_volatile(local_storage.processor_ID as u8);
         }
     }
 
@@ -89,7 +91,7 @@ impl Spinlock
 
         self.assert_locked();
 
-        let were_interrupts_enabled = self.interrupts_enabled.read();
+        let were_interrupts_enabled = self.interrupts_enabled.read_volatile();
         fence(Ordering::SeqCst);
         *self.state.value.get_mut() = 0;
 
@@ -106,7 +108,7 @@ impl Spinlock
             local_storage.spinlock_count -= 1;
         }
 
-        let were_interrupts_enabled = self.interrupts_enabled.read();
+        let were_interrupts_enabled = self.interrupts_enabled.read_volatile();
         fence(Ordering::SeqCst);
         *self.state.value.get_mut() = 0;
 
@@ -116,7 +118,7 @@ impl Spinlock
     pub fn assert_locked(&mut self)
     {
         if unsafe { kernel.scheduler.panic } { return }
-        if self.state.read().into_inner() == 0 || arch::interrupts::are_enabled()
+        if self.state.read_volatile().into_inner() == 0 || arch::interrupts::are_enabled()
         {
             panic("Spinlock not correclty acquired\n");
         }
@@ -133,7 +135,7 @@ impl Mutex
         {
             if let Some(thread) = unsafe { arch::get_current_thread().as_mut() }
             {
-                if thread.terminatable_state.read() == ThreadTerminatableState::terminatable
+                if thread.terminatable_state.read_volatile() == ThreadTerminatableState::terminatable
                 {
                     panic("thread is terminatable\n");
                 }
@@ -177,7 +179,7 @@ impl Mutex
             {
                 if local_storage.scheduler_ready
                 {
-                    if current_thread.state.read() != ThreadState::active
+                    if current_thread.state.read_volatile() != ThreadState::active
                     {
                         panic("attempting to wait on a mutex in a non-active thread\n");
                     }
@@ -191,7 +193,7 @@ impl Mutex
                     {
                         if !self.owner.ptr.is_null()
                         {
-                            self.owner.read().executing.read()
+                            self.owner.deref_volatile().executing.read_volatile()
                         }
                         else
                         {
@@ -199,20 +201,20 @@ impl Mutex
                         }
                     };
 
-                    if !spin && !current_thread.blocking.mutex.read().owner.ptr.is_null()
+                    if !spin && !current_thread.blocking.mutex.deref_volatile().owner.ptr.is_null()
                     {
                         unimplemented!();
                     }
 
-                    while (!current_thread.terminating.read() || current_thread.terminatable_state.read() != ThreadTerminatableState::user_block_request)
+                    while (!current_thread.terminating.read_volatile() || current_thread.terminatable_state.read_volatile() != ThreadTerminatableState::user_block_request)
                         && !self.owner.ptr.is_null()
                     {
-                        current_thread.state.write(ThreadState::waiting_for_mutex);
+                        current_thread.state.write_volatile(ThreadState::waiting_for_mutex);
                     }
 
-                    current_thread.state.write(ThreadState::active);
+                    current_thread.state.write_volatile(ThreadState::active);
 
-                    if current_thread.terminating.read() && current_thread.terminatable_state.read() == ThreadTerminatableState::user_block_request
+                    if current_thread.terminating.read_volatile() && current_thread.terminatable_state.read_volatile() == ThreadTerminatableState::user_block_request
                     {
                         return false
                     }
@@ -232,12 +234,54 @@ impl Mutex
 
     pub fn release(&mut self)
     {
-        unimplemented!();
+        if unsafe { kernel.scheduler.panic } { return }
+
+        self.assert_locked();
+
+        // get current thread
+        let current_thread_ptr = arch::get_current_thread();
+        unsafe { kernel.scheduler.dispatch_spinlock.acquire() }
+
+        if let Some(current_thread) = unsafe { current_thread_ptr.as_mut() }
+        {
+            let mutex_owner_ptr = unsafe { core::mem::transmute::<&mut *mut Thread, &mut AtomicU64>(&mut self.owner.ptr) };
+            let temp = mutex_owner_ptr.compare_and_swap(current_thread_ptr as u64, 0, Ordering::SeqCst) as *mut Thread;
+            if current_thread_ptr != temp { panic("mutex release: invalid owner thread\n") }
+        }
+        else
+        {
+            self.owner.ptr = null_mut();
+        }
+
+        let preempt = Volatile::<bool>::new(self.blocked_threads.count != 0);
+        if unsafe { kernel.scheduler.started }
+        {
+            unimplemented!();
+        }
+
+        unsafe { kernel.scheduler.dispatch_spinlock.release() }
+        fence(Ordering::SeqCst);
+
+        if preempt.read_volatile() { unimplemented!() }
     }
 
     pub fn assert_locked(&self)
     {
-        unimplemented!();
+        let current_thread =
+        {
+            if let Some(thread) = unsafe { arch::get_current_thread().as_mut() }
+            {
+                thread
+            }
+            else {
+                unsafe { (1 as *mut Thread).as_mut().unwrap() }
+            }
+        };
+
+        if self.owner.ptr != current_thread as *mut _ 
+        {
+            panic("mutex not correctly acquired\n");
+        }
     }
 }
 

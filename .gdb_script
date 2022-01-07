@@ -12,6 +12,7 @@ b KernelInitialise
 b KernelPanic
 b KernelMain
 b core::panicking::panic
+b renaissance-os::kernel::arch::x86_64::handle_page_fault
 
 target remote localhost:1234
 

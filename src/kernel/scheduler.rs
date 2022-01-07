@@ -1,8 +1,8 @@
 use kernel::*;
 
-pub struct Process
+pub struct Process<'a>
 {
-    pub address_space: memory::AddressSpace,
+    pub address_space: memory::AddressSpace<'a>,
     pub id: u64,
     pub handle_count: u64,
     pub permissions: ProcessPermissions,
@@ -113,7 +113,7 @@ bitflags!
     }
 }
 
-impl Process
+impl<'a> Process<'a>
 {
     pub fn register(&mut self, kind: ProcessKind)
     {

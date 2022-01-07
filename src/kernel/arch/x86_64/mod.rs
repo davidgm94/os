@@ -1,8 +1,10 @@
 #![allow(non_snake_case)]
 
 use kernel::*;
-use core::arch::x86_64::{__cpuid, _rdtsc};
+use core::{arch::x86_64::{__cpuid, _rdtsc}, ops::Add};
 use kernel::scheduler::ThreadTerminatableState;
+
+use crate::kernel::memory::{Physical::PageFrameState, MapPageFlags};
 
 pub const core_memory_region_start: u64 = 0xFFFF8001F0000000;
 pub const core_memory_region_count: u64 = (0xFFFF800200000000 - 0xFFFF8001F0000000) / size_of::<memory::Region>() as u64;
@@ -18,7 +20,9 @@ pub const low_memory_map_start: u64 = 0xFFFFFE0000000000;
 pub const low_memory_limit: u64 = 0x100000000; // The first 4GB is mapped here.
 
 pub const page_size: u64 = 0x1000;
-pub const page_bit_count: u8 = 12;
+pub const page_bit_count: u64 = 12;
+pub const entry_count_per_page_table: u64 = 512;
+pub const entry_per_page_table_bit_count: u64 = 9;
 
 pub struct Specific<'a>
 {
@@ -368,6 +372,25 @@ impl CR3
             asm!( "mov rax, cr3", "mov cr3, rax")
         }
     }
+    #[inline(always)]
+    fn read() -> u64
+    {
+        let mut value: u64;
+        unsafe
+        {
+            asm!("mov {}, cr3", out(reg) value, options(nomem, nostack, preserves_flags))
+        }
+        value
+    }
+
+    #[inline(always)]
+    fn write(value: u64)
+    {
+        unsafe
+        {
+            asm!("mov cr3, {}", in(reg) value, options(nostack, preserves_flags))
+        }
+    }
 }
 
 impl CR4
@@ -568,6 +591,12 @@ impl CPU
             }
         }
     }
+}
+
+#[inline(always)]
+pub fn invalidate_page(virtual_address: u64)
+{
+    unsafe { asm!("invlpg [{}]", in(reg) virtual_address, options(nostack, preserves_flags)) }
 }
 
 pub mod IO
@@ -777,6 +806,39 @@ bitflags!
 
 }
 
+struct PageTable
+{
+    address: u64,
+}
+
+impl PageTable
+{
+    const fn new(address: u64) -> Self
+    {
+        Self
+        {
+            address
+        }
+    }
+
+    #[inline(always)]
+    pub fn read(self, index: usize) -> u64
+    {
+        VolatilePointer::<u64>::new(unsafe { (self.address as *mut u64).add(index) }).deref_volatile()
+    }
+
+    #[inline(always)]
+    pub fn write(self, index: usize, value: u64)
+    {
+        VolatilePointer::<u64>::new(unsafe { (self.address as *mut u64).add(index) }).write_volatile_at_address(value);
+    }
+}
+
+const page_table_L4: PageTable = PageTable::new(0xFFFFFF7FBFDFE000);
+const page_table_L3: PageTable = PageTable::new(0xFFFFFF7FBFC00000);
+const page_table_L2: PageTable = PageTable::new(0xFFFFFF7F80000000);
+const page_table_L1: PageTable = PageTable::new(0xFFFFFF0000000000);
+
 // arch_handle_page_fault
 fn handle_page_fault(fault_address: u64, flags: HandlePageFaultFlags) -> bool
 {
@@ -795,11 +857,13 @@ fn handle_page_fault(fault_address: u64, flags: HandlePageFaultFlags) -> bool
         {
             let physical_address = virtual_address - low_memory_map_start;
             self::map_page(unsafe { &mut kernel.process.address_space }, physical_address, virtual_address, memory::MapPageFlags::commit_tables_now);
+            true
         }
         else if virtual_address >= core_memory_region_start && virtual_address < core_memory_region_start + (core_memory_region_count * size_of::<memory::Region>() as u64) && for_supervisor
         {
             let physical_address = unsafe { kernel.physical_allocator.allocate_with_flags(memory::Physical::Flags::zeroed) };
             self::map_page(unsafe { &mut kernel.process.address_space }, physical_address, virtual_address, memory::MapPageFlags::commit_tables_now);
+            true
         }
         else if virtual_address >= core_address_space_start && virtual_address < core_address_space_start + core_address_space_size && for_supervisor
         {
@@ -818,18 +882,176 @@ fn handle_page_fault(fault_address: u64, flags: HandlePageFaultFlags) -> bool
             unimplemented!();
         }
     }
-
-    return false;
+    else
+    {
+        false
+    }
 }
 
-pub fn map_page(space: &mut memory::AddressSpace, physical_address: u64, virtual_address: u64, flags: memory::MapPageFlags) -> bool
+pub fn map_page(space: &'static mut memory::AddressSpace, asked_physical_address: u64, asked_virtual_address: u64, flags: memory::MapPageFlags) -> bool
 {
-    unimplemented!();
+    // @TODO: use the no-execute bit
+    if (asked_physical_address | asked_virtual_address) & (page_size - 1) != 0
+    {
+        panic("address not page-aligned\n");
+    }
+
+    // @TODO: optimize away empty check?
+    let index = (asked_physical_address >> page_bit_count) as usize;
+    if unsafe { !kernel.physical_allocator.pageframes.is_empty() } &&
+        index < unsafe { kernel.physical_allocator.pageframes.len() }
+    {
+        let frame_state = unsafe { kernel.physical_allocator.pageframes[index].state.read_volatile() };
+        if frame_state != PageFrameState::active && frame_state != PageFrameState::unusable
+        {
+            panic("physical page frame not marked as active or unusable\n");
+        }
+    }
+
+    if asked_physical_address == 0 { panic("attempt to map physical page 0\n") }
+    if asked_virtual_address == 0 { panic("attempt to map virtual page 0\n") }
+    if asked_virtual_address < 0xFFFF800000000000 && CR3::read() != space.arch.cr3
+    {
+        panic("attempt to map page into another address space\n");
+    }
+
+    let acquire_framelock = !flags.contains(MapPageFlags::no_new_tables | MapPageFlags::frame_lock_acquired);
+    if acquire_framelock { unsafe { kernel.physical_allocator.pageframe_mutex.acquire() }; }
+
+    let acquire_space_lock = !flags.contains(MapPageFlags::no_new_tables);
+    if acquire_space_lock { space.arch.mutex.acquire(); }
+
+    let mut success = true;
+
+    let virtual_address = asked_virtual_address & 0x0000FFFFFFFFF000;
+    let physical_address = asked_physical_address & 0xFFFFFFFFFFFFF000;
+
+    let index_L4 = (virtual_address >> (page_bit_count + entry_per_page_table_bit_count * 3)) as usize;
+    let index_L3 = (virtual_address >> (page_bit_count + entry_per_page_table_bit_count * 2)) as usize;
+    let index_L2 = (virtual_address >> (page_bit_count + entry_per_page_table_bit_count)) as usize;
+    let index_L1 = (virtual_address >> page_bit_count) as usize;
+
+    if space as *mut _ != (unsafe { &mut kernel.core.address_space }) as *mut _ &&
+        space as *mut _ != (unsafe { &mut kernel.process.address_space }) as *mut _
+    {
+        if space.arch.L3_commit[index_L4 >> 3] & (1 << ( index_L4 & 0b111)) != 0 { panic("attempt to map using uncommited L3 page table\n"); }
+        if space.arch.L2_commit[index_L3 >> 3] & (1 << ( index_L3 & 0b111)) != 0 { panic("attempt to map using uncommited L2 page table\n"); }
+        if space.arch.L1_commit[index_L2 >> 3] & (1 << ( index_L2 & 0b111)) != 0 { panic("attempt to map using uncommited L1 page table\n"); }
+    }
+
+    if page_table_L4.read(index_L4) & 1 == 0 
+    {
+        if flags.contains(MapPageFlags::no_new_tables) { panic("no new tables flag set but a table was missing\n") }
+        let p_addr = unsafe { kernel.physical_allocator.allocate_with_flags(memory::Physical::Flags::lock_acquired) };
+        page_table_L4.write(index_L4, p_addr | 0b111);
+        let page_address = unsafe { (page_table_L3.address as *mut u64).add(index_L3) } as u64;
+        invalidate_page(page_address);
+        let page = unsafe { &mut *core::ptr::slice_from_raw_parts_mut((page_address & !(page_size - 1)) as *mut u8, page_size as usize) };
+        page.fill(0);
+        space.arch.active_page_table_count += 1;
+    }
+
+    if page_table_L3.read(index_L3) & 1 == 0
+    {
+        if flags.contains(MapPageFlags::no_new_tables) { panic("no new tables flag set but a table was missing\n") }
+        let p_addr = unsafe { kernel.physical_allocator.allocate_with_flags(memory::Physical::Flags::lock_acquired) };
+        page_table_L3.write(index_L3, p_addr | 0b111);
+        let page_address = unsafe { (page_table_L2.address as *mut u64).add(index_L2) } as u64;
+        invalidate_page(page_address);
+        let page = unsafe { &mut *core::ptr::slice_from_raw_parts_mut((page_address & !(page_size - 1)) as *mut u8, page_size as usize) };
+        page.fill(0);
+        space.arch.active_page_table_count += 1;
+    }
+
+    if page_table_L2.read(index_L2) & 1 == 0
+    {
+        if flags.contains(MapPageFlags::no_new_tables) { panic("no new tables flag set but a table was missing\n") }
+        let p_addr = unsafe { kernel.physical_allocator.allocate_with_flags(memory::Physical::Flags::lock_acquired) };
+        page_table_L2.write(index_L2, p_addr | 0b111);
+        let page_address = unsafe { (page_table_L1.address as *mut u64).add(index_L1) } as u64;
+        invalidate_page(page_address);
+        let page = unsafe { &mut *core::ptr::slice_from_raw_parts_mut((page_address & !(page_size - 1)) as *mut u8, page_size as usize) };
+        page.fill(0);
+        space.arch.active_page_table_count += 1;
+    }
+
+    let old_value = page_table_L1.read(index_L1);
+    let mut value = physical_address | 0b11;
+
+    if flags.contains(MapPageFlags::write_combining) { value |= 16 }
+    if flags.contains(MapPageFlags::not_cacheable) { value |= 24 }
+    if flags.contains(MapPageFlags::user) { value |= 7 } else { value |= 1 << 8 } // global
+    if flags.contains(MapPageFlags::read_only) { value &= !2 }
+    if flags.contains(MapPageFlags::copied) { value |= 1 << 9 }
+
+    value |= (1 << 5) | (1 << 6);
+
+    if old_value & 1 != 0 && !flags.contains(MapPageFlags::overwrite)
+    {
+        success = !flags.contains(MapPageFlags::ignore_if_mapped);
+
+        if success
+        {
+            if old_value & !(page_size - 1) != physical_address
+            {
+                panic("attempt to map page that has already been mapped\n");
+            }
+
+            if old_value == value
+            {
+                panic("attempt to rewrite page translation\n");
+            }
+            else 
+            {
+                let page_become_writable = old_value & 2 == 0 && value & 2 != 0;
+                if !page_become_writable
+                {
+                    panic("attempt to change flags mapping address\n");
+                }
+            }
+        }
+    }
+
+    page_table_L1.write(index_L1, value);
+    invalidate_page(asked_virtual_address);
+
+    if acquire_framelock { unsafe { kernel.physical_allocator.pageframe_mutex.release() }; }
+    if acquire_space_lock { space.arch.mutex.release() }
+
+    success
 }
 
 pub fn early_allocate_page() -> u64
 {
-    unimplemented!()
+    let mut index = unsafe { kernel.arch.physical_memory.region_index as usize };
+
+    // @TODO: transform this into idiomatic Rust?
+    let regions = unsafe { &mut kernel.arch.physical_memory.regions };
+    for region in regions[index..].iter()
+    {
+        if region.page_count != 0 { break }
+
+        index += 1;
+    }
+
+    if index == regions.len()
+    {
+        panic("expected more pages in physical regions\n");
+    }
+
+    let region = &mut regions[index];
+    let return_value = region.base_address;
+
+    region.base_address += page_size;
+    region.page_count -= 1;
+
+    unsafe
+    {
+        kernel.arch.physical_memory.page_count -= 1;
+        kernel.arch.physical_memory.region_index = index as u64;
+    }
+
+    return_value
 }
 
 #[repr(C)]
@@ -927,8 +1149,8 @@ pub extern "C" fn interrupt_handler(context: &mut InterruptContext)
                     panic("Kernel thread executing user code\n");
                 }
 
-                let previous_terminatable_state = current_thread.terminatable_state.read();
-                current_thread.terminatable_state.write(ThreadTerminatableState::in_syscall);
+                let previous_terminatable_state = current_thread.terminatable_state.read_volatile();
+                current_thread.terminatable_state.write_volatile(ThreadTerminatableState::in_syscall);
 
                 if let Some(local_storage) = unsafe { local.as_ref() }
                 {
@@ -990,7 +1212,7 @@ pub extern "C" fn interrupt_handler(context: &mut InterruptContext)
                             else { HandlePageFaultFlags::empty() }
                     })
                     {
-                        let current_thread = unsafe { get_current_thread().as_mut() .unwrap() };
+                        let current_thread = unsafe { get_current_thread().as_mut().unwrap() };
                         if current_thread.in_safe_copy && context.cr2 < 0x8000000000000000
                         {
                             context.rip = context.r8;
@@ -1622,15 +1844,50 @@ pub mod Memory
 {
     use kernel::*;
 
+    use crate::kernel::memory::RegionFlags;
+
+    use super::{page_table_L4, page_table_L3, entry_per_page_table_bit_count};
+
+    pub const L1_commit_size: usize = 1 << 23;
+    pub const L1_commit_commit_size: usize = 1 << 8;
+    pub const L2_commit_size: usize = 1 << 14;
+    pub const L3_commit_size: usize = 1 << 5;
+    pub const core_L1_commit_size: usize = (0xFFFF800200000000 - 0xFFFF800100000000) >> (entry_per_page_table_bit_count + page_bit_count + 3);
+    pub static mut core_L1_commit: [u8; core_L1_commit_size] = [0; core_L1_commit_size];
+    
     // Arch-specific part of address spaces
-    pub struct AddressSpace
+    pub struct AddressSpace<'a>
     {
         pub cr3: u64,
+
+        pub L1_commit: &'a mut[u8],
+        pub L1_commit_commit: [u8; L1_commit_commit_size],
+        pub L2_commit: [u8; L2_commit_size],
+        pub L3_commit: [u8; L3_commit_size],
+
+        pub commited_page_table_count: u64,
+        pub active_page_table_count: u64,
+
+        pub mutex: Mutex,
     }
 
     pub fn init(k: &mut Kernel)
     {
-        unimplemented!();
+        for L4_index in 0x100 as usize..0x200
+        {
+            if page_table_L4.read(L4_index) == 0
+            {
+                let p_addr = k.physical_allocator.allocate_with_flags(memory::Physical::Flags::empty());
+                page_table_L4.write(L4_index, p_addr | 0b11);
+                let page = take_slice(unsafe { ((page_table_L3.address as *mut u64).add(L4_index * 0x200)) as *mut u8 }, page_size as usize);
+                page.fill(0);
+            }
+        }
+
+        k.core.address_space.arch.L1_commit = take_byte_slice(unsafe { &mut core_L1_commit }, core_L1_commit_size);
+        k.core.address_space.reserve_mutex.acquire();
+        k.process.address_space.arch.L1_commit = take_slice(unsafe { k.core.address_space.reserve(L1_commit_size as u64, RegionFlags::normal | RegionFlags::no_commit_tracking | RegionFlags::fixed).as_mut().unwrap().base_address as *mut u8}, L1_commit_size);
+        k.core.address_space.reserve_mutex.release();
     }
 }
 
