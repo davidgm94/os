@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 
 use kernel::*;
-use core::{arch::x86_64::{__cpuid, _rdtsc}, ops::Add};
+use core::arch::x86_64::{__cpuid, _rdtsc};
 use kernel::scheduler::ThreadTerminatableState;
 
 use crate::kernel::memory::{Physical::PageFrameState, MapPageFlags};
@@ -693,6 +693,22 @@ pub fn halt() -> !
     }
 }
 
+pub fn translate_address(asked_address: u64, write_access: bool) -> u64
+{
+    let virtual_address = asked_address & 0x0000FFFFFFFFF000;
+
+    if page_table_L4.read((virtual_address >> (page_bit_count + entry_per_page_table_bit_count * 3)) as usize) & 1 == 0 { return 0 }
+    if page_table_L3.read((virtual_address >> (page_bit_count + entry_per_page_table_bit_count * 2)) as usize) & 1 == 0 { return 0 }
+    if page_table_L2.read((virtual_address >> (page_bit_count + entry_per_page_table_bit_count * 1)) as usize) & 1 == 0 { return 0 }
+
+    let physical_address = page_table_L4.read((virtual_address >> (page_bit_count + entry_per_page_table_bit_count * 0)) as usize);
+
+    if write_access && physical_address & 2 == 0 { return 0 }
+
+    return if physical_address & 1 != 0 { physical_address & 0x0000FFFFFFFFF000 } else { 0 };
+}
+
+
 pub mod interrupts
 {
     use kernel::*;
@@ -758,6 +774,11 @@ pub mod interrupts
             unreachable();
         }
     }
+
+    pub fn fake_timer()
+    {
+        todo!()
+    }
 }
 
 pub struct LocalStorage
@@ -795,17 +816,6 @@ pub extern "C" fn get_current_thread() -> *mut Thread
     }
 }
 
-bitflags!
-{
-    struct HandlePageFaultFlags: u32
-    {
-        const write = 1 << 0;
-        const lock_acquired = 1 << 1;
-        const for_supervisor = 1 << 2;
-    }
-
-}
-
 struct PageTable
 {
     address: u64,
@@ -840,10 +850,10 @@ const page_table_L2: PageTable = PageTable::new(0xFFFFFF7F80000000);
 const page_table_L1: PageTable = PageTable::new(0xFFFFFF0000000000);
 
 // arch_handle_page_fault
-fn handle_page_fault(fault_address: u64, flags: HandlePageFaultFlags) -> bool
+fn handle_page_fault(fault_address: u64, flags: memory::HandlePageFaultFlags) -> bool
 {
     let virtual_address = fault_address & !(page_size - 1);
-    let for_supervisor = flags.contains(HandlePageFaultFlags::for_supervisor);
+    let for_supervisor = flags.contains(memory::HandlePageFaultFlags::for_supervisor);
 
     if !interrupts::are_enabled()
     {
@@ -888,7 +898,7 @@ fn handle_page_fault(fault_address: u64, flags: HandlePageFaultFlags) -> bool
     }
 }
 
-pub fn map_page(space: &'static mut memory::AddressSpace, asked_physical_address: u64, asked_virtual_address: u64, flags: memory::MapPageFlags) -> bool
+pub fn map_page(space: &mut memory::AddressSpace, asked_physical_address: u64, asked_virtual_address: u64, flags: memory::MapPageFlags) -> bool
 {
     // @TODO: use the no-execute bit
     if (asked_physical_address | asked_virtual_address) & (page_size - 1) != 0
@@ -931,8 +941,8 @@ pub fn map_page(space: &'static mut memory::AddressSpace, asked_physical_address
     let index_L2 = (virtual_address >> (page_bit_count + entry_per_page_table_bit_count)) as usize;
     let index_L1 = (virtual_address >> page_bit_count) as usize;
 
-    if space as *mut _ != (unsafe { &mut kernel.core.address_space }) as *mut _ &&
-        space as *mut _ != (unsafe { &mut kernel.process.address_space }) as *mut _
+    if (space as *mut _) as u64 != ((unsafe { &mut kernel.core.address_space }) as *mut _) as u64 &&
+        (space as *mut _) as u64 != ((unsafe { &mut kernel.process.address_space }) as *mut _) as u64
     {
         if space.arch.L3_commit[index_L4 >> 3] & (1 << ( index_L4 & 0b111)) != 0 { panic("attempt to map using uncommited L3 page table\n"); }
         if space.arch.L2_commit[index_L3 >> 3] & (1 << ( index_L3 & 0b111)) != 0 { panic("attempt to map using uncommited L2 page table\n"); }
@@ -1167,8 +1177,8 @@ pub extern "C" fn interrupt_handler(context: &mut InterruptContext)
                 {
                     let success = self::handle_page_fault(context.cr2,
                         {
-                            if context.error_code & 2 != 0 { HandlePageFaultFlags::write }
-                            else { HandlePageFaultFlags::empty() }
+                            if context.error_code & 2 != 0 { memory::HandlePageFaultFlags::write }
+                            else { memory::HandlePageFaultFlags::empty() }
                         });
                     if success
                     {
@@ -1194,7 +1204,7 @@ pub extern "C" fn interrupt_handler(context: &mut InterruptContext)
 
                     if let Some(local_storage) = unsafe { local.as_ref() }
                     {
-                        if local_storage.spinlock_count != 0 && (context.cr2 >= 0xffff900000000000 && context.cr2 < 0xffff900000000000)
+                        if local_storage.spinlock_count != 0 && ((context.cr2 >= 0xffff900000000000 && context.cr2 < 0xFFFFF00000000000) || context.cr2 < 0x8000000000000000)
                         {
                             panic("page fault with spinlocks active\n");
                         }
@@ -1206,10 +1216,10 @@ pub extern "C" fn interrupt_handler(context: &mut InterruptContext)
                         local = null_mut();
                     }
 
-                    if !self::handle_page_fault(context.cr2, HandlePageFaultFlags::for_supervisor | 
+                    if !self::handle_page_fault(context.cr2, memory::HandlePageFaultFlags::for_supervisor | 
                     {
-                            if context.error_code & 2 != 0 { HandlePageFaultFlags::write }
-                            else { HandlePageFaultFlags::empty() }
+                            if context.error_code & 2 != 0 { memory::HandlePageFaultFlags::write }
+                            else { memory::HandlePageFaultFlags::empty() }
                     })
                     {
                         let current_thread = unsafe { get_current_thread().as_mut().unwrap() };
@@ -1886,9 +1896,108 @@ pub mod Memory
 
         k.core.address_space.arch.L1_commit = take_byte_slice(unsafe { &mut core_L1_commit }, core_L1_commit_size);
         k.core.address_space.reserve_mutex.acquire();
-        k.process.address_space.arch.L1_commit = take_slice(unsafe { k.core.address_space.reserve(L1_commit_size as u64, RegionFlags::normal | RegionFlags::no_commit_tracking | RegionFlags::fixed).as_mut().unwrap().base_address as *mut u8}, L1_commit_size);
+        let l1_commit_address = unsafe { k.core.address_space.reserve(L1_commit_size as u64, RegionFlags::normal | RegionFlags::no_commit_tracking | RegionFlags::fixed).as_mut().unwrap().base_address };
+        k.process.address_space.arch.L1_commit = take_slice(l1_commit_address as *mut u8, L1_commit_size);
         k.core.address_space.reserve_mutex.release();
     }
+}
+
+pub fn commit_page_tables(space: &mut memory::AddressSpace, region: &memory::Region) -> bool
+{
+    space.reserve_mutex.assert_locked();
+
+    let is_core_address_space = (space as *mut _) as u64 == (unsafe { &mut kernel.core.address_space } as *mut _) as u64;
+    let base = (region.base_address - if is_core_address_space { super::core_address_space_start } else { 0 }) & 0x7FFFFFFFF000;
+    let end = base + (region.page_count << page_bit_count);
+    let mut needed = 0 as u64;
+
+    let mut i = base;
+    while i < end
+    {
+        const shifter: u64 = page_bit_count + entry_per_page_table_bit_count * 3;
+        let index = i >> shifter;
+        let increment = space.arch.L3_commit[index as usize >> 3] & (1 << (index & 0b111)) == 0;
+        needed += increment as u64;
+        i = index << shifter;
+        i += 1 << shifter;
+    }
+
+    let mut i = base;
+    while i < end
+    {
+        const shifter: u64 = page_bit_count + entry_per_page_table_bit_count * 2;
+        let index = i >> shifter;
+        let increment = space.arch.L2_commit[index as usize >> 3] & (1 << (index & 0b111)) == 0;
+        needed += increment as u64;
+        i = index << shifter;
+        i += 1 << shifter;
+    }
+
+    let mut previous_index_l2i = u64::MAX;
+    let mut i = base;
+    while i < end
+    {
+        const shifter: u64 = page_bit_count + entry_per_page_table_bit_count;
+        let index = i >> shifter;
+        let index_l2i = index >> 15;
+
+        if space.arch.L1_commit_commit[index_l2i as usize >> 3] & (1 << (index_l2i & 0b111)) == 0
+        {
+            needed += 1 + (previous_index_l2i != index_l2i) as u64;
+        }
+        else
+        {
+            let increment = space.arch.L1_commit[index as usize >> 3] & (1 << (index & 0b111)) == 0;
+            needed += increment as u64;
+        }
+
+        previous_index_l2i = index_l2i;
+        i = index << shifter;
+        i += 1 << shifter;
+    }
+
+    if needed != 0
+    {
+        if unsafe { !kernel.physical_allocator.commit(needed * page_size, true) }
+        {
+            return false;
+        }
+        space.arch.commited_page_table_count += needed;
+    }
+
+    let mut i = base;
+    while i < end
+    {
+        const shifter: u64 = page_bit_count + entry_per_page_table_bit_count * 3;
+        let index = i >> shifter;
+        space.arch.L3_commit[index as usize >> 3] |= 1 << (index & 0b111);
+        i = index << shifter;
+        i += 1 << shifter;
+    }
+
+    let mut i = base;
+    while i < end
+    {
+        const shifter: u64 = page_bit_count + entry_per_page_table_bit_count * 2;
+        let index = i >> shifter;
+        space.arch.L2_commit[index as usize >> 3] |= 1 << (index & 0b111);
+        i = index << shifter;
+        i += 1 << shifter;
+    }
+
+    let mut i = base;
+    while i < end
+    {
+        const shifter: u64 = page_bit_count + entry_per_page_table_bit_count;
+        let index = i >> shifter;
+        let index_L2i = index >> 15;
+        space.arch.L1_commit_commit[index_L2i as usize >> 3] |= 1 << (index_L2i & 0b111);
+        space.arch.L1_commit[index as usize >> 3] |= 1 << (index & 0b111);
+        i = index << shifter;
+        i += 1 << shifter;
+    }
+
+    return true;
 }
 
 #[naked]

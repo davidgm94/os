@@ -13,6 +13,7 @@
 #![feature(integer_atomics)]
 #![feature(core_intrinsics)]
 #![feature(exclusive_range_pattern)]
+#![feature(label_break_value)]
 
 #![feature(asm_const)]
 #![feature(asm_sym)]

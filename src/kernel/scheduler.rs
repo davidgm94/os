@@ -60,8 +60,8 @@ pub struct ThreadVolatile
 #[derive(Copy, Clone)]
 pub struct ThreadWriterLock
 {
-    lock: WriterLock,
-    kind: bool,
+    pub lock: VolatilePointer<WriterLock>,
+    pub kind: bool,
 }
 
 pub const max_wait_count: usize = 8;
@@ -69,9 +69,9 @@ pub const max_wait_count: usize = 8;
 #[derive(Copy, Clone)]
 pub struct ThreadEvent
 {
-    threads: VolatilePointer<LinkedItem<Thread>>,
-    events: [VolatilePointer<Event>; max_wait_count],
-    event_count: Volatile<u64>,
+    pub threads: VolatilePointer<LinkedItem<Thread>>,
+    pub events: [VolatilePointer<Event>; max_wait_count],
+    pub event_count: Volatile<u64>,
 }
 
 #[derive(Copy, Clone)]

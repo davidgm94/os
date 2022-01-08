@@ -43,11 +43,155 @@ impl const Default for Mutex
 #[derive(Copy, Clone)]
 pub struct WriterLock
 {
+    blocked_threads: LinkedList<Thread>,
+    state: Volatile<i64>,
+}
+
+impl const Default for WriterLock
+{
+    fn default() -> Self {
+        Self
+        {
+            blocked_threads: Default::default(),
+            state: Volatile::new(0),
+        }
+    }
+}
+
+impl WriterLock
+{
+    pub fn assert_locked(&self)
+    {
+        if self.state.read_volatile() == 0
+        {
+            panic("unlocked\n");
+        }
+    }
+
+    pub fn assert_shared(&self)
+    {
+        let state = self.state.read_volatile();
+        if state == 0
+        {
+            panic("unlocked\n");
+        }
+        else if state < 0
+        {
+            panic("in exclusive mode\n");
+        }
+    }
+
+    pub fn assert_exclusive(&self)
+    {
+        let state = self.state.read_volatile();
+        if state == 0
+        {
+            panic("unlocked\n");
+        }
+        else if state > 0
+        {
+            panic("in shared mode\n");
+        }
+    }
+
+    pub fn return_lock(&mut self, write: bool)
+    {
+        unsafe { kernel.scheduler.dispatch_spinlock.acquire() }
+
+        match self.state.read_volatile()
+        {
+            -1 =>
+            {
+                todo!()
+            }
+            0 =>
+            {
+                todo!()
+            }
+            _ =>
+            {
+                if write { panic("attempting to return exclusive access to an shared lock\n") }
+
+                self.state.decrement_volatile()
+            }
+        }
+
+        if self.state.read_volatile() != 0
+        {
+            todo!()
+        }
+
+        unsafe { kernel.scheduler.dispatch_spinlock.release() }
+    }
+
+    pub fn take(&mut self, write: bool, poll: bool) -> bool
+    {
+        let mut done = false;
+
+        if let Some(current_thread) = unsafe { arch::get_current_thread().as_mut() }
+        {
+            current_thread.blocking.writer.lock.ptr = self;
+            current_thread.blocking.writer.kind = write;
+            fence(Ordering::SeqCst);
+        }
+        
+        let mut done = false;
+        loop
+        {
+            unsafe { kernel.scheduler.dispatch_spinlock.acquire() }
+
+            if write
+            {
+                if self.state.read_volatile() == 0
+                {
+                    self.state.write_volatile(-1);
+                    done = true;
+                }
+            }
+            else
+            {
+                if self.state.read_volatile() >= 0
+                {
+                    self.state.increment_volatile();
+                    done = true;
+                }
+            }
+
+            unsafe { kernel.scheduler.dispatch_spinlock.release() }
+
+            if poll || done
+            {
+                break
+            }
+            else
+            {
+                if let Some(current_thread) = unsafe { arch::get_current_thread().as_mut() }
+                {
+                    current_thread.state.write_volatile(ThreadState::waiting_for_writer_lock);
+                    arch::interrupts::fake_timer();
+                    current_thread.state.write_volatile(ThreadState::active);
+                }
+                else
+                {
+                    panic("scheduler not ready yet\n");
+                }
+            }
+        }
+
+        return done
+    }
 }
 
 #[derive(Copy, Clone)]
 pub struct Event
 {
+}
+
+impl const Default for Event
+{
+    fn default() -> Self {
+        Self {  }
+    }
 }
 
 impl Spinlock
@@ -302,8 +446,13 @@ impl Event
         unimplemented!()
     }
 
-    pub fn wait(&mut self, timeout_ms: u64) -> bool
+    pub fn wait_extended(&mut self, timeout_ms: u64) -> bool
     {
         unimplemented!()
+    }
+    
+    pub fn wait(&mut self) -> bool
+    {
+        self.wait_extended(no_timeout)
     }
 }

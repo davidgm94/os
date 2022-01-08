@@ -1669,7 +1669,7 @@ pub static mut kernel: Kernel = Kernel
     arch: Arch::Specific::default(),
 };
 
-impl Kernel<'static>
+impl<'a> Kernel<'a>
 {
     fn init(&mut self, early_kernel_info: Arch::EarlyKernelInfo)
     {

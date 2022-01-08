@@ -16,9 +16,12 @@ extern crate scopeguard;
 
 pub use core::sync::atomic::*;
 pub use core::arch::asm;
-pub use core::mem::{size_of, transmute};
+pub use core::mem::{size_of, transmute, transmute_copy};
 pub use core::intrinsics::unreachable;
 pub use core::ptr::{null, null_mut, addr_of, addr_of_mut};
+
+pub const lock_exclusive: bool = true;
+pub const lock_shared: bool = false;
 
 pub fn take_slice<'a, T>(ptr: *mut T, count: usize) -> &'a mut[T]
 {
@@ -77,6 +80,26 @@ impl<T> Volatile<T>
         {
             value
         }
+    }
+}
+
+impl Volatile<u64>
+{
+    pub fn increment_volatile(&mut self)
+    {
+        self.write_volatile(self.read_volatile() + 1);
+    }
+}
+impl Volatile<i64>
+{
+    pub fn increment_volatile(&mut self)
+    {
+        self.write_volatile(self.read_volatile() + 1);
+    }
+
+    pub fn decrement_volatile(&mut self)
+    {
+        self.write_volatile(self.read_volatile() - 1);
     }
 }
 
@@ -584,6 +607,160 @@ pub mod AVL
     }
 }
 
+#[derive(Copy, Clone)]
+pub struct Array<T>
+{
+    ptr: *mut T,
+    len: u64,
+    cap: u64,
+    heap: *mut memory::Heap,
+}
+
+impl<T> Array<T>
+{
+    pub fn insert(&mut self, item: T, i: u64) -> *mut T
+    {
+        todo!()
+    }
+
+    pub fn delete_many(&mut self, position: u64, count: u64)
+    {
+        todo!()
+    }
+
+    pub fn get_slice<'a>(&self) -> &'a mut [T]
+    {
+        take_slice::<T>(self.ptr, self.len as usize)
+    }
+}
+
+#[derive(Copy, Clone)]
+pub struct Range
+{
+    from: u64,
+    to: u64,
+}
+
+#[derive(Copy, Clone)]
+pub struct RangeSet
+{
+    ranges: Array<Range>,
+    contiguous: u64,
+}
+
+impl RangeSet
+{
+    pub fn set(&mut self, from: u64, to: u64, maybe_delta: *mut i64, modify: bool) -> bool
+    {
+        if to <= from { panic("invalid range\n") }
+
+        if self.ranges.len == 0
+        {
+            if let Some(delta) = unsafe { maybe_delta.as_mut() }
+            {
+                if from >= self.contiguous
+                {
+                    *delta = (to - from) as i64;
+                }
+                else if to >= self.contiguous
+                {
+                    *delta = (to - self.contiguous) as i64;
+                }
+                else
+                {
+                    *delta = 0;
+                }
+            }
+
+            if !modify { return true }
+
+            if from <= self.contiguous
+            {
+                if to > self.contiguous { self.contiguous = to; }
+
+                return true
+            }
+
+            if !self.normalize() { return false }
+        }
+
+
+        let new_range =
+        {
+            let mut range: Range = unsafe { core::mem::zeroed() };
+            range.from = (if let Some(left) = unsafe { self.find(from, true).as_ref() } { left.from } else { from } as *const Range) as u64;
+            range.to = (if let Some(right) = unsafe { self.find(to, true).as_ref() } { right.to } else { to } as *const Range) as u64;
+
+            range
+        };
+
+        let mut i = 0;
+
+        while i <= self.ranges.len
+        {
+            if i == self.ranges.len || unsafe { self.ranges.ptr.add(i as usize).read().to } > new_range.from
+            {
+                if modify
+                {
+                    if self.ranges.insert(new_range, i).is_null() { return false }
+
+                    i += 1;
+                }
+
+                break;
+            }
+
+            i += 1;
+        }
+
+        let delete_start = i;
+        let mut delete_count = 0;
+        let mut delete_total = 0;
+
+        for range in self.ranges.get_slice().iter_mut()
+        {
+            let overlap = (range.from >= new_range.from && range.from <= new_range.to) ||
+                (range.to >= new_range.from && range.to <= new_range.to);
+
+            if overlap
+            {
+                delete_count += 1;
+                delete_total = range.to - range.from;
+            }
+            else { break }
+        }
+
+        if modify
+        {
+            self.ranges.delete_many(delete_start, delete_count);
+        }
+
+        self.validate();
+
+        if let Some(delta) = unsafe { maybe_delta.as_mut() }
+        {
+            *delta = new_range.to as i64 - new_range.from as i64 - delete_total as i64;
+        }
+
+        true
+    }
+
+    pub fn validate(&self)
+    {
+        todo!()
+    }
+
+    pub fn normalize(&mut self) -> bool
+    {
+        todo!()
+    }
+
+    pub fn find(&self, offset: u64, touching: bool) -> *mut Range
+    {
+        todo!()
+    }
+}
+
 pub struct Kernel<'a>
 {
     core: Core<'a>,
@@ -659,6 +836,9 @@ pub static mut kernel: Kernel = Kernel
 
         commit_limit: 0,
         approximate_total_object_cache_byte_count: 0,
+        available_critical_event: Event::default(),
+        available_low_event: Event::default(),
+        available_not_critical_event: Event::default(),
     },
     arch: arch::Specific::default(),
 };
