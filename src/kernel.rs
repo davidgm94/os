@@ -15,7 +15,7 @@ pub use self::bitflags::bitflags;
 extern crate scopeguard;
 
 pub use core::sync::atomic::*;
-pub use core::arch::asm;
+pub use core::arch::{asm, global_asm};
 pub use core::mem::{size_of, transmute, transmute_copy};
 pub use core::intrinsics::unreachable;
 pub use core::ptr::{null, null_mut, addr_of, addr_of_mut};
@@ -745,6 +745,18 @@ impl RangeSet
         true
     }
 
+    pub fn contains(&self, offset: u64) -> bool
+    {
+        if self.ranges.len != 0
+        {
+            !self.find(offset, false).is_null()
+        }
+        else
+        {
+            offset < self.contiguous
+        }
+    }
+
     pub fn validate(&self)
     {
         todo!()
@@ -765,7 +777,7 @@ pub struct Kernel<'a>
 {
     core: Core<'a>,
     scheduler: Scheduler,
-    process: Process<'a>,
+    process: Process,
     physical_allocator: memory::Physical::Allocator<'a>,
     arch: arch::Specific<'a>,
 }
@@ -774,7 +786,7 @@ pub struct Core<'a>
 {
     regions: &'a mut[memory::Region],
     region_commit_count: u64,
-    address_space: memory::AddressSpace<'a>,
+    address_space: memory::AddressSpace,
     heap: memory::Heap,
 }
 

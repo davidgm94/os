@@ -791,7 +791,7 @@ pub struct LocalStorage
 }
 
 #[naked]
-pub extern "C" fn get_local_storage() -> *mut LocalStorage
+pub extern "C" fn get_local_storage<'a>() -> *mut LocalStorage
 {
     unsafe
     {
@@ -804,7 +804,7 @@ pub extern "C" fn get_local_storage() -> *mut LocalStorage
 }
 
 #[naked]
-pub extern "C" fn get_current_thread() -> *mut Thread
+pub extern "C" fn get_current_thread<'a>() -> *mut Thread
 {
     unsafe
     {
@@ -877,19 +877,31 @@ fn handle_page_fault(fault_address: u64, flags: memory::HandlePageFaultFlags) ->
         }
         else if virtual_address >= core_address_space_start && virtual_address < core_address_space_start + core_address_space_size && for_supervisor
         {
-            unimplemented!();
+            unsafe { kernel.core.address_space.handle_page_fault(virtual_address, flags) }
         }
         else if virtual_address >= kernel_address_space_start && virtual_address < kernel_address_space_start + kernel_address_space_size && for_supervisor
         {
-            unimplemented!();
+            todo!()
         }
         else if virtual_address >= module_memory_start && virtual_address < module_memory_start + module_memory_size && for_supervisor
         {
-            unimplemented!();
+            todo!()
         }
         else
         {
-            unimplemented!();
+            let current_thread = unsafe { get_current_thread().as_ref().unwrap() };
+            let space =
+            {
+                if current_thread.temporary_address_space.ptr.is_null()
+                {
+                    unsafe { &mut current_thread.process.as_mut().unwrap().address_space }
+                }
+                else
+                {
+                    unsafe { current_thread.temporary_address_space.ptr.as_mut().unwrap() }
+                }
+            };
+            space.handle_page_fault(virtual_address, flags)
         }
     }
     else
@@ -946,7 +958,7 @@ pub fn map_page(space: &mut memory::AddressSpace, asked_physical_address: u64, a
     {
         if space.arch.L3_commit[index_L4 >> 3] & (1 << ( index_L4 & 0b111)) != 0 { panic("attempt to map using uncommited L3 page table\n"); }
         if space.arch.L2_commit[index_L3 >> 3] & (1 << ( index_L3 & 0b111)) != 0 { panic("attempt to map using uncommited L2 page table\n"); }
-        if space.arch.L1_commit[index_L2 >> 3] & (1 << ( index_L2 & 0b111)) != 0 { panic("attempt to map using uncommited L1 page table\n"); }
+        if unsafe { space.arch.L1_commit.read()[index_L2 >> 3] } & (1 << ( index_L2 & 0b111)) != 0 { panic("attempt to map using uncommited L1 page table\n"); }
     }
 
     if page_table_L4.read(index_L4) & 1 == 0 
@@ -1866,11 +1878,12 @@ pub mod Memory
     pub static mut core_L1_commit: [u8; core_L1_commit_size] = [0; core_L1_commit_size];
     
     // Arch-specific part of address spaces
-    pub struct AddressSpace<'a>
+    #[derive(Copy, Clone)]
+    pub struct AddressSpace
     {
         pub cr3: u64,
 
-        pub L1_commit: &'a mut[u8],
+        pub L1_commit: *mut [u8; core_L1_commit_size],
         pub L1_commit_commit: [u8; L1_commit_commit_size],
         pub L2_commit: [u8; L2_commit_size],
         pub L3_commit: [u8; L3_commit_size],
@@ -1894,10 +1907,10 @@ pub mod Memory
             }
         }
 
-        k.core.address_space.arch.L1_commit = take_byte_slice(unsafe { &mut core_L1_commit }, core_L1_commit_size);
+        k.core.address_space.arch.L1_commit = unsafe { &mut core_L1_commit };
         k.core.address_space.reserve_mutex.acquire();
         let l1_commit_address = unsafe { k.core.address_space.reserve(L1_commit_size as u64, RegionFlags::normal | RegionFlags::no_commit_tracking | RegionFlags::fixed).as_mut().unwrap().base_address };
-        k.process.address_space.arch.L1_commit = take_slice(l1_commit_address as *mut u8, L1_commit_size);
+        k.process.address_space.arch.L1_commit = l1_commit_address as *mut [u8; core_L1_commit_size];
         k.core.address_space.reserve_mutex.release();
     }
 }
@@ -1947,7 +1960,7 @@ pub fn commit_page_tables(space: &mut memory::AddressSpace, region: &memory::Reg
         }
         else
         {
-            let increment = space.arch.L1_commit[index as usize >> 3] & (1 << (index & 0b111)) == 0;
+            let increment = unsafe { space.arch.L1_commit.read()[index as usize >> 3] } & (1 << (index & 0b111)) == 0;
             needed += increment as u64;
         }
 
@@ -1992,7 +2005,7 @@ pub fn commit_page_tables(space: &mut memory::AddressSpace, region: &memory::Reg
         let index = i >> shifter;
         let index_L2i = index >> 15;
         space.arch.L1_commit_commit[index_L2i as usize >> 3] |= 1 << (index_L2i & 0b111);
-        space.arch.L1_commit[index as usize >> 3] |= 1 << (index & 0b111);
+        unsafe { space.arch.L1_commit.as_mut().unwrap()[index as usize >> 3] |= 1 << (index & 0b111) };
         i = index << shifter;
         i += 1 << shifter;
     }

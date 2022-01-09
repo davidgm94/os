@@ -4,9 +4,10 @@ use crate::kernel::memory::Physical::critical_available_page_count_threshold;
 
 use super::arch::{kernel_address_space_start, kernel_address_space_size};
 
-pub struct AddressSpace<'a>
+#[derive(Copy, Clone)]
+pub struct AddressSpace
 {
-    pub arch: arch::Memory::AddressSpace<'a>,
+    pub arch: arch::Memory::AddressSpace,
     pub reserve_mutex: Mutex,
     pub reference_count: i32,
 
@@ -15,7 +16,7 @@ pub struct AddressSpace<'a>
     pub reserve_count: u64,
 }
 
-impl<'a> const Default for AddressSpace<'a>
+impl const Default for AddressSpace
 {
     fn default() -> Self {
         Self
@@ -25,7 +26,7 @@ impl<'a> const Default for AddressSpace<'a>
             {
                 cr3: 0,
 
-                L1_commit: &mut[],
+                L1_commit: null_mut(),
                 L1_commit_commit: [0; arch::Memory::L1_commit_commit_size],
                 L2_commit: [0; arch::Memory::L2_commit_size],
                 L3_commit: [0; arch::Memory::L3_commit_size],
@@ -46,7 +47,7 @@ impl<'a> const Default for AddressSpace<'a>
 // @TODO: properly formalize this
 pub const shared_entry_present: u64 = 1;
 
-impl<'a> AddressSpace<'a>
+impl AddressSpace
 {
     pub fn standard_allocate_extended(&mut self, byte_count: u64, flags: RegionFlags, base_address: u64, commit_all: bool) -> u64
     {
@@ -73,7 +74,7 @@ impl<'a> AddressSpace<'a>
         };
 
         self.reserve_mutex.release();
-        return resulting_address;
+        resulting_address
     }
 
     pub fn standard_allocate(&mut self, byte_count: u64, flags: RegionFlags) -> u64
@@ -164,7 +165,7 @@ impl<'a> AddressSpace<'a>
 
         self.reserve_count += needed_page_count;
 
-        region
+        region as *mut _
     }
 
     pub fn reserve(&mut self, byte_count: u64, flags: RegionFlags) -> *mut Region
@@ -242,6 +243,8 @@ impl<'a> AddressSpace<'a>
                 {
                     panic("unable to fix pages\n")
                 }
+
+                i += 1;
             }
         }
 
@@ -300,12 +303,11 @@ impl<'a> AddressSpace<'a>
             }
         };
 
-        // @TODO: bunch of defers here
-        //
 
-        let mut result = true;
         region.map_mutex.acquire();
-        if arch::translate_address(address, flags.contains(HandlePageFaultFlags::write)) != 0
+        let mut result = true;
+
+        if arch::translate_address(address, flags.contains(HandlePageFaultFlags::write)) == 0
         {
             let mut copy_on_write = false;
             let mut mark_modified = false;
@@ -360,7 +362,16 @@ impl<'a> AddressSpace<'a>
                 }
                 else if region.flags.contains(RegionFlags::normal)
                 {
-                    todo!()
+                    if !region.flags.contains(RegionFlags::no_commit_tracking) && unsafe { !region.data.normal.commit.contains(offset_into_region >> page_bit_count) }
+                    {
+                        result = false;
+                    }
+                    else
+                    {
+                        let physical_address = unsafe { kernel.physical_allocator.allocate_with_flags(need_zero_pages) };
+                        arch::map_page(self, physical_address, address, flags);
+                        if zero_page { take_slice(address as *mut u8, page_size as usize).fill(0) }
+                    }
                 }
                 else if region.flags.contains(RegionFlags::guard)
                 {
@@ -516,14 +527,14 @@ pub union HeapRegionFirstUnion
     size: u16,
 }
 
-#[repr(C)]
+#[repr(C, packed)]
 pub union HeapRegionSecondUnion
 {
     allocation_size: u64,
     region_list_next: *mut HeapRegion,
 }
 
-#[repr(C)]
+#[repr(C, packed)]
 pub struct HeapRegion
 {
     u1: HeapRegionFirstUnion,
@@ -608,6 +619,21 @@ impl const Default for Heap
     }
 }
 
+global_asm!(
+    ".global calculate_index_asm",
+    "calculate_index_asm:",
+    "bsr eax, edi",
+    "xor eax, -32",
+    "add eax, 33",
+    "add rax, -5",
+    "ret",
+    );
+
+extern "C"
+{
+    fn calculate_index_asm(size: u64) -> usize;
+}
+
 impl Heap
 {
     pub fn allocate(&mut self, asked_size: u64, zero_memory: bool) -> u64
@@ -649,7 +675,7 @@ impl Heap
 
         let region = 'region:
         {
-            let base_index = Heap::calculate_index(size as u64);
+            let base_index = unsafe { calculate_index_asm(size as u64) };
             if base_index < 12
             {
                 for &region_ptr in &self.regions[base_index..12]
@@ -666,10 +692,7 @@ impl Heap
 
             let region_ptr = self.allocate_call(65536) as *mut HeapRegion;
             let block_count = self.block_count.read_volatile() as u64;
-            if block_count < 16
-            {
-                self.blocks[block_count as usize] = region_ptr;
-            }
+            if block_count < 16 { self.blocks[block_count as usize] = region_ptr }
             else { self.cannot_validate = true }
             self.block_count.write_volatile(block_count + 1);
 
@@ -751,7 +774,7 @@ impl Heap
     {
         if region.used != 0 || unsafe { region.u1.size } < 32 { panic("heap panic\n") }
 
-        let index = Heap::calculate_index(unsafe { region.u1.size as u64 });
+        let index = unsafe { calculate_index_asm(region.u1.size as u64 )} ;
         region.u2.region_list_next = self.regions[index];
         if let Some(region_list_next) = unsafe { region.u2.region_list_next.as_mut() }
         {
@@ -824,12 +847,13 @@ impl Heap
         }
     }
 
-    pub fn calculate_index(size: u64) -> usize
-    {
-        let x = size.leading_zeros() as usize;
-        let msb = (size_of::<u32>() as usize * 8).wrapping_sub(x - 1);
-        msb - 4
-    }
+    //pub fn calculate_index(size: u64) -> usize
+    //{
+        //let x = core::intrinsics::ctlz(size) as i32;
+        //let msb = (size_of::<u32>() as i64 * 8 - x - 1) as usize;
+        //msb - 4
+    //}
+
 
     #[inline(always)]
     fn allocate_call(&mut self, size: u64) -> u64
@@ -843,14 +867,11 @@ impl Heap
             unsafe { kernel.process.address_space.standard_allocate(size, RegionFlags::fixed) }
         }
     }
-
 }
 
 pub mod Physical
 {
     use kernel::*;
-
-    use super::HandlePageFaultFlags;
 
     pub const critical_available_page_count_threshold: u64 = 1048576 / page_size;
     pub const critical_remaining_commit_threshold: u64 = critical_available_page_count_threshold;

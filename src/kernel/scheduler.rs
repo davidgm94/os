@@ -1,8 +1,8 @@
 use kernel::*;
 
-pub struct Process<'a>
+pub struct Process
 {
-    pub address_space: memory::AddressSpace<'a>,
+    pub address_space: memory::AddressSpace,
     pub id: u64,
     pub handle_count: u64,
     pub permissions: ProcessPermissions,
@@ -86,6 +86,9 @@ pub struct ThreadBlocking
 pub struct Thread
 {
     pub in_safe_copy: bool,
+
+    pub process: *mut Process,
+
     pub last_interrupt_timestamp: u64,
     pub is_kernel_thread: bool,
     pub is_page_generator: bool,
@@ -95,6 +98,8 @@ pub struct Thread
     pub executing: Volatile<bool>,
     pub terminating: Volatile<bool>,
     pub blocking: ThreadBlocking,
+
+    pub temporary_address_space: VolatilePointer<memory::AddressSpace>
 }
 
 bitflags!
@@ -113,7 +118,7 @@ bitflags!
     }
 }
 
-impl<'a> Process<'a>
+impl Process
 {
     pub fn register(&mut self, kind: ProcessKind)
     {

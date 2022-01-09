@@ -284,7 +284,7 @@ impl Mutex
                     panic("thread is terminatable\n");
                 }
 
-                if self.owner.ptr == thread as *mut _
+                if !self.owner.ptr.is_null() && self.owner.ptr == thread as *mut _
                 {
                     panic("attempt to acquire mutex owned by current thread\n");
                 }
