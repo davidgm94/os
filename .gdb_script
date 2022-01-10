@@ -1,7 +1,7 @@
 set disassembly-flavor intel
 cd /home/david/git/os
-#symbol-file zig-cache/zig_kernel.elf
-symbol-file target/rust_target/debug/renaissance-os
+symbol-file zig-cache/zig_kernel.elf
+#symbol-file target/rust_target/debug/renaissance-os
 
 break 0x600
 break 0x1000
@@ -14,6 +14,11 @@ b KernelMain
 b core::panicking::panic
 b renaissance-os::kernel::arch::x86_64::handle_page_fault
 b translate_address
+b kernel.panic
+b kernel.panic_raw
+b kernel.TODO
+b interrupt_handler
+
 
 target remote localhost:1234
 

@@ -3,7 +3,7 @@ ENTRY(_start)
 virtual_base = 0xFFFFFFFF80000000;
 SECTIONS
 {
-	. = virtual_base;
+    . = virtual_base;
 	.text ALIGN(4K) : AT(ADDR(.text) - virtual_base)
 	{
 		*(.text)

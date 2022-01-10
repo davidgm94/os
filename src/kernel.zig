@@ -1,170 +1,254 @@
-const unused_delay = Port(0x0080);
-fn Port(comptime port: u16) type
+const std = @import("std");
+const assert = std.debug.assert;
+pub const AtomicOrder = std.builtin.AtomicOrder;
+
+pub const Arch = switch (@import("builtin").target.cpu.arch)
+{
+    .x86_64 => @import("x86_64.zig"),
+    else => unreachable,
+};
+
+// Kernel object members
+pub var arch: Arch = undefined;
+pub var scheduler: Scheduler = undefined;
+pub var process: Scheduler.Process = undefined;
+pub var core: Core = undefined;
+pub var physical_allocator: memory.Physical.Allocator = undefined;
+
+pub const memory = @import("memory.zig");
+pub const Scheduler = @import("scheduler.zig");
+pub const sync = @import("sync.zig");
+
+pub fn Volatile(comptime T: type) type
+{
+    return struct
+    {
+        value: T,
+
+        pub fn read_volatile(self: *@This()) callconv(.Inline) T
+        {
+            return @ptrCast(*volatile T, &self.value).*;
+        }
+
+        pub fn write_volatile(self: *@This(), value: T) callconv(.Inline) void
+        {
+            @ptrCast(*volatile T, &self.value).* = value;
+        }
+    };
+}
+
+pub fn VolatilePointer(comptime T: type) type
+{
+    return struct
+    {
+        const Ptr = *volatile T;
+        ptr: ?Ptr,
+
+        pub fn overwrite_address(self: *@This(), address: ?*T) callconv(.Inline) void
+        {
+            self.ptr = @ptrCast(?Ptr, address);
+        }
+
+        pub fn dereference_volatile(self: *@This()) callconv(.Inline) T
+        {
+            assert(self.ptr != null);
+            return self.ptr.?.*;
+        }
+
+        pub fn get_non_volatile(self: @This()) *T
+        {
+            return @ptrCast(*T, self.ptr.?);
+        }
+    };
+}
+
+pub fn UnalignedVolatilePointer(comptime T: type) type
+{
+    return struct
+    {
+        const Ptr = *volatile align(1)T;
+        ptr: ?Ptr,
+
+        pub fn overwrite_address(self: *@This(), address: ?Ptr) callconv(.Inline) void
+        {
+            self.ptr = address;
+        }
+
+        pub fn dereference_volatile(self: *@This()) callconv(.Inline) T
+        {
+            assert(self.ptr != null);
+            return self.ptr.?.*;
+        }
+    };
+}
+
+pub fn Bitflag(comptime EnumT: type) type
+{
+    return struct
+    {
+        const IntType = std.meta.Int(.unsigned, @bitSizeOf(EnumT));
+        const Enum = EnumT;
+
+        bits: IntType,
+
+        pub fn new(flags: anytype) callconv(.Inline) @This()
+        {
+            const flags_type = @TypeOf(flags);
+            const result = comptime blk:
+            {
+                const fields = std.meta.fields(flags_type);
+                if (fields.len > @bitSizeOf(EnumT)) @compileError("More flags than bits\n");
+
+                var bits: IntType = 0;
+
+                var field_i: u64 = 0;
+                inline while (field_i < fields.len) : (field_i += 1)
+                {
+                    const field = fields[field_i];
+                    const enum_value: EnumT = field.default_value.?;
+                    bits |= 1 << @enumToInt(enum_value);
+                }
+                break :blk bits;
+            };
+            return @This() { .bits = result };
+        }
+
+        pub fn new_from_flag(comptime flag: EnumT) callconv(.Inline) @This()
+        {
+            const bits = 1 << @enumToInt(flag);
+            return @This() { .bits = bits };
+        }
+
+        pub fn empty() callconv(.Inline) @This()
+        {
+            return @This()
+            {
+                .bits = 0,
+            };
+        }
+
+        pub fn all() callconv(.Inline) @This()
+        {
+            comptime var result: IntType = 0;
+            inline for (@typeInfo(EnumT).Enum.fields) |field|
+            {
+                result |= 1 << field.value;
+            }
+            return @This()
+            {
+                .bits = result,
+            };
+        }
+
+        pub fn is_empty(self: @This()) callconv(.Inline) bool
+        {
+            return self.bits == 0;
+        }
+
+        /// This assumes invalid values in the flags can't be set.
+        pub fn is_all(self: @This()) callconv(.Inline) bool
+        {
+            return all().bits == self.bits;
+        }
+
+        pub fn contains(self: @This(), comptime flag: EnumT) callconv(.Inline) bool
+        {
+            return ((self.bits & (1 << @enumToInt(flag))) >> @enumToInt(flag)) != 0;
+        }
+
+        pub fn or_flag(self: *@This(), comptime flag: EnumT) callconv(.Inline) void
+        {
+            self.bits |= 1 << @enumToInt(flag);
+        }
+    };
+}
+
+
+
+pub const Core = struct
+{
+    address_space: memory.AddressSpace,
+};
+
+
+
+pub const Bitset = struct
+{
+};
+
+pub fn AVLTree(comptime T: type) type
+{
+    return struct
+    {
+        const Self = @This();
+        const Key = u64;
+
+        pub const Item = struct
+        {
+            this: ?*T,
+            children: [2]?*Item,
+            parent: ?*Item,
+            tree: ?*Self,
+            key: Key,
+            height: i32,
+        };
+    };
+}
+
+pub fn LinkedList(comptime T: type) type
 {
     return struct
     {
         const Self = @This();
 
-        pub fn read(comptime T: type) callconv(.Inline) T
-        {
-            return switch(T)
-            {
-                u8 => in8(port),
-                u16 => in16(port),
-                u32 => in32(port),
-                else => @compileError("type not supported"),
-            };
-        }
+        first: ?*Item,
+        last: ?*Item,
+        count: u64,
 
-        pub fn write(comptime T: type, value: T) callconv(.Inline) void
+        pub const Item = struct
         {
-            switch(T)
-            {
-                u8 => out8(port, value),
-                u16 => out16(port, value),
-                u32 => out32(port, value),
-                else => @compileError("type not supported"),
-            }
-        }
-
-        pub fn write_delayed(comptime T: type, value: T) callconv(.Inline) void
-        {
-            switch(T)
-            {
-                u8  => { out8(port, value);  _ = unused_delay.read(u8); },
-                u16 => { out16(port, value); _ = unused_delay.read(u8); },
-                u32 => { out32(port, value); _ = unused_delay.read(u8); },
-                else => @compileError("type not supported"),
-            }
-        }
+            previous: ?*Item,
+            next: ?*Item,
+            list: ?*Self,
+            this: ?*T,
+        };
     };
 }
 
-fn in8(comptime port: u16) callconv(.Inline) u8
+export fn kernel_init() callconv(.C) void
 {
-    return asm volatile(
-        "inb %[port], %[result]"
-        : [result] "={al}" (-> u8)
-        : [port] "N{dx}" (port)
-    );
+    TODO();
 }
 
-fn out8(comptime port: u16, value: u8) callconv(.Inline) void
+
+
+
+
+pub const Pool = struct
 {
-    asm volatile(
-        "outb %[value], %[port]"
-        :
-        : [value] "{al}" (value),
-          [port]  "N{dx}" (port)
-    );
-}
-
-fn in16(comptime port: u16) callconv(.Inline) u16
-{
-    _ = port;
-    unreachable;
-    //return asm volatile(
-        //"inb %[port], %[result]"
-        //: [result] "={al}" (-> u8)
-        //: [port] "N{dx}" (port)
-    //);
-}
-
-fn out16(comptime port: u16, value: u16) callconv(.Inline) void
-{
-    _ = port; _ = value;
-    unreachable;
-    //asm volatile(
-        //"outb %[value], %[port]"
-        //:
-        //: [value] "{al}" (value),
-          //[port]  "N{dx}" (port)
-    //);
-}
-
-fn in32(comptime port: u16) callconv(.Inline) u32
-{
-    _ = port;
-    unreachable;
-    //return asm volatile(
-        //"inb %[port], %[result]"
-        //: [result] "={al}" (-> u8)
-        //: [port] "N{dx}" (port)
-    //);
-}
-
-fn out32(comptime port: u16, value: u32) callconv(.Inline) void
-{
-    _ = port; _ = value;
-    unreachable;
-    //asm volatile(
-        //"outb %[value], %[port]"
-        //:
-        //: [value] "{al}" (value),
-          //[port]  "N{dx}" (port)
-    //);
-}
-
-const PIC1_command = Port(0x20);
-const PIC1_data = Port(0x21);
-const PIC2_command = Port(0xa0);
-const PIC2_data = Port(0xa1);
-
-export fn PIC_disable() callconv(.C) void
-{
-    PIC1_command.write_delayed(u8, 0x11);
-    PIC2_command.write_delayed(u8, 0x11);
-    PIC1_data.write_delayed(u8, 0x20);
-    PIC2_data.write_delayed(u8, 0x28);
-    PIC1_data.write_delayed(u8, 0x04);
-    PIC2_data.write_delayed(u8, 0x02);
-    PIC1_data.write_delayed(u8, 0x01);
-    PIC2_data.write_delayed(u8, 0x01);
-
-    PIC1_data.write_delayed(u8, 0xff);
-    PIC2_data.write_delayed(u8, 0xff);
-}
-
-const page_bit_count = 12;
-const page_size = 0x1000;
-
-//const core_memory_region_start = 0xFFFF8001F0000000;
-//const core_memory_region_count = (0xFFFF800200000000 - 0xFFFF8001F0000000) / @sizeOf(MMRegion);
-const mm_kernel_space_start = 0xFFFF900000000000;
-const mm_kernel_space_size =  0xFFFFF00000000000 - 0xFFFF900000000000;
-const mm_modules_start =      0xFFFFFFFF90000000;
-const mm_modules_size =      0xFFFFFFFFC0000000 - 0xFFFFFFFF90000000;
-
-const mm_core_space_start =   0xFFFF800100000000;
-const mm_core_space_size  = 0xFFFF8001F0000000 - 0xFFFF800100000000;
-const mm_user_space_start = 0x100000000000;
-const mm_user_space_size  = 0xF00000000000 - 0x100000000000;
-const low_memory_map_start = 0xFFFFFE0000000000;
-const low_memory_limit = 0x100000000; // The first 4GB is mapped here.
-
-export fn memory_region_setup() callconv(.C) void
-{
-    //const physical_memory_region_ptr = 
-}
-
-const PhysicalMemoryRegion = extern struct
-{
-    base_address: u64,
-    page_count: u64,
 };
 
-const PhysicalMemory = struct
-{
-    regions: []PhysicalMemoryRegion,
-    page_count: u64,
-    original_page_count: u64,
-    region_index: u64,
-    highest: u64,
-};
 
-const Kernel = struct
-{
-    physical_memory: PhysicalMemory,
-};
+var kernel_panic_buffer: [0x4000]u8 = undefined;
 
-var kernel: Kernel = undefined;
+pub fn panic(comptime format: []const u8, args: anytype) noreturn
+{
+    const formatted_string = std.fmt.bufPrint(kernel_panic_buffer[0..], format, args) catch unreachable;
+    panic_raw(formatted_string);
+}
+
+fn _foo(msg: []const u8) void
+{
+    _ = msg;
+}
+/// This is the raw panic function
+pub fn panic_raw(msg: []const u8) noreturn
+{
+    _foo(msg);
+    Arch.CPU_stop();
+}
+
+pub fn TODO() noreturn
+{
+    panic_raw("To be implemented\n");
+}
