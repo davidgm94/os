@@ -3,6 +3,8 @@ const kernel = @import("kernel.zig");
 const Volatile = kernel.Volatile;
 const VolatilePointer = kernel.VolatilePointer;
 
+const Bitflag = kernel.Bitflag;
+
 const LinkedList = kernel.LinkedList;
 const Pool = kernel.Pool;
 
@@ -16,6 +18,7 @@ const AddressSpace = kernel.memory.AddressSpace;
 const InterruptContext = kernel.Arch.Interrupt.Context;
 
 const std = @import("std");
+const Atomic = std.atomic.Atomic;
 
 dispatch_spinlock: Spinlock,
 active_timers_spinlock: Spinlock,
@@ -137,10 +140,59 @@ pub const Thread = struct
     };
 };
 
+pub const MessageQueue = struct
+{
+};
+
+pub const HandleTable = struct
+{
+};
+
 pub const Process = struct
 {
     // @TODO: maybe turn into a pointer
     address_space: AddressSpace,
+    message_queue: MessageQueue,
+    handle_table: HandleTable,
+
+    threads: LinkedList(Thread),
+    threads_mutex: Mutex,
+
+    permissions: Process.Permission,
+    type: Process.Type,
+    id: u64,
+    handle_count: Volatile(u64),
+    all_item: LinkedList(Process).Item,
+    
+    pub const Type = enum
+    {
+        normal,
+        desktop,
+        kernel,
+    };
+
+    pub const Permission = Bitflag(enum(u64)
+        {
+            networking = 0,
+            process_create = 1,
+            process_open = 2,
+            screen_modify = 3,
+            shutdown = 4,
+            take_system_snapshot = 5,
+            get_volume_information = 6,
+            window_manager = 7,
+            posix_subsystem = 8,
+        });
+
+    pub fn register(self: *@This(), process_type: Process.Type) void
+    {
+        self.id = @atomicRmw(@TypeOf(kernel.scheduler.next_processor_id), &kernel.scheduler.next_process_id, .Add, 1, .SeqCst);
+        self.address_space.reference_count.write_volatile(1);
+        //// list, table
+        self.handle_count.write_volatile(1);
+        self.permissions = Process.Permission.all();
+        self.type = process_type;
+    }
 };
 
 pub const max_wait_count = 8;

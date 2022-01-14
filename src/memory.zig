@@ -10,10 +10,12 @@ const Bitflag = kernel.Bitflag;
 const AVLTree = kernel.AVLTree;
 const LinkedList= kernel.LinkedList;
 const Bitset = kernel.Bitset;
+const RangeSet = kernel.RangeSet;
 
 const Mutex = kernel.sync.Mutex;
 const Spinlock = kernel.sync.Spinlock;
 const Event = kernel.sync.Event;
+const WriterLock = kernel.sync.WriterLock;
 
 const Thread = kernel.Scheduler.Thread;
 const Process = kernel.Scheduler.Process;
@@ -46,10 +48,58 @@ pub const MapPageFlags = Bitflag(enum(u32)
     }
 );
 
+pub const SharedRegion = struct
+{
+};
+
 pub const Region = struct
 {
     descriptor: Region.Descriptor,
     flags: Region.Flags,
+    data: struct
+    {
+        u: extern union
+        {
+            physical: struct
+            {
+                offset: u64,
+            },
+            shared: struct
+            {
+                region: ?*SharedRegion,
+                offset: u64,
+            },
+            file: struct
+            {
+            },
+            normal: struct
+            {
+                commit: RangeSet,
+                commit_page_count: u64,
+                guard_before: ?*Region,
+                guard_after: ?*Region,
+            },
+        },
+        pin: WriterLock,
+        map_mutex: Mutex,
+    },
+    u: extern union
+    {
+        item: struct
+        {
+            base: AVLTree(Region).Item,
+            u: extern union
+            {
+                size: AVLTree(Region).Item,
+                non_guard: LinkedList(Region).Item,
+            },
+        },
+        core: struct
+        {
+            used: bool,
+        },
+    },
+
     pub const Descriptor = extern struct
     {
         base_address: u64,
@@ -66,11 +116,13 @@ pub const Region = struct
             write_combining = 5,
             executable = 6,
             user = 7,
+            physical = 8,
+            normal = 9,
+            shared = 10,
+            guard = 11,
+            cache = 12,
+            file = 13,
         });
-    pub const U2Item = struct
-    {
-        //AVLTree.Item(
-    };
 };
 
 pub const AddressSpace = struct
@@ -97,6 +149,97 @@ pub const AddressSpace = struct
         _ = flags;
         TODO();
     }
+    pub fn reserve(self: *@This(), byte_count: u64, flags: Region.Flags) ?*Region
+    {
+        return self.reserve_extended(byte_count, flags, 0);
+    }
+
+    pub fn reserve_extended(self: *@This(), byte_count: u64, flags: Region.Flags, forced_address: u64) ?*Region
+    {
+        const needed_page_count = ((byte_count + page_size - 1) & ~@as(u64, page_size - 1)) / page_size;
+
+        if (needed_page_count == 0) return null;
+
+        self.reserve_mutex.assert_locked();
+
+        const region = blk:
+        {
+            if (self == &kernel.core.address_space)
+            {
+                if (kernel.core.regions.len == kernel.Arch.core_memory_region_count) return null;
+
+                if (forced_address != 0) panic_raw("Using a forced address in core address space\n");
+
+                {
+                    const new_region_count = kernel.core.regions.len + 1;
+                    const needed_commit_page_count = new_region_count * @sizeOf(Region) / page_size;
+
+                    while (kernel.core.region_commit_count < needed_commit_page_count) : (kernel.core.region_commit_count += 1)
+                    {
+                        if (!kernel.physical_allocator.commit(page_size, true)) return null;
+                    }
+                }
+
+                for (kernel.core.regions) |*region|
+                {
+                    if (!region.u.core.used and region.descriptor.page_count >= needed_page_count)
+                    {
+                        if (region.descriptor.page_count > needed_page_count)
+                        {
+                            const last = kernel.core.regions.len;
+                            kernel.core.regions.len += 1;
+                            var split = &kernel.core.regions[last];
+                            split.* = region.*;
+                            split.descriptor.base_address += needed_page_count * page_size;
+                            split.descriptor.page_count -= needed_page_count;
+                        }
+
+                        region.u.core.used = true;
+                        region.descriptor.page_count = needed_page_count;
+                        region.flags = flags;
+                        region.data = std.mem.zeroes(@TypeOf(region.data));
+
+                        break :blk region;
+                    }
+                }
+
+                return null;
+            }
+            else if (forced_address != 0)
+            {
+                TODO();
+            }
+            else
+            {
+                TODO();
+            }
+        };
+
+        if (!kernel.arch.commit_page_tables(self, region))
+        {
+            self.unreserve(region, false);
+            return null;
+        }
+
+        if (self != &kernel.core.address_space)
+        {
+            region.u.item.u.non_guard = std.mem.zeroes(@TypeOf(region.u.item.u.non_guard));
+            region.u.item.u.non_guard.this = region;
+            TODO();
+        }
+
+        self.reserve_count += needed_page_count;
+
+        return region;
+    }
+
+    pub fn unreserve(self: *@This(), region_to_remove: *Region, unmap_pages: bool) void
+    {
+        _ = self;
+        _ = region_to_remove;
+        _ = unmap_pages;
+        TODO();
+    }
 };
 
 pub const PageFrame = struct
@@ -104,7 +247,7 @@ pub const PageFrame = struct
     state: Volatile(PageFrame.State),
     flags: Volatile(u8),
     cache_reference: VolatilePointer(u64),
-    data: union
+    data: extern union
     {
         list: struct
         {
@@ -239,6 +382,7 @@ pub const Physical = struct
             _ = self; _ = byte_count; _ = fixed;
             TODO();
         }
+
     };
 
     pub const Flags = Bitflag(enum(u32)
@@ -253,3 +397,17 @@ pub const Physical = struct
 pub const ObjectCache = struct
 {
 };
+
+pub const Heap = struct
+{
+};
+
+pub fn init() void
+{
+    kernel.core.regions = @intToPtr([*]Region, kernel.Arch.core_memory_region_start)[0..1];
+    kernel.core.regions[0].u.core.used = false;
+    kernel.core.regions[0].descriptor.base_address = kernel.Arch.core_address_space_start;
+    kernel.core.regions[0].descriptor.page_count = kernel.Arch.core_address_space_size / page_size;
+
+    kernel.Arch.memory_init();
+}

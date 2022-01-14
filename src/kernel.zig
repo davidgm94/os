@@ -1,6 +1,7 @@
+const kernel = @This();
 const std = @import("std");
 const assert = std.debug.assert;
-pub const AtomicOrder = std.builtin.AtomicOrder;
+const AtomicOrder = std.builtin.AtomicOrder;
 
 pub const Arch = switch (@import("builtin").target.cpu.arch)
 {
@@ -129,15 +130,19 @@ pub fn Bitflag(comptime EnumT: type) type
 
         pub fn all() callconv(.Inline) @This()
         {
-            comptime var result: IntType = 0;
-            inline for (@typeInfo(EnumT).Enum.fields) |field|
+            var result = comptime blk:
             {
-                result |= 1 << field.value;
-            }
-            return @This()
-            {
-                .bits = result,
+                var bits: IntType = 0;
+                inline for (@typeInfo(EnumT).Enum.fields) |field|
+                {
+                    bits |= 1 << field.value;
+                }
+                break :blk @This()
+                {
+                    .bits = bits,
+                };
             };
+            return result;
         }
 
         pub fn is_empty(self: @This()) callconv(.Inline) bool
@@ -168,9 +173,10 @@ pub fn Bitflag(comptime EnumT: type) type
 pub const Core = struct
 {
     address_space: memory.AddressSpace,
+    regions: []memory.Region,
+    region_commit_count: u64,
+    heap: memory.Heap,
 };
-
-
 
 pub const Bitset = struct
 {
@@ -215,19 +221,14 @@ pub fn LinkedList(comptime T: type) type
     };
 }
 
-export fn kernel_init() callconv(.C) void
-{
-    TODO();
-}
-
-
-
-
 
 pub const Pool = struct
 {
 };
 
+pub const RangeSet = struct
+{
+};
 
 var kernel_panic_buffer: [0x4000]u8 = undefined;
 
@@ -251,4 +252,10 @@ pub fn panic_raw(msg: []const u8) noreturn
 pub fn TODO() noreturn
 {
     panic_raw("To be implemented\n");
+}
+
+export fn init() callconv(.C) void
+{
+    kernel.process.register(.kernel);
+    kernel.memory.init();
 }

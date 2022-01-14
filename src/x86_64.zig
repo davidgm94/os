@@ -1,3 +1,6 @@
+// Members of the arch-specific kernel structure
+physical_memory: PhysicalMemory,
+
 const kernel = @import("kernel.zig");
 const unused_delay = Port(0x0080);
 
@@ -14,8 +17,6 @@ const std = @import("std");
 const assert = std.debug.assert;
 const zeroes = std.mem.zeroes;
 
-// Members of the arch-specific kernel structure
-physical_memory: PhysicalMemory,
 
 pub const page_bit_count = 12;
 pub const page_size = 0x1000;
@@ -50,6 +51,7 @@ pub fn handle_page_fault(self: *@This(), fault_address: u64, flags: memory.Handl
             const physical_address = kernel.physical_allocator.allocate_with_flags(physical_allocation_flags);
             const map_page_flags = memory.MapPageFlags.new_from_flag(.commit_tables_now);
             _ = self.map_page(&kernel.process.address_space, physical_address, virtual_address, map_page_flags);
+            return true;
         }
         else if (virtual_address >= core_address_space_start and virtual_address < core_address_space_start + core_address_space_size and for_supervisor)
         {
@@ -66,13 +68,19 @@ pub fn handle_page_fault(self: *@This(), fault_address: u64, flags: memory.Handl
         else
         {
             // @Unsafe
-            const current_thread = get_current_thread().?;
-            const space =
-                if (current_thread.temporary_address_space.ptr != null)
-                    current_thread.temporary_address_space.get_non_volatile()
-                else
-                    &current_thread.process.address_space;
-            return space.handle_page_fault(virtual_address, flags);
+            if (get_current_thread()) |current_thread|
+            {
+                const space =
+                    if (current_thread.temporary_address_space.ptr != null)
+                        current_thread.temporary_address_space.get_non_volatile()
+                    else
+                        &current_thread.process.address_space;
+                return space.handle_page_fault(virtual_address, flags);
+            }
+            else
+            {
+                panic_raw("unreachable path\n");
+            }
         }
     }
 
@@ -181,6 +189,137 @@ pub fn map_page(self: *@This(), space: *memory.AddressSpace, asked_physical_addr
     return true;
 }
 
+/// Architecture-specific memory initialization
+pub fn memory_init() void
+{
+    kernel.core.address_space.arch.cr3 = CR3.read();
+
+    var page_i: u64 = 0x100;
+    while (page_i < 0x200) : (page_i += 1)
+    {
+        if (page_tables[@enumToInt(PageTable.Level.level4)].ptr[page_i] == 0)
+        {
+            const physical_address = kernel.physical_allocator.allocate_with_flags(memory.Physical.Flags.empty());
+            page_tables[@enumToInt(PageTable.Level.level4)].ptr[page_i] = physical_address | 0b11;
+            const page = @ptrCast([*]u8, &page_tables[@enumToInt(PageTable.Level.level3)].ptr[page_i * 0x200])[0..page_size];
+            std.mem.set(u8, page, 0);
+        }
+    }
+
+    kernel.core.address_space.arch.commit.L1 = &AddressSpace.core_L1_commit;
+
+    _ = kernel.core.address_space.reserve_mutex.acquire();
+    defer kernel.core.address_space.reserve_mutex.release();
+    const kernel_address_space_L1_flags = memory.Region.Flags.new(.{ .normal, .no_commit_tracking, .fixed });
+    const kernel_address_space_L1 = @intToPtr(*@TypeOf(AddressSpace.core_L1_commit), kernel.core.address_space.reserve(AddressSpace.core_L1_commit.len, kernel_address_space_L1_flags).?.descriptor.base_address);
+    kernel.process.address_space.arch.commit.L1 = kernel_address_space_L1;
+}
+
+
+pub fn commit_page_tables(self: *@This(), space: *memory.AddressSpace, region: *memory.Region) bool
+{
+    // @TODO: refactor?
+    _  = self;
+    space.reserve_mutex.assert_locked();
+
+    const base = (region.descriptor.base_address - @as(u64, if (space == &kernel.core.address_space) core_address_space_start else 0)) & 0x7FFFFFFFF000;
+    const end = base + (region.descriptor.page_count << page_bit_count);
+    var needed: u64 = 0;
+
+    var i = base;
+    while (i < end)
+    {
+        const shifter: u64 = page_bit_count + entry_per_page_table_bit_count * 3;
+        const index = i >> shifter;
+        const increment = space.arch.commit.L3[index >> 3] & (@as(u5, 1) << @truncate(u3, index & 0b111)) == 0;
+        needed += @boolToInt(increment);
+        i = (index << shifter) + (1 << shifter);
+    }
+
+    i = base;
+    while (i < end)
+    {
+        const shifter: u64 = page_bit_count + entry_per_page_table_bit_count * 2;
+        const index = i >> shifter;
+        const increment = space.arch.commit.L2[index >> 3] & (@as(u5, 1) << @truncate(u3, index & 0b111)) == 0;
+        needed += @boolToInt(increment);
+        i = (index << shifter) + (1 << shifter);
+    }
+
+    var previous_index_l2i: u64 = std.math.maxInt(u64);
+    i = base;
+    while (i < end)
+    {
+        const shifter: u64 = page_bit_count + entry_per_page_table_bit_count;
+        const index = i >> shifter;
+        const index_l2i = index >> 15;
+
+        if (space.arch.commit.commit_L1[index_l2i >> 3] & (@as(u5, 1) << @truncate(u3, index_l2i & 0b111)) == 0)
+        {
+            if (previous_index_l2i != index_l2i)
+            {
+                needed += 2;
+            }
+            else
+            {
+                needed += 1;
+            }
+        }
+        else
+        {
+            const increment = space.arch.commit.L1[index >> 3] & (@as(u5, 1) << @truncate(u3, index & 0b111)) == 0;
+            needed += @boolToInt(increment);
+        }
+
+        previous_index_l2i = index_l2i;
+        i = index << shifter;
+        i += 1 << shifter;
+    }
+
+    if (needed != 0)
+    {
+        if (!kernel.physical_allocator.commit(needed * page_size, true))
+        {
+            return false;
+        }
+        space.arch.commited_page_table_count += needed;
+    }
+
+    i = base;
+    while (i < end)
+    {
+        const shifter: u64 = page_bit_count + entry_per_page_table_bit_count * 3;
+        const index = i >> shifter;
+        space.arch.commit.L3[index >> 3] |= @as(u5, 1) << @truncate(u3, index & 0b111);
+        i = index << shifter;
+        i += 1 << shifter;
+    }
+
+    i = base;
+    while (i < end)
+    {
+        const shifter: u64 = page_bit_count + entry_per_page_table_bit_count * 2;
+        const index = i >> shifter;
+        space.arch.commit.L2[index >> 3] |= @as(u5, 1) << @truncate(u3, index & 0b111);
+        i = index << shifter;
+        i += 1 << shifter;
+    }
+
+    i = base;
+    while (i < end)
+    {
+        const shifter: u64 = page_bit_count + entry_per_page_table_bit_count;
+        const index = i >> shifter;
+        const index_L2i = index >> 15;
+        space.arch.commit.commit_L1[index_L2i >> 3] |= @as(u5, 1) << @truncate(u3, index_L2i & 0b111);
+        space.arch.commit.L1[index >> 3] |= @as(u5, 1) << @truncate(u3, index & 0b111);
+        i = index << shifter;
+        i += 1 << shifter;
+    }
+
+    return true;
+}
+
 pub fn early_allocate_page(self: *@This()) u64
 {
     const index = blk:
@@ -269,12 +408,13 @@ pub fn fake_timer_interrupt() callconv(.Inline) void
     );
 }
 
+/// Architecture-specific part of address space struct
 pub const AddressSpace = struct
 {
     cr3: u64,
     commit: struct
     {
-        L1: [*]u8,
+        L1: *[core_L1_commit.len]u8,
         commit_L1: [L1_commit_commit_size]u8,
         L2: [L2_commit_size]u8,
         L3: [L3_commit_size]u8,
@@ -287,6 +427,8 @@ pub const AddressSpace = struct
     const L1_commit_commit_size = 1 << 8;
     const L2_commit_size = 1 << 14;
     const L3_commit_size = 1 << 5;
+
+    var core_L1_commit: [(0xFFFF800200000000 - 0xFFFF800100000000) >> (entry_per_page_table_bit_count + page_bit_count + 3)]u8 = undefined;
 
     fn handle_missing_page_table(self: *@This(), comptime level: PageTable.Level, indices: PageTable.Indices, flags: memory.MapPageFlags) callconv(.Inline) void
     {
@@ -440,20 +582,23 @@ export fn PIC_disable() callconv(.C) void
     PIC2_data.write_delayed(u8, 0xff);
 }
 
+pub const core_memory_region_start = 0xFFFF8001F0000000;
+pub const core_memory_region_count = (0xFFFF800200000000 - 0xFFFF8001F0000000) / @sizeOf(memory.Region);
 
-const core_memory_region_start = 0xFFFF8001F0000000;
-const core_memory_region_count = (0xFFFF800200000000 - 0xFFFF8001F0000000) / @sizeOf(memory.Region);
-const kernel_address_space_start = 0xFFFF900000000000;
-const kernel_address_space_size = 0xFFFFF00000000000 - 0xFFFF900000000000;
-const modules_start = 0xFFFFFFFF90000000;
-const modules_size = 0xFFFFFFFFC0000000 - 0xFFFFFFFF90000000;
+pub const kernel_address_space_start = 0xFFFF900000000000;
+pub const kernel_address_space_size = 0xFFFFF00000000000 - 0xFFFF900000000000;
 
-const core_address_space_start = 0xFFFF800100000000;
-const core_address_space_size = 0xFFFF8001F0000000 - 0xFFFF800100000000;
-const user_space_start = 0x100000000000;
-const user_space_size = 0xF00000000000 - 0x100000000000;
-const low_memory_map_start = 0xFFFFFE0000000000;
-const low_memory_limit = 0x100000000; // The first 4GB is mapped here.
+pub const modules_start = 0xFFFFFFFF90000000;
+pub const modules_size = 0xFFFFFFFFC0000000 - 0xFFFFFFFF90000000;
+
+pub const core_address_space_start = 0xFFFF800100000000;
+pub const core_address_space_size = 0xFFFF8001F0000000 - 0xFFFF800100000000;
+
+pub const user_space_start = 0x100000000000;
+pub const user_space_size = 0xF00000000000 - 0x100000000000;
+
+pub const low_memory_map_start = 0xFFFFFE0000000000;
+pub const low_memory_limit = 0x100000000; // The first 4GB is mapped here.
 
 const idt_entry_count = 0x1000 / @sizeOf(IDTEntry);
 
@@ -545,7 +690,7 @@ export fn _start() callconv(.Naked) noreturn
         \\call CPU_setup_1
         \\
         \\and rsp, ~0xf
-        \\call kernel_init
+        \\call init
 
         \\jmp CPU_stop
     );
@@ -951,7 +1096,21 @@ export fn interrupt_handler(context: *Interrupt.Context) callconv(.C) void
                                 break :blk flags;
                             }))
                     {
-                        TODO();
+                        if (maybe_current_thread) |current_thread|
+                        {
+                            if (current_thread.in_safe_copy and context.cr2 < 0x8000000000000000)
+                            {
+                                context.rip = context.r8;
+                            }
+                            else
+                            {
+                                panic_raw("unreachable\n");
+                            }
+                        }
+                        else
+                        {
+                            panic_raw("unreachable path\n");
+                        }
                     }
 
                     Interrupt.disable();
