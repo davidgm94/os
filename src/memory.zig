@@ -10,7 +10,7 @@ const Bitflag = kernel.Bitflag;
 const AVLTree = kernel.AVLTree;
 const LinkedList= kernel.LinkedList;
 const Bitset = kernel.Bitset;
-const RangeSet = kernel.RangeSet;
+const Range = kernel.Range;
 
 const Mutex = kernel.sync.Mutex;
 const Spinlock = kernel.sync.Spinlock;
@@ -22,8 +22,12 @@ const Process = kernel.Scheduler.Process;
 
 const page_size = kernel.Arch.page_size;
 const fake_timer_interrupt = kernel.Arch.fake_timer_interrupt;
+const get_current_thread = kernel.Arch.get_current_thread;
+const kernel_address_space_start = kernel.Arch.kernel_address_space_start;
+const kernel_address_space_size = kernel.Arch.kernel_address_space_size;
 
 const std = @import("std");
+const assert = std.debug.assert;
 
 pub const HandlePageFaultFlags = Bitflag(enum(u32)
     {
@@ -74,7 +78,7 @@ pub const Region = struct
             },
             normal: struct
             {
-                commit: RangeSet,
+                commit: Range.Set,
                 commit_page_count: u64,
                 guard_before: ?*Region,
                 guard_after: ?*Region,
@@ -129,9 +133,9 @@ pub const AddressSpace = struct
 {
     arch: kernel.Arch.AddressSpace,
 
-    free_region_base: AVLTree(Region).Item,
-    free_region_size: AVLTree(Region).Item,
-    used_regions: AVLTree(Region).Item,
+    free_region_base: AVLTree(Region),
+    free_region_size: AVLTree(Region),
+    used_regions: AVLTree(Region),
     used_regions_non_guard: LinkedList(Region),
 
     reserve_mutex: Mutex,
@@ -240,7 +244,82 @@ pub const AddressSpace = struct
         _ = unmap_pages;
         TODO();
     }
+
+    pub fn standard_allocate(self: *@This(), byte_count: u64, flags: Region.Flags) u64
+    {
+        return self.standard_allocate_extended(byte_count, flags, 0, true);
+    }
+
+    pub fn standard_allocate_extended(self: *@This(), byte_count: u64, flags: Region.Flags, base_address: u64, commit_all: bool) u64
+    {
+        _ = self.reserve_mutex.acquire();
+        defer self.reserve_mutex.release();
+
+        if (self.reserve_extended(byte_count, flags.or_flag(.normal), base_address)) |region|
+        {
+            if (commit_all and !self.commit_range(region, 0, region.descriptor.page_count))
+            {
+                self.unreserve(region, false);
+                return 0;
+            }
+
+            return region.descriptor.base_address;
+        }
+        else
+        {
+            return 0;
+        }
+    }
+
+    fn commit_range(self: *@This(), region: *Region, page_offset: u64, page_count: u64) bool
+    {
+        self.reserve_mutex.assert_locked();
+        
+        if (region.flags.contains(.no_commit_tracking))
+        {
+            panic_raw("region does not support commit tracking");
+        }
+
+        if (page_offset >= region.descriptor.page_count or page_count > region.descriptor.page_count - page_offset)
+        {
+            panic_raw("invalid region offset and page count");
+        }
+
+        if (!region.flags.contains(.normal))
+        {
+            panic_raw("cannot commit into non-normal region");
+        }
+
+        var delta_s: i64 = 0;
+
+        _ = region.data.u.normal.commit.set(page_offset, page_offset + page_count, &delta_s, false);
+
+        if (delta_s < 0)
+        {
+            panic_raw("commit range invalid delta calculation");
+        }
+        
+        const delta = @intCast(u64, delta_s);
+
+        if (delta == 0) return true;
+
+        {
+            const commit_byte_count = delta * page_size;
+            if (!kernel.physical_allocator.commit(commit_byte_count, region.flags.contains(.fixed))) return false;
+
+            region.data.u.normal.commit_page_count += delta;
+            self.commit_count += delta;
+
+            if (region.data.u.normal.commit_page_count > region.descriptor.page_count)
+            {
+                panic_raw("invalid delta calculation increases region commit past page count");
+            }
+        }
+
+        TODO();
+    }
 };
+
 
 pub const PageFrame = struct
 {
@@ -292,9 +371,9 @@ pub const Physical = struct
         standby_page_count: u64,
         active_page_count: u64,
 
-        fixed_commit: u64,
-        pageable_commit: u64,
-        fixed_limit_commit: u64,
+        commit_fixed: u64,
+        commit_pageable: u64,
+        commit_fixed_limit: u64,
         commit_limit: u64,
 
         commit_mutex: Mutex,
@@ -379,10 +458,76 @@ pub const Physical = struct
 
         pub fn commit(self: *@This(), byte_count: u64, fixed: bool) bool
         {
-            _ = self; _ = byte_count; _ = fixed;
-            TODO();
+            if (byte_count & (page_size - 1) != 0) panic_raw("expected multiple of page size\n");
+
+            const needed_page_count = byte_count / page_size;
+
+            _ = self.commit_mutex.acquire();
+            defer self.commit_mutex.release();
+
+            // If not true: we haven't started tracking commit counts yet
+            if (self.commit_limit != 0)
+            {
+                if (fixed)
+                {
+                    if (needed_page_count > self.commit_fixed_limit - self.commit_fixed)
+                    {
+                        return false;
+                    }
+
+                    if (self.get_available_page_count() - needed_page_count < critical_available_page_threshold and !get_current_thread().?.is_page_generator)
+                    {
+                        return false;
+                    }
+
+                    self.commit_fixed += needed_page_count;
+                }
+                else
+                {
+                    if (needed_page_count > self.get_remaining_commit() - if (get_current_thread().?.is_page_generator) @as(u64, 0) else @as(u64, critical_remaining_commit_threshold))
+                    {
+                        return false;
+                    }
+
+                    self.commit_pageable += needed_page_count;
+                }
+
+                if (self.should_trim_object_cache())
+                {
+                    TODO();
+                }
+            }
+        
+            return true;
         }
 
+        fn get_available_page_count(self: @This()) callconv(.Inline) u64
+        {
+            return self.zeroed_page_count + self.free_page_count + self.standby_page_count;
+        }
+
+        fn get_remaining_commit(self: @This()) callconv(.Inline) u64
+        {
+            return self.commit_limit - self.commit_pageable - self.commit_fixed;
+        }
+
+        fn should_trim_object_cache(self: @This()) callconv(.Inline) bool
+        {
+            return self.approximate_total_object_cache_byte_count / page_size > self.get_object_cache_maximum_cache_page_count();
+        }
+
+        fn get_object_cache_maximum_cache_page_count(self: @This()) callconv(.Inline) u64
+        {
+            return (self.commit_limit - self.get_non_cache_memory_page_count()) / 2;
+        }
+
+        fn get_non_cache_memory_page_count(self: @This()) callconv(.Inline) u64
+        {
+            return self.commit_fixed - self.commit_pageable - self.approximate_total_object_cache_byte_count / page_size;
+        }
+
+        const critical_available_page_threshold = 1048576 / page_size;
+        const critical_remaining_commit_threshold = 1048576 / page_size;
     };
 
     pub const Flags = Bitflag(enum(u32)
@@ -398,9 +543,312 @@ pub const ObjectCache = struct
 {
 };
 
+pub const HeapRegion = extern struct
+{
+    u1: extern union
+    {
+        next: u16,
+        size: u16,
+    },
+
+    previous: u16,
+    offset: u16,
+    used: u16,
+
+    u2: extern union
+    {
+        allocation_size: u64,
+        region_list_next: ?*HeapRegion,
+    },
+
+    region_list_reference: ?*?*@This(),
+
+    const used_header_size = @sizeOf(HeapRegion) - @sizeOf(?*?*HeapRegion);
+    const free_header_size = @sizeOf(HeapRegion);
+    const used_magic = 0xabcd;
+
+    fn remove_free(self: *@This()) void
+    {
+        if (self.region_list_reference == null or self.used != 0) panic_raw("heap panic\n");
+
+        self.region_list_reference.?.* = self.u2.region_list_next;
+
+        if (self.u2.region_list_next) |region_list_next|
+        {
+            region_list_next.region_list_reference = self.region_list_reference;
+        }
+        self.region_list_reference = null;
+    }
+
+    fn get_header(self: *@This()) ?*HeapRegion
+    {
+        return @intToPtr(?*HeapRegion, @ptrToInt(self) - used_header_size);
+    }
+
+    fn get_data(self: *@This()) u64
+    {
+        return @ptrToInt(self) + used_header_size;
+    }
+
+    fn get_next(self: *@This()) ?*HeapRegion
+    {
+        return @intToPtr(?*HeapRegion, @ptrToInt(self) + self.u1.next);
+    }
+
+    fn get_previous(self: *@This()) ?*HeapRegion
+    {
+        if (self.previous != 0)
+        {
+            return @intToPtr(?*HeapRegion, @ptrToInt(self) - self.previous);
+        }
+        else
+        {
+            return null;
+        }
+    }
+};
+
 pub const Heap = struct
 {
+    mutex: Mutex,
+    regions: [12]?*HeapRegion,
+    allocation_count: Volatile(u64),
+    size: Volatile(u64),
+    block_count: Volatile(u64),
+    blocks: [16]?*HeapRegion,
+    cannot_validate: bool,
+
+    pub fn allocate(self: *@This(), asked_size: u64, zero_memory: bool) u64
+    {
+        _ = zero_memory;
+        _ = self;
+        if (@bitCast(i64, asked_size) < 0) panic_raw("heap panic");
+
+        const size = (asked_size + HeapRegion.used_header_size + 0x1f) & ~@as(u64, 0x1f);
+
+        if (size >= large_allocation_threshold)
+        {
+            TODO();
+        }
+
+        _ = self.mutex.acquire();
+
+        self.validate();
+
+        const region = blk:
+        {
+            var heap_index = heap_calculate_index(size);
+            if (heap_index < self.regions.len)
+            {
+                for (self.regions[heap_index..]) |maybe_heap_region|
+                {
+                    if (maybe_heap_region) |heap_region|
+                    {
+                        if (heap_region.u1.size >= size)
+                        {
+                            const result = heap_region;
+                            result.remove_free();
+                            break :blk result;
+                        }
+                    }
+                }
+            }
+
+            const allocation = @intToPtr(?*HeapRegion, self.allocate_call(65536));
+            if (self.block_count.read_volatile() < 16)
+            {
+                self.blocks[self.block_count.read_volatile()] = allocation;
+            }
+            else
+            {
+                self.cannot_validate = true;
+            }
+            self.block_count.increment();
+
+            if (allocation) |result|
+            {
+                result.u1.size = 65536 - 32;
+                const end_region = result.get_next().?;
+                end_region.used = HeapRegion.used_magic;
+                end_region.offset = 65536 - 32;
+                end_region.u1.next = 32;
+                @intToPtr(?*?*Heap, end_region.get_data()).?.* = self;
+            }
+
+            // it failed
+            self.mutex.release();
+            return 0;
+        };
+
+        if (region.used != 0 or region.u1.size < size) panic_raw("heap panic\n");
+
+        self.allocation_count.increment();
+        _ = self.size.atomic_fetch_add(size);
+
+        if (region.u1.size != size)
+        {
+            const old_size = region.u1.size;
+            assert(size <= std.math.maxInt(u16));
+            const truncated_size = @intCast(u16, size);
+            region.u1.size = truncated_size;
+            region.used = HeapRegion.used_magic;
+
+            const free_region = region.get_next().?;
+            free_region.u1.size = old_size - truncated_size;
+            free_region.previous = truncated_size;
+            free_region.offset = region.offset + truncated_size;
+            free_region.used = 0;
+            self.add_free_region(free_region);
+
+            const next_region = free_region.get_next().?;
+            next_region.previous = free_region.u1.size;
+
+            self.validate();
+        }
+
+        region.used = HeapRegion.used_magic;
+        region.u2.allocation_size = asked_size;
+        self.mutex.release();
+
+        const address = region.get_data();
+        const memory = @intToPtr([*]u8, address)[0..asked_size];
+        if (zero_memory)
+        {
+            std.mem.set(u8, memory, 0);
+        }
+        else
+        {
+            std.mem.set(u8, memory, 0xa1);
+        }
+
+        return address;
+    }
+
+    fn allocateT(self: *@This(), comptime T: type, zero_memory: bool) callconv(.Inline) ?*T
+    {
+        return @intToPtr(?*T, self.allocate(@sizeOf(T), zero_memory));
+    }
+
+    fn add_free_region(self: *@This(), region: *HeapRegion) void
+    {
+        if (region.used != 0 or region.u1.size < 32)
+        {
+            panic_raw("heap panic\n");
+        }
+
+        const index = heap_calculate_index(region.u1.size);
+        region.u2.region_list_next = self.regions[index];
+        if (region.u2.region_list_next) |region_list_next|
+        {
+            region_list_next.region_list_reference = &region.u2.region_list_next;
+        }
+        self.regions[index] = region;
+        region.region_list_reference = &self.regions[index];
+    }
+
+    fn allocate_call(self: *@This(), size: u64) u64
+    {
+        if (self == &kernel.core.heap)
+        {
+            return kernel.core.address_space.standard_allocate(size, Region.Flags.new_from_flag(.fixed));
+        }
+        else
+        {
+            return kernel.process.address_space.standard_allocate(size, Region.Flags.new_from_flag(.fixed));
+        }
+    }
+
+    fn free_call(self: *@This(), region: *HeapRegion) void
+    {
+        if (self == &kernel.core.heap)
+        {
+            return kernel.core.address_space.free(@ptrToInt(region));
+        }
+        else
+        {
+            return kernel.process.address_space.free(@ptrToInt(region));
+        }
+    }
+
+    fn validate(self: *@This()) void
+    {
+        if (self.cannot_validate) return;
+
+        for (self.blocks[0..self.block_count.read_volatile()]) |maybe_start, i|
+        {
+            if (maybe_start) |start|
+            {
+                const end = @intToPtr(*HeapRegion, @ptrToInt(self.blocks[i]) + 65536);
+                var maybe_previous: ?* HeapRegion = null;
+                var region = start;
+
+                while (@ptrToInt(region) < @ptrToInt(end))
+                {
+                    if (maybe_previous) |previous|
+                    {
+                        if (@ptrToInt(previous) != @ptrToInt(region.get_previous()))
+                        {
+                            panic_raw("heap panic\n");
+                        }
+                    }
+                    else
+                    {
+                        if (region.previous != 0) panic_raw("heap panic\n");
+                    }
+
+                    if (region.u1.size & 31 != 0) panic_raw("heap panic");
+
+                    if (@ptrToInt(region) - @ptrToInt(start) != region.offset)
+                    {
+                        panic_raw("heap panic\n");
+                    }
+
+                    if (region.used != HeapRegion.used_magic and region.used != 0)
+                    {
+                        panic_raw("heap panic");
+                    }
+
+                    if (region.used == 0 and region.region_list_reference == null)
+                    {
+                        panic_raw("heap panic\n");
+                    }
+
+                    if (region.used == 0 and region.u2.region_list_next != null and region.u2.region_list_next.?.region_list_reference != &region.u2.region_list_next)
+                    {
+                        panic_raw("heap panic");
+                    }
+
+                    maybe_previous = region;
+                    region = region.get_next().?;
+                }
+
+                if (region != end)
+                {
+                    panic_raw("heap panic");
+                }
+            }
+        }
+    }
+
+    // @TODO: make this a zig function
+    extern fn heap_calculate_index(size: u64) callconv(.C) u64;
+    comptime
+    {
+        asm(
+        \\.intel_syntax noprefix
+        \\.global heap_calculate_index
+        \\heap_calculate_index:
+        \\bsr eax, edi
+        \\xor eax, -32
+        \\add eax, 33
+        \\add rax, -5
+        \\ret
+        );
+    }
+
+    const large_allocation_threshold = 32768;
 };
+
 
 pub fn init() void
 {
@@ -410,4 +858,12 @@ pub fn init() void
     kernel.core.regions[0].descriptor.page_count = kernel.Arch.core_address_space_size / page_size;
 
     kernel.Arch.memory_init();
+    const region = kernel.core.heap.allocateT(Region, true).?;
+    region.descriptor.base_address = kernel_address_space_start;
+    region.descriptor.page_count = kernel_address_space_size / page_size;
+    _ = kernel.process.address_space.free_region_base.insert(&region.u.item.base, region, region.descriptor.base_address, .panic);
+    _ = kernel.process.address_space.free_region_size.insert(&region.u.item.u.size, region, region.descriptor.page_count, .allow);
+
+
+    TODO();
 }

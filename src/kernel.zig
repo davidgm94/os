@@ -35,6 +35,17 @@ pub fn Volatile(comptime T: type) type
         {
             @ptrCast(*volatile T, &self.value).* = value;
         }
+
+        /// Only supported for integer types
+        pub fn atomic_fetch_add(self: *@This(), value_to_be_added: T) callconv(.Inline) u64
+        {
+            return @atomicRmw(T, &self.value, .Add, value_to_be_added, .SeqCst);
+        }
+        
+        pub fn increment(self: *@This()) void
+        {
+            self.write_volatile(self.read_volatile() + 1);
+        }
     };
 }
 
@@ -161,9 +172,10 @@ pub fn Bitflag(comptime EnumT: type) type
             return ((self.bits & (1 << @enumToInt(flag))) >> @enumToInt(flag)) != 0;
         }
 
-        pub fn or_flag(self: *@This(), comptime flag: EnumT) callconv(.Inline) void
+        pub fn or_flag(self: @This(), comptime flag: EnumT) callconv(.Inline) @This()
         {
-            self.bits |= 1 << @enumToInt(flag);
+            const bits = self.bits | 1 << @enumToInt(flag);
+            return @This() { .bits = bits };
         }
     };
 }
@@ -186,17 +198,69 @@ pub fn AVLTree(comptime T: type) type
 {
     return struct
     {
-        const Self = @This();
+        const Tree = @This();
         const Key = u64;
+
+
+        pub const SearchMode = enum
+        {
+            exact,
+            smallest_above_or_equal,
+            largest_below_or_equal,
+        };
+
+        pub const DuplicateKeyPolicy = enum
+        {
+            panic,
+            allow,
+            fail,
+        };
+
+        pub fn insert(self: *@This(), item: *Item, item_value: ?*T, key: Key, duplicate_key_policy: DuplicateKeyPolicy) bool
+        {
+            self.validate();
+            
+            if (item.tree != null)
+            {
+                panic_raw("item already in a tree\n");
+            }
+
+            item.tree = self;
+
+            item.key = key;
+            item.children[0] = null;
+            item.children[1] = null;
+            item.value = item_value;
+            item.height = 1;
+
+            _ = duplicate_key_policy;
+            TODO();
+            //var link = &self.root;
+            //var parent: ?*Item = null;
+            
+
+            //while (true)
+            //{
+                //TODO();
+            //}
+        }
+
+        fn validate(self: *@This()) void
+        {
+            _ = self;
+            TODO();
+        }
 
         pub const Item = struct
         {
-            this: ?*T,
+            value: ?*T,
             children: [2]?*Item,
             parent: ?*Item,
-            tree: ?*Self,
+            tree: ?*Tree,
             key: Key,
             height: i32,
+
+            // self == tree root item
         };
     };
 }
@@ -226,9 +290,75 @@ pub const Pool = struct
 {
 };
 
-pub const RangeSet = struct
+pub const Range = struct
 {
+    from: u64,
+    to: u64,
+
+    pub const Set = struct
+    {
+        ranges: CoreArray(Range),
+        contiguous: u64,
+
+        pub fn set(self: *@This(), from: u64, to: u64, maybe_delta: ?*i64, modify: bool) bool
+        {
+            if (to <= from) panic_raw("invalid range");
+
+            if (self.ranges.items.len == 0)
+            {
+                if (maybe_delta) |delta|
+                {
+                    if (from >= self.contiguous) delta.* = to - from
+                    else if (to >= self.contiguous) delta.* = to - self.contiguous
+                    else delta.* = 0;
+                }
+
+                if (!modify) return true;
+
+                if (from <= self.contiguous)
+                {
+                    if (to > self.contiguous) self.contiguous = to;
+                    return true;
+                }
+
+                if (!self.normalize()) return false;
+            }
+
+            const new_range = blk:
+            {
+                var range = std.mem.zeroes(Range);
+                range.left = if (self.find(from, true)) |left| left.from else from;
+                range.right = if (self.find(to, true)) |right| right.to else to;
+                break :blk range;
+            };
+
+            for (self.ranges.items) |range, range_i|
+            {
+                if 
+            }
+
+            TODO();
+        }
+    };
 };
+
+pub fn CoreArray(comptime T: type) type
+{
+    return struct
+    {
+        items: []T,
+        cap: u64,
+    };
+}
+
+pub fn FixedArray(comptime T: type) type
+{
+    return struct
+    {
+        items: []T,
+        cap: u64,
+    };
+}
 
 var kernel_panic_buffer: [0x4000]u8 = undefined;
 
@@ -258,4 +388,5 @@ export fn init() callconv(.C) void
 {
     kernel.process.register(.kernel);
     kernel.memory.init();
+    TODO();
 }

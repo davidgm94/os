@@ -1090,7 +1090,7 @@ export fn interrupt_handler(context: *Interrupt.Context) callconv(.C) void
                                 var flags = memory.HandlePageFaultFlags.new(.{.for_supervisor});
                                 if (context.error_code & 2 != 0)
                                 {
-                                    flags.or_flag(.write);
+                                    flags = flags.or_flag(.write);
                                 }
 
                                 break :blk flags;
