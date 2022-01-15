@@ -233,6 +233,91 @@ pub const Spinlock = struct
 
 pub const WriterLock = struct
 {
+    blocked_threads: LinkedList(Thread),
+    state: Volatile(i64),
+
+    pub fn take(self: *@This(), write: bool) bool
+    {
+        return self.take_extended(write, false);
+    }
+
+    pub fn take_extended(self: *@This(), write: bool, poll: bool) bool
+    {
+        var done = false;
+        const maybe_current_thread = get_current_thread();
+        if (maybe_current_thread) |thread|
+        {
+            thread.blocking.writer.lock.overwrite_address(self);
+            thread.blocking.writer.type = write;
+            @fence(.SeqCst);
+        }
+
+        while (true)
+        {
+            kernel.scheduler.dispatch_spinlock.acquire();
+
+            if (write)
+            {
+                if (self.state.read_volatile() == 0)
+                {
+                    self.state.write_volatile(-1);
+                    done = true;
+                }
+            }
+            else
+            {
+                if (self.state.read_volatile() >= 0)
+                {
+                    self.state.increment();
+                    done = true;
+                }
+            }
+
+            kernel.scheduler.dispatch_spinlock.release();
+
+            if (poll or done) break
+            else
+            {
+                if (maybe_current_thread) |thread|
+                {
+                    thread.state.write_volatile(.waiting_writer_lock);
+                    fake_timer_interrupt();
+                    thread.state.write_volatile(.active);
+                }
+                else
+                {
+                    panic_raw("scheduler not ready yet\n");
+                }
+            }
+        }
+
+        return done;
+    }
+
+    pub fn return_lock(self: *@This(), write: bool) void
+    {
+        _  = self;
+        _ = write;
+        TODO();
+    }
+
+    pub fn assert_exclusive(self: *@This()) void
+    {
+        _ = self; TODO();
+    }
+
+    pub fn assert_shared(self: *@This()) void
+    {
+        _ = self; TODO();
+    }
+
+    pub fn assert_locked(self: *@This()) void
+    {
+        _ = self; TODO();
+    }
+
+    pub const shared = false;
+    pub const exclusive = true;
 };
 
 pub const Event = struct

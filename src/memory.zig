@@ -23,6 +23,7 @@ const Process = kernel.Scheduler.Process;
 const page_size = kernel.Arch.page_size;
 const fake_timer_interrupt = kernel.Arch.fake_timer_interrupt;
 const get_current_thread = kernel.Arch.get_current_thread;
+const translate_address = kernel.Arch.translate_address;
 const kernel_address_space_start = kernel.Arch.kernel_address_space_start;
 const kernel_address_space_size = kernel.Arch.kernel_address_space_size;
 
@@ -146,13 +147,126 @@ pub const AddressSpace = struct
     reserve_count: u64,
     // async_task
     //
-    pub fn handle_page_fault(self: *@This(), address: u64, flags: HandlePageFaultFlags) bool
+    pub fn handle_page_fault(self: *@This(), fault_address: u64, flags: HandlePageFaultFlags) bool
     {
-        _ = self;
-        _ = address;
-        _ = flags;
-        TODO();
+        const address = fault_address & ~@as(u64, page_size - 1);
+
+        const lock_acquired = flags.contains(.lock_acquired);
+        if (!lock_acquired and kernel.physical_allocator.get_available_page_count() < Physical.Allocator.critical_available_page_threshold and get_current_thread() != null and !get_current_thread().?.is_page_generator)
+        {
+            TODO();
+        }
+
+        const region = blk:
+        {
+            if (!lock_acquired) _ = self.reserve_mutex.acquire()
+            else self.reserve_mutex.assert_locked();
+            defer if (!lock_acquired) self.reserve_mutex.release();
+
+            if (self.find_region(address)) |region|
+            {
+                if (!region.data.pin.take_extended(WriterLock.shared, true)) return false;
+                break :blk region;
+            }
+            else
+            {
+                return false;
+            }
+        };
+
+        defer region.data.pin.return_lock(WriterLock.shared);
+        _ = region.data.map_mutex.acquire();
+        defer region.data.map_mutex.release();
+
+        // Spurious page fault
+        if (kernel.arch.translate_address(address, flags.contains(.write)) != 0)
+        {
+            return true;
+        }
+
+        var copy_on_write = false;
+        var mark_modified = false;
+
+        if (flags.contains(.write))
+        {
+            if (region.flags.contains(.copy_on_write)) copy_on_write = true
+            else if (region.flags.contains(.read_only)) return false
+            else mark_modified = true;
+        }
+
+        const offset_into_region = address - region.descriptor.base_address;
+        _ = offset_into_region;
+        var physical_allocation_flags = Physical.Flags.empty();
+        var zero_page = true;
+        var map_page_flags: MapPageFlags = MapPageFlags.empty();
+
+        if (self.user)
+        {
+            physical_allocation_flags = physical_allocation_flags.or_flag(.zeroed);
+            zero_page = false;
+            map_page_flags = map_page_flags.or_flag(.user);
+        }
+
+        if (region.flags.contains(.not_cacheable)) map_page_flags = map_page_flags.or_flag(.not_cacheable);
+        if (region.flags.contains(.write_combining)) map_page_flags = map_page_flags.or_flag(.write_combining);
+        if (!mark_modified and !region.flags.contains(.fixed) and region.flags.contains(.file)) map_page_flags = map_page_flags.or_flag(.read_only);
+
+        if (region.flags.contains(.physical))
+        {
+            TODO();
+        }
+        else if (region.flags.contains(.shared))
+        {
+            TODO();
+        }
+        else if (region.flags.contains(.file))
+        {
+            TODO();
+        }
+        else if (region.flags.contains(.normal))
+        {
+            TODO();
+        }
+        else if (region.flags.contains(.guard))
+        {
+            TODO();
+        }
+        else
+        {
+            TODO();
+        }
     }
+
+    pub fn find_region(self: *@This(), address: u64) ?*Region
+    {
+        self.reserve_mutex.assert_locked();
+
+        if (self == &kernel.core.address_space)
+        {
+            for (kernel.core.regions) |*region|
+            {
+                if (region.u.core.used and region.descriptor.base_address <= address and region.descriptor.base_address + region.descriptor.page_count * page_size > address)
+                {
+                    return region;
+                }
+            }
+        }
+        else
+        {
+            if (self.used_regions.find(address, .largest_below_or_equal)) |item|
+            {
+                const region = item.value.?;
+                if (region.descriptor.base_address > address) panic_raw("broken used_regions use\n");
+                if (region.descriptor.base_address + region.descriptor.page_count * page_size > address)
+                {
+                    return region;
+                }
+            }
+        }
+
+        return null;
+    }
+
     pub fn reserve(self: *@This(), byte_count: u64, flags: Region.Flags) ?*Region
     {
         return self.reserve_extended(byte_count, flags, 0);
@@ -201,7 +315,10 @@ pub const AddressSpace = struct
                         region.u.core.used = true;
                         region.descriptor.page_count = needed_page_count;
                         region.flags = flags;
-                        region.data = std.mem.zeroes(@TypeOf(region.data));
+                        // @WARNING: this is not working and may cause problem with the kernel
+                        // region.data = std.mem.zeroes(@TypeOf(region.data));
+                        std.mem.set(u8, @ptrCast([*]u8, &region.data)[0..@sizeOf(@TypeOf(region.data))], 0);
+                        assert(region.data.u.normal.commit.ranges.items.len == 0);
 
                         break :blk region;
                     }
@@ -316,7 +433,24 @@ pub const AddressSpace = struct
             }
         }
 
-        TODO();
+        if (!region.data.u.normal.commit.set(page_offset, page_offset + page_count, null, true))
+        {
+            TODO();
+        }
+
+        if (region.flags.contains(.fixed))
+        {
+            var i: u64 = page_offset;
+            while (i < page_offset + page_count) : (i += 1)
+            {
+                if (!self.handle_page_fault(region.descriptor.base_address + i * page_size, HandlePageFaultFlags.new_from_flag(.lock_acquired)))
+                {
+                    panic_raw("unable to fix pages\n");
+                }
+            }
+        }
+
+        return true;
     }
 };
 

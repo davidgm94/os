@@ -172,6 +172,7 @@ pub fn Bitflag(comptime EnumT: type) type
             return ((self.bits & (1 << @enumToInt(flag))) >> @enumToInt(flag)) != 0;
         }
 
+        // TODO: create a mutable version of this
         pub fn or_flag(self: @This(), comptime flag: EnumT) callconv(.Inline) @This()
         {
             const bits = self.bits | 1 << @enumToInt(flag);
@@ -198,9 +199,11 @@ pub fn AVLTree(comptime T: type) type
 {
     return struct
     {
+        root: ?*Item,
+        modcheck: bool,
+
         const Tree = @This();
         const Key = u64;
-
 
         pub const SearchMode = enum
         {
@@ -243,6 +246,22 @@ pub fn AVLTree(comptime T: type) type
             //{
                 //TODO();
             //}
+        }
+
+        pub fn find(self: *@This(), key: Key, search_mode: SearchMode) ?*Item
+        {
+            if (self.modcheck) panic_raw("concurrent access\n");
+            self.validate();
+            return self.find_recursive(self.root, &key, search_mode);
+        }
+
+        pub fn find_recursive(self: *@This(), root: ?*Item, key: *const Key, search_mode: SearchMode) ?*Item
+        {
+            _ = self;
+            _ = root;
+            _ = key;
+            _ = search_mode;
+            TODO();
         }
 
         fn validate(self: *@This()) void
@@ -297,7 +316,7 @@ pub const Range = struct
 
     pub const Set = struct
     {
-        ranges: CoreArray(Range),
+        ranges: Array(Range, .core),
         contiguous: u64,
 
         pub fn set(self: *@This(), from: u64, to: u64, maybe_delta: ?*i64, modify: bool) bool
@@ -308,8 +327,8 @@ pub const Range = struct
             {
                 if (maybe_delta) |delta|
                 {
-                    if (from >= self.contiguous) delta.* = to - from
-                    else if (to >= self.contiguous) delta.* = to - self.contiguous
+                    if (from >= self.contiguous) delta.* = @intCast(i64, to) - @intCast(i64, from)
+                    else if (to >= self.contiguous) delta.* = @intCast(i64, to) - @intCast(i64, self.contiguous)
                     else delta.* = 0;
                 }
 
@@ -327,36 +346,145 @@ pub const Range = struct
             const new_range = blk:
             {
                 var range = std.mem.zeroes(Range);
-                range.left = if (self.find(from, true)) |left| left.from else from;
-                range.right = if (self.find(to, true)) |right| right.to else to;
+                range.from = if (self.find(from, true)) |left| left.from else from;
+                range.to = if (self.find(to, true)) |right| right.to else to;
                 break :blk range;
             };
 
-            for (self.ranges.items) |range, range_i|
+            const index = blk:
             {
-                if 
+                if (!modify) break :blk @as(u64, 0);
+
+                for (self.ranges.items) |range, range_i|
+                {
+                    if (range.to > new_range.from)
+                    {
+                        if (self.ranges.insert(new_range, range_i) == null)
+                        {
+                            return false;
+                        }
+
+                        break :blk range_i + 1;
+                    }
+                }
+
+                const result_index = self.ranges.items.len;
+                if (self.ranges.insert(new_range, result_index) == null)
+                {
+                    return false;
+                }
+                break :blk result_index + 1;
+            };
+
+            var delete_start = index;
+            var delete_count: u64 = 0;
+            var delete_total: u64 = 0;
+
+            for (self.ranges.items[index..]) |range|
+            {
+                const overlap =
+                    (range.from >= new_range.from and range.from <= new_range.to) or
+                    (range.to >= new_range.from and range.to <= new_range.to);
+                if (overlap)
+                {
+                    delete_count += 1;
+                    delete_total += range.to - range.from;
+                }
+                else
+                {
+                    break;
+                }
             }
 
-            TODO();
+            if (modify) self.ranges.delete_many(delete_start, delete_count);
+
+            self.validate();
+
+            if (maybe_delta) |delta|
+            {
+                delta.* = @intCast(i64, new_range.to) - @intCast(i64, new_range.from) - @intCast(i64, delete_total);
+            }
+
+            return true;
+        }
+
+        pub fn normalize(self: *@This()) bool
+        {
+            if (self.contiguous != 0)
+            {
+                const old_contiguous = self.contiguous;
+                self.contiguous = 0;
+
+                if (!self.set(0, old_contiguous, null, true)) return false;
+            }
+
+            return true;
+        }
+
+        pub fn find(self: *@This(), offset: u64, touching: bool) ?*Range
+        {
+            if (self.ranges.items.len == 0) return null;
+
+            var low: i64 = 0;
+            var high = @intCast(i64, self.ranges.items.len - 1);
+
+            while (low <= high)
+            {
+                const i = @divTrunc(low + (high - low), 2);
+                assert(i >= 0);
+                const range = &self.ranges.items[@intCast(u64, i)];
+
+                if (range.from <= offset and (offset < range.to or (touching and offset <= range.to))) return range
+                else if (range.from <= offset) low = i + 1
+                else high = i - 1;
+            }
+
+            return null;
+        }
+
+        pub fn validate(self: *@This()) void
+        {
+            var previous_to: u64 = 0;
+            if (self.ranges.items.len == 0) return;
+
+            for (self.ranges.items) |range|
+            {
+                if (previous_to != 0 and range.from <= previous_to) panic_raw("range in set is not placed after the prior range\n");
+                if (range.from >= range.to) panic_raw("range in set is invalid\n");
+
+                previous_to = range.to;
+            }
         }
     };
 };
 
-pub fn CoreArray(comptime T: type) type
+const HeapType = enum
+{
+    core,
+    fixed,
+};
+pub fn Array(comptime T: type, comptime heap_type: HeapType) type
 {
     return struct
     {
         items: []T,
         cap: u64,
-    };
-}
 
-pub fn FixedArray(comptime T: type) type
-{
-    return struct
-    {
-        items: []T,
-        cap: u64,
+        pub fn insert(self: *@This(), item: T, position: u64) ?*T
+        {
+            _ = self;
+            _ = item;
+            _ = position;
+            _ = heap_type;
+            TODO();
+        }
+
+        pub fn delete_many(self: *@This(), position: u64, count: u64) void
+        {
+            _ = self;
+            _ = position;
+            _ = count;
+        }
     };
 }
 

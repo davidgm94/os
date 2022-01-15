@@ -189,6 +189,28 @@ pub fn map_page(self: *@This(), space: *memory.AddressSpace, asked_physical_addr
     return true;
 }
 
+pub fn translate_address(self: *@This(), virtual_address: u64, write_access: bool) u64
+{
+    // @TODO: refactor?
+    _ = self;
+
+    // TODO This mutex will be necessary if we ever remove page tables.
+    // space->data.mutex.Acquire();
+    // EsDefer(space->data.mutex.Release());
+
+    const address = virtual_address & 0x0000FFFFFFFFF000;
+    const indices = PageTable.Level.compute_indices(address);
+    if (page_tables[@enumToInt(PageTable.Level.level4)].ptr[indices[@enumToInt(PageTable.Level.level4)]] & 1 == 0) return 0;
+    if (page_tables[@enumToInt(PageTable.Level.level3)].ptr[indices[@enumToInt(PageTable.Level.level3)]] & 1 == 0) return 0;
+    if (page_tables[@enumToInt(PageTable.Level.level2)].ptr[indices[@enumToInt(PageTable.Level.level2)]] & 1 == 0) return 0;
+
+    const physical_address = page_tables[@enumToInt(PageTable.Level.level1)].ptr[indices[@enumToInt(PageTable.Level.level1)]];
+
+    if (write_access and physical_address & 2 == 0) return 0;
+    if (physical_address & 1 == 0) return 0;
+    return physical_address & 0x0000FFFFFFFFF000;
+}
+
 /// Architecture-specific memory initialization
 pub fn memory_init() void
 {
