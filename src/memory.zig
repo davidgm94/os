@@ -157,22 +157,22 @@ pub const AddressSpace = struct
             TODO();
         }
 
-        const region = blk:
+        var region: *Region = undefined;
         {
             if (!lock_acquired) _ = self.reserve_mutex.acquire()
             else self.reserve_mutex.assert_locked();
             defer if (!lock_acquired) self.reserve_mutex.release();
 
-            if (self.find_region(address)) |region|
+            if (self.find_region(address)) |result|
             {
-                if (!region.data.pin.take_extended(WriterLock.shared, true)) return false;
-                break :blk region;
+                if (!result.data.pin.take_extended(WriterLock.shared, true)) return false;
+                region = result;
             }
             else
             {
                 return false;
             }
-        };
+        }
 
         defer region.data.pin.return_lock(WriterLock.shared);
         _ = region.data.map_mutex.acquire();
