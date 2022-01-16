@@ -244,6 +244,7 @@ const BIOS = struct
         }
     };
 
+
     const Image = struct
     {
         const Self = @This();
@@ -814,6 +815,51 @@ const qemu_command_str = blk:
     else break :blk result;
 };
 
+const Debug = struct
+{
+    const Self = @This();
+    step: Step,
+    b: *Builder,
+
+    fn create(b: *Builder, image_step: *Step) *Self
+    {
+        var self = b.allocator.create(Self) catch @panic("out of memory");
+        self.* = Self
+        {
+            .step = Step.init(.custom, "debug", b.allocator, Self.build),
+            .b = b,
+        };
+
+        self.step.dependOn(image_step);
+
+        return self; 
+    }
+
+    fn build(given_step: *Step) !void
+    {
+        const self = @fieldParentPtr(Self, "step", given_step);
+        const first_pid = try std.os.fork();
+        if (first_pid == 0)
+        {
+            const debugger = try std.ChildProcess.init(
+                &[_][]const u8 { "gf2", "-x", ".gdb_script" }, self.b.allocator);
+            _ = try debugger.spawnAndWait();
+        }
+        else
+        {
+            const qemu_debug_command = 
+                qemu_command_str ++
+                &[_][]const u8 { "-s" } ++
+                &[_][]const u8 { "-S" };
+            const qemu = try std.ChildProcess.init(qemu_debug_command, self.b.allocator);
+            try qemu.spawn();
+
+            _ = std.os.waitpid(first_pid, 0);
+            _ = try qemu.kill();
+        }
+    }
+};
+
 const loader = Loader.BIOS;
 const kernel_version = Kernel.Version.Zig;
 const final_image = switch (loader)
@@ -864,16 +910,9 @@ pub fn build(b: *Builder) !void
 
     // "debug" step
     {
-        const qemu_debug_command = 
-            qemu_command_str ++
-            &[_][]const u8 { "-s" } ++
-            &[_][]const u8 { "-S" };
-
-        const debug_command = b.addSystemCommand(qemu_debug_command);
-        debug_command.step.dependOn(image_step);
-
-        const debug_step = b.step("debug", "Debug the kernel");
-        debug_step.dependOn(&debug_command.step);
+        const debug_step = Debug.create(b, image_step);
+        const debug_step_named = b.step("debug", "The debugger GF and QEMU are launched in order to debug the kernel"); 
+        debug_step_named.dependOn(&debug_step.step);
     }
 
     // "clear" step
