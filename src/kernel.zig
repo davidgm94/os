@@ -271,8 +271,14 @@ pub fn AVLTree(comptime T: type) type
 
         fn validate(self: *@This()) void
         {
-            _ = self;
-            TODO();
+            if (self.root) |root|
+            {
+                _ = root.validate(self, null);
+            }
+            else
+            {
+                return;
+            }
         }
 
         pub const Item = struct
@@ -284,7 +290,49 @@ pub fn AVLTree(comptime T: type) type
             key: Key,
             height: i32,
 
-            // self == tree root item
+            fn validate(self: *@This(), tree: *Tree, parent: ?*@This()) i32
+            {
+                if (self.parent != parent) panic_raw("tree panic");
+                if (self.tree != tree) panic_raw("tree panic");
+
+                const left_height = blk:
+                {
+                    if (self.children[0]) |left|
+                    {
+                        if (left.compare(self) > 0) panic_raw("invalid tree");
+                        break :blk left.validate(tree, self);
+                    }
+                    else
+                    {
+                        break :blk @as(i32, 0);
+                    }
+                };
+
+                const right_height = blk:
+                {
+                    if (self.children[1]) |right|
+                    {
+                        if (right.compare(self) < 0) panic_raw("invalid tree");
+                        break :blk right.validate(tree, self);
+                    }
+                    else
+                    {
+                        break :blk @as(i32, 0);
+                    }
+                };
+
+                const height = 1 + if (left_height > right_height) left_height else right_height;
+                if (height != self.height) panic_raw("invalid tree");
+
+                return height;
+            }
+
+            fn compare(self: *@This(), other: *@This()) i32
+            {
+                if (self.key < other.key) return -1;
+                if (self.key > other.key) return 1;
+                return 0;
+            }
         };
     };
 }

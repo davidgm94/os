@@ -816,11 +816,15 @@ pub const Heap = struct
                 end_region.offset = 65536 - 32;
                 end_region.u1.next = 32;
                 @intToPtr(?*?*Heap, end_region.get_data()).?.* = self;
-            }
 
-            // it failed
-            self.mutex.release();
-            return 0;
+                break :blk result;
+            }
+            else
+            {
+                // it failed
+                self.mutex.release();
+                return 0;
+            }
         };
 
         if (region.used != 0 or region.u1.size < size) panic_raw("heap panic\n");
