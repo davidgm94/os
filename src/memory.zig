@@ -21,6 +21,7 @@ const Thread = kernel.Scheduler.Thread;
 const Process = kernel.Scheduler.Process;
 
 const page_size = kernel.Arch.page_size;
+const page_bit_count = kernel.Arch.page_bit_count;
 const fake_timer_interrupt = kernel.Arch.fake_timer_interrupt;
 const get_current_thread = kernel.Arch.get_current_thread;
 const translate_address = kernel.Arch.translate_address;
@@ -225,7 +226,15 @@ pub const AddressSpace = struct
         }
         else if (region.flags.contains(.normal))
         {
-            TODO();
+            if (!region.flags.contains(.no_commit_tracking) and !region.data.u.normal.commit.contains(offset_into_region >> page_bit_count))
+            {
+                return false;
+            }
+
+            const physical_address = kernel.physical_allocator.allocate_with_flags(physical_allocation_flags);
+            _ = kernel.arch.map_page(self, physical_address, address, map_page_flags);
+            if (zero_page) std.mem.set(u8, @intToPtr([*]u8, address)[0..page_size], 0);
+            return true;
         }
         else if (region.flags.contains(.guard))
         {

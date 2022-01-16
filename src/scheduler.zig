@@ -1,9 +1,12 @@
 const kernel = @import("kernel.zig");
 
+
 const Volatile = kernel.Volatile;
 const VolatilePointer = kernel.VolatilePointer;
 
 const Bitflag = kernel.Bitflag;
+
+const TODO = kernel.TODO;
 
 const LinkedList = kernel.LinkedList;
 const Pool = kernel.Pool;
@@ -47,6 +50,29 @@ started: Volatile(bool),
 panic: Volatile(bool),
 shutdown: Volatile(bool),
 time_ms: u64,
+
+pub fn notify_object_extended(self: *@This(), blocked_threads: *LinkedList(Thread), unblock_all: bool, previous_mutex_owner: ?*Thread) void
+{
+    self.dispatch_spinlock.assert_locked();
+
+    if (blocked_threads.first) |unblocked_item|
+    {
+        _ = unblocked_item;
+        _ = previous_mutex_owner;
+        _ = unblock_all;
+        while (true)
+        {
+            //const next_unblocked_item = unblocked_item.next;
+            //const unblocked_thread = unblocked_item.this;
+            TODO();
+        }
+    }
+}
+
+pub fn notify_object(self: *@This(), blocked_threads: *LinkedList(Thread), unblock_all: bool) void
+{
+    self.notify_object_extended(blocked_threads, unblock_all, null);
+}
 
 pub const Thread = struct
 {

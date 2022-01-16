@@ -222,7 +222,7 @@ pub const Spinlock = struct
 
     pub fn assert_locked(self: *@This()) void
     {
-        if (kernel.scheduler.panic) return;
+        if (kernel.scheduler.panic.read_volatile()) return;
 
         if (self.state.read_volatile() == 0 or interrupts.are_enabled())
         {
@@ -296,24 +296,51 @@ pub const WriterLock = struct
 
     pub fn return_lock(self: *@This(), write: bool) void
     {
-        _  = self;
-        _ = write;
-        TODO();
+        kernel.scheduler.dispatch_spinlock.acquire();
+
+        const lock_state = self.state.read_volatile();
+        if (lock_state == -1)
+        {
+            if (!write) panic_raw("attempt to return shared access to an exclusively owned lock");
+
+            self.state.write_volatile(0);
+        }
+        else if (lock_state == 0)
+        {
+            panic_raw("attempt to return access to an unowned lock");
+        }
+        else
+        {
+            if (write) panic_raw("attempting to return exclusive access to a shared lock");
+
+            self.state.decrement();
+        }
+
+        if (self.state.read_volatile() == 0)
+        {
+            kernel.scheduler.notify_object(&self.blocked_threads, true);
+        }
+
+        kernel.scheduler.dispatch_spinlock.release();
     }
 
     pub fn assert_exclusive(self: *@This()) void
     {
-        _ = self; TODO();
+        const lock_state = self.state.read_volatile();
+        if (lock_state == 0) panic_raw("unlocked")
+        else if (lock_state > 0) panic_raw("shared mode");
     }
 
     pub fn assert_shared(self: *@This()) void
     {
-        _ = self; TODO();
+        const lock_state = self.state.read_volatile();
+        if (lock_state == 0) panic_raw("unlocked")
+        else if (lock_state < 0) panic_raw("exclusive mode");
     }
 
     pub fn assert_locked(self: *@This()) void
     {
-        _ = self; TODO();
+        if (self.state.read_volatile() == 0) panic_raw("unlocked");
     }
 
     pub const shared = false;

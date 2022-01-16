@@ -3855,6 +3855,7 @@ struct Scheduler {
             unblockedItem = nextUnblockedItem;
         } while (unblockAll && unblockedItem);
     }
+
     void UnblockThread(Thread *unblockedThread, Thread *previousMutexOwner = nullptr) {
         KSpinlockAssertLocked(&dispatchSpinlock);
 

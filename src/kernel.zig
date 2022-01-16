@@ -46,6 +46,11 @@ pub fn Volatile(comptime T: type) type
         {
             self.write_volatile(self.read_volatile() + 1);
         }
+
+        pub fn decrement(self: *@This()) void
+        {
+            self.write_volatile(self.read_volatile() - 1);
+        }
     };
 }
 
@@ -442,7 +447,13 @@ pub const Range = struct
             return null;
         }
 
-        pub fn validate(self: *@This()) void
+        pub fn contains(self: *@This(), offset: u64) bool
+        {
+            if (self.ranges.items.len != 0) return self.find(offset, false) != null
+            else return offset < self.contiguous;
+        }
+
+        fn validate(self: *@This()) void
         {
             var previous_to: u64 = 0;
             if (self.ranges.items.len == 0) return;
