@@ -17,7 +17,6 @@ const std = @import("std");
 const assert = std.debug.assert;
 const zeroes = std.mem.zeroes;
 
-
 pub const page_bit_count = 12;
 pub const page_size = 0x1000;
 
@@ -131,13 +130,13 @@ pub fn map_page(self: *@This(), space: *memory.AddressSpace, asked_physical_addr
     if (space != &kernel.core.address_space and space != &kernel.process.address_space)
     {
         const index_L4 = indices[@enumToInt(PageTable.Level.level4)];
-        if (space.arch.commit.L3[index_L4 >> 3] & (@as(u5, 1) << @truncate(u3, index_L4 & 0b111)) == 0) panic_raw("attempt to map using uncommited L3 page table\n");
+        if (space.arch.commit.L3[index_L4 >> 3] & (@as(u8, 1) << @truncate(u3, index_L4 & 0b111)) == 0) panic_raw("attempt to map using uncommited L3 page table\n");
 
         const index_L3 = indices[@enumToInt(PageTable.Level.level3)];
-        if (space.arch.commit.L2[index_L3 >> 3] & (@as(u5, 1) << @truncate(u3, index_L3 & 0b111)) == 0) panic_raw("attempt to map using uncommited L3 page table\n");
+        if (space.arch.commit.L2[index_L3 >> 3] & (@as(u8, 1) << @truncate(u3, index_L3 & 0b111)) == 0) panic_raw("attempt to map using uncommited L3 page table\n");
 
         const index_L2 = indices[@enumToInt(PageTable.Level.level2)];
-        if (space.arch.commit.L1[index_L2 >> 3] & (@as(u5, 1) << @truncate(u3, index_L2 & 0b111)) == 0) panic_raw("attempt to map using uncommited L3 page table\n");
+        if (space.arch.commit.L1[index_L2 >> 3] & (@as(u8, 1) << @truncate(u3, index_L2 & 0b111)) == 0) panic_raw("attempt to map using uncommited L3 page table\n");
     }
 
     space.arch.handle_missing_page_table(.level4, indices, flags);
@@ -253,7 +252,7 @@ pub fn commit_page_tables(self: *@This(), space: *memory.AddressSpace, region: *
     {
         const shifter: u64 = page_bit_count + entry_per_page_table_bit_count * 3;
         const index = i >> shifter;
-        const increment = space.arch.commit.L3[index >> 3] & (@as(u5, 1) << @truncate(u3, index & 0b111)) == 0;
+        const increment = space.arch.commit.L3[index >> 3] & (@as(u8, 1) << @truncate(u3, index & 0b111)) == 0;
         needed += @boolToInt(increment);
         i = (index << shifter) + (1 << shifter);
     }
@@ -263,7 +262,7 @@ pub fn commit_page_tables(self: *@This(), space: *memory.AddressSpace, region: *
     {
         const shifter: u64 = page_bit_count + entry_per_page_table_bit_count * 2;
         const index = i >> shifter;
-        const increment = space.arch.commit.L2[index >> 3] & (@as(u5, 1) << @truncate(u3, index & 0b111)) == 0;
+        const increment = space.arch.commit.L2[index >> 3] & (@as(u8, 1) << @truncate(u3, index & 0b111)) == 0;
         needed += @boolToInt(increment);
         i = (index << shifter) + (1 << shifter);
     }
@@ -276,7 +275,7 @@ pub fn commit_page_tables(self: *@This(), space: *memory.AddressSpace, region: *
         const index = i >> shifter;
         const index_l2i = index >> 15;
 
-        if (space.arch.commit.commit_L1[index_l2i >> 3] & (@as(u5, 1) << @truncate(u3, index_l2i & 0b111)) == 0)
+        if (space.arch.commit.commit_L1[index_l2i >> 3] & (@as(u8, 1) << @truncate(u3, index_l2i & 0b111)) == 0)
         {
             if (previous_index_l2i != index_l2i)
             {
@@ -289,7 +288,7 @@ pub fn commit_page_tables(self: *@This(), space: *memory.AddressSpace, region: *
         }
         else
         {
-            const increment = space.arch.commit.L1[index >> 3] & (@as(u5, 1) << @truncate(u3, index & 0b111)) == 0;
+            const increment = space.arch.commit.L1[index >> 3] & (@as(u8, 1) << @truncate(u3, index & 0b111)) == 0;
             needed += @boolToInt(increment);
         }
 
@@ -312,7 +311,7 @@ pub fn commit_page_tables(self: *@This(), space: *memory.AddressSpace, region: *
     {
         const shifter: u64 = page_bit_count + entry_per_page_table_bit_count * 3;
         const index = i >> shifter;
-        space.arch.commit.L3[index >> 3] |= @as(u5, 1) << @truncate(u3, index & 0b111);
+        space.arch.commit.L3[index >> 3] |= @as(u8, 1) << @truncate(u3, index & 0b111);
         i = index << shifter;
         i += 1 << shifter;
     }
@@ -322,7 +321,7 @@ pub fn commit_page_tables(self: *@This(), space: *memory.AddressSpace, region: *
     {
         const shifter: u64 = page_bit_count + entry_per_page_table_bit_count * 2;
         const index = i >> shifter;
-        space.arch.commit.L2[index >> 3] |= @as(u5, 1) << @truncate(u3, index & 0b111);
+        space.arch.commit.L2[index >> 3] |= @as(u8, 1) << @truncate(u3, index & 0b111);
         i = index << shifter;
         i += 1 << shifter;
     }
@@ -333,8 +332,8 @@ pub fn commit_page_tables(self: *@This(), space: *memory.AddressSpace, region: *
         const shifter: u64 = page_bit_count + entry_per_page_table_bit_count;
         const index = i >> shifter;
         const index_L2i = index >> 15;
-        space.arch.commit.commit_L1[index_L2i >> 3] |= @as(u5, 1) << @truncate(u3, index_L2i & 0b111);
-        space.arch.commit.L1[index >> 3] |= @as(u5, 1) << @truncate(u3, index & 0b111);
+        space.arch.commit.commit_L1[index_L2i >> 3] |= @as(u8, 1) << @truncate(u3, index_L2i & 0b111);
+        space.arch.commit.L1[index >> 3] |= @as(u8, 1) << @truncate(u3, index & 0b111);
         i = index << shifter;
         i += 1 << shifter;
     }
@@ -367,6 +366,28 @@ pub fn early_allocate_page(self: *@This()) u64
     self.physical_memory.region_index = index;
 
     return page;
+}
+
+pub fn populate_pageframes(self: *@This()) u64
+{
+    var commit_limit: u64 = 0;
+
+    for (self.physical_memory.regions) |region|
+    {
+        const base = region.base_address >> page_bit_count;
+        const count = region.page_count;
+        commit_limit += count;
+
+        var page_i: u64 = 0;
+        while (page_i < count) : (page_i += 1)
+        {
+            const page = base + page_i;
+            kernel.physical_allocator.insert_free_pages_next(page);
+        }
+    }
+
+    self.physical_memory.page_count = 0;
+    return commit_limit;
 }
 
 pub fn invalidate_page(page: u64) callconv(.Inline) void

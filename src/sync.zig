@@ -4,6 +4,8 @@ const panic_raw = kernel.panic_raw;
 
 const TODO = kernel.TODO;
 
+const no_timeout = kernel.wait_no_timeout;
+
 const Volatile = kernel.Volatile;
 const VolatilePointer = kernel.VolatilePointer;
 const UnalignedVolatilePointer = kernel.UnalignedVolatilePointer;
@@ -349,4 +351,60 @@ pub const WriterLock = struct
 
 pub const Event = struct
 {
+    auto_reset: Volatile(bool),
+    state: Volatile(u64),
+    blocked_threads: LinkedList(Thread),
+    handle_count: Volatile(u64),
+
+    pub fn set(self: *@This(), already_set: bool) bool
+    {
+        if (self.state.read_volatile() != 0 and !already_set)
+        {
+            // log error
+        }
+
+        kernel.scheduler.dispatch_spinlock.acquire();
+
+        var unblocked_threads = Volatile(bool) { .value = false };
+
+        if (self.state.read_volatile() == 0)
+        {
+            self.state.write_volatile(@boolToInt(true));
+
+            if (kernel.scheduler.started.read_volatile())
+            {
+                TODO();
+            }
+        }
+
+        kernel.scheduler.dispatch_spinlock.release();
+        return unblocked_threads.read_volatile();
+    }
+
+    pub fn reset(self: *@This()) void
+    {
+        if (self.blocked_threads.first != null and self.state.read_volatile() != 0)
+        {
+            // log error
+        }
+
+        self.state.write_volatile(@boolToInt(false));
+    }
+
+    pub fn poll(self: *@This()) bool
+    {
+        _ = self; TODO();
+    }
+
+    pub fn wait(self: *@This()) bool
+    {
+        return self.wait(no_timeout);
+    }
+    
+    pub fn wait_extended(self: *@This(), timeout_ms: u64) bool
+    {
+        _ = self;
+        _ = timeout_ms;
+        TODO();
+    }
 };

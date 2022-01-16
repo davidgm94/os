@@ -187,8 +187,8 @@ pub fn Bitflag(comptime EnumT: type) type
         }
     };
 }
-
-
+pub const max_wait_count = 8;
+pub const wait_no_timeout = std.math.maxInt(u64);
 
 pub const Core = struct
 {
@@ -209,6 +209,12 @@ pub const Bitset = struct
         self.group_usage.len = self.single_usage.len / group_size + 1;
         self.single_usage.ptr = @intToPtr([*]u32, kernel.process.address_space.standard_allocate((self.single_usage.len >> 3) + (self.group_usage.len * 2), if (map_all) memory.Region.Flags.new_from_flag(.fixed) else memory.Region.Flags.empty()));
         self.group_usage.ptr = @intToPtr([*]u16, @ptrToInt(self.single_usage.ptr) + ((self.single_usage.len >> 4) * @sizeOf(u16)));
+    }
+
+    pub fn put(self: *@This(), index: u64) void
+    {
+        self.single_usage[index >> 5] |= @as(u32, 1) << @truncate(u5, index);
+        self.group_usage[index / group_size] += 1;
     }
 
     const group_size = 0x1000;
@@ -301,7 +307,7 @@ pub fn AVLTree(comptime T: type) type
                 {
                     const right_rotation = item_it.rotate_right();
                     new_root = right_rotation;
-                    const old_parent_child_index = @boolToInt(old_parent.children[1].? == item_it);
+                    const old_parent_child_index = @boolToInt(old_parent.children[1] == item_it);
                     old_parent.children[old_parent_child_index] = right_rotation;
                 }
                 else if (balance > 1 and Item.compare_keys(key, item_it.children[0].?.key) > 0 and item_it.children[0].?.children[1] != null)
@@ -310,14 +316,14 @@ pub fn AVLTree(comptime T: type) type
                     item_it.children[0].?.parent = item_it;
                     const right_rotation = item_it.rotate_right();
                     new_root = right_rotation;
-                    const old_parent_child_index = @boolToInt(old_parent.children[1].? == item_it);
+                    const old_parent_child_index = @boolToInt(old_parent.children[1] == item_it);
                     old_parent.children[old_parent_child_index] = right_rotation;
                 }
                 else if (balance < -1 and Item.compare_keys(key, item_it.children[1].?.key) > 0)
                 {
                     const left_rotation = item_it.rotate_left();
                     new_root = left_rotation;
-                    const old_parent_child_index = @boolToInt(old_parent.children[1].? == item_it);
+                    const old_parent_child_index = @boolToInt(old_parent.children[1] == item_it);
                     old_parent.children[old_parent_child_index] = left_rotation;
                 }
                 else if (balance < -1 and Item.compare_keys(key, item_it.children[1].?.key) <= 0 and item_it.children[1].?.children[0] != null)
@@ -326,7 +332,7 @@ pub fn AVLTree(comptime T: type) type
                     item_it.children[1].?.parent = item_it;
                     const left_rotation = item_it.rotate_left();
                     new_root = left_rotation;
-                    const old_parent_child_index = @boolToInt(old_parent.children[1].? == item_it);
+                    const old_parent_child_index = @boolToInt(old_parent.children[1] == item_it);
                     old_parent.children[old_parent_child_index] = left_rotation;
                 }
 
@@ -656,8 +662,100 @@ pub fn LinkedList(comptime T: type) type
             previous: ?*Item,
             next: ?*Item,
             list: ?*Self,
-            this: ?*T,
+            value: ?*T,
         };
+
+        pub fn insert_at_end(self: *@This(), item: *Item) void
+        {
+            if (item.list != null) panic_raw("inserting an item that is already in a list");
+
+            if (self.last) |last|
+            {
+                item.previous = last;
+                item.next= null;
+                last.next = item;
+                self.last = item;
+            }
+            else
+            {
+                self.first = item;
+                self.last = item;
+                item.previous = null;
+                item.next = null;
+            }
+
+            self.count += 1;
+            item.list = self;
+            self.validate();
+        }
+
+        pub fn validate(self: *@This()) void
+        {
+            if (self.count == 0)
+            {
+                TODO();
+            }
+            else if (self.count == 1)
+            {
+                if (self.first != self.last or
+                    self.first.?.previous != null or
+                    self.first.?.next != null or
+                    self.first.?.list != self or
+                    self.first.?.value == null)
+                {
+                    panic_raw("invalid list");
+                }
+            }
+            else
+            {
+                if (self.first == self.last or
+                    self.first.?.previous != null or
+                    self.last.?.next != null)
+                {
+                    panic_raw("invalid list");
+                }
+
+                {
+                    var item = self.first;
+                    var index = self.count;
+
+                    while (true)
+                    {
+                        index -= 1;
+                        if (index == 0) break;
+
+                        if (item.?.next == item or item.?.list != self or item.?.value == null)
+                        {
+                            panic_raw("invalid list");
+                        }
+
+                        item = item.?.next;
+                    }
+
+                    if (item != self.last) panic_raw("invalid list");
+                }
+
+                {
+                    var item = self.last;
+                    var index = self.count;
+
+                    while (true)
+                    {
+                        index -= 1;
+                        if (index == 0) break;
+
+                        if (item.?.previous == item)
+                        {
+                            panic_raw("invalid list");
+                        }
+
+                        item = item.?.previous;
+                    }
+
+                    if (item != self.first) panic_raw("invalid list");
+                }
+            }
+        }
     };
 }
 

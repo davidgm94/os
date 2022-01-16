@@ -11,6 +11,8 @@ const TODO = kernel.TODO;
 const LinkedList = kernel.LinkedList;
 const Pool = kernel.Pool;
 
+const max_wait_count = kernel.max_wait_count;
+
 const Event = kernel.sync.Event;
 const Spinlock = kernel.sync.Spinlock;
 const Mutex = kernel.sync.Mutex;
@@ -221,8 +223,6 @@ pub const Process = struct
     }
 };
 
-pub const max_wait_count = 8;
-pub const wait_no_timeout = std.math.maxInt(u64);
 
 pub const AsyncTask = struct
 {

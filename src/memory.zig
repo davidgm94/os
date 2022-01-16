@@ -393,8 +393,8 @@ pub const AddressSpace = struct
         if (self != &kernel.core.address_space)
         {
             region.u.item.u.non_guard = std.mem.zeroes(@TypeOf(region.u.item.u.non_guard));
-            region.u.item.u.non_guard.this = region;
-            TODO();
+            region.u.item.u.non_guard.value = region;
+            self.used_regions_non_guard.insert_at_end(&region.u.item.u.non_guard);
         }
 
         self.reserve_count += needed_page_count;
@@ -508,7 +508,7 @@ pub const PageFrame = struct
     state: Volatile(PageFrame.State),
     flags: Volatile(u8),
     cache_reference: VolatilePointer(u64),
-    data: extern union
+    u: extern union
     {
         list: struct
         {
@@ -683,6 +683,23 @@ pub const Physical = struct
             return true;
         }
 
+        pub fn insert_free_pages_next(self: *@This(), page: u64) void
+        {
+            const frame = &self.pageframes[page];
+            frame.state.write_volatile(.free);
+
+            frame.u.list.next.write_volatile(self.first_free_page);
+            frame.u.list.previous.write_volatile(&self.first_free_page);
+            if (self.first_free_page != 0)
+            {
+                self.pageframes[self.first_free_page].u.list.previous.write_volatile(&frame.u.list.next.value);
+            }
+            self.first_free_page = page;
+
+            self.free_or_zeroed_page_bitset.put(page);
+            self.free_page_count += 1;
+        }
+
         fn get_available_page_count(self: @This()) callconv(.Inline) u64
         {
             return self.zeroed_page_count + self.free_page_count + self.standby_page_count;
@@ -708,6 +725,45 @@ pub const Physical = struct
             return self.commit_fixed - self.commit_pageable - self.approximate_total_object_cache_byte_count / page_size;
         }
 
+        fn start_insert_free_pages(self: *@This()) void
+        {
+            _ = self;
+        }
+
+        fn end_insert_free_pages(self: *@This()) void
+        {
+            if (self.free_page_count > zero_page_threshold)
+            {
+                _ = self.zero_page_event.set(true);
+            }
+
+            self.update_available_page_count(true);
+        }
+
+        fn update_available_page_count(self: *@This(), increase: bool) void
+        {
+            if (self.get_available_page_count() >= critical_available_page_threshold)
+            {
+                _ = self.available_not_critical_event.set(true);
+                self.available_not_critical_event.reset();
+            }
+            else
+            {
+                self.available_not_critical_event.reset();
+                _ = self.available_critical_event.set(true);
+
+                if (!increase)
+                {
+                    // log
+                }
+            }
+
+            if (self.get_available_page_count() >= low_available_page_threshold) self.available_low_event.reset()
+            else _ = self.available_low_event.set(true);
+        }
+
+        const zero_page_threshold = 16;
+        const low_available_page_threshold = 16777216 / page_size;
         const critical_available_page_threshold = 1048576 / page_size;
         const critical_remaining_commit_threshold = 1048576 / page_size;
     };
@@ -1066,7 +1122,15 @@ pub fn init() void
         kernel.physical_allocator.pageframes.ptr = @intToPtr([*]PageFrame, kernel.process.address_space.standard_allocate(pageframe_count * @sizeOf(PageFrame), Region.Flags.new_from_flag(.fixed)));
         kernel.physical_allocator.free_or_zeroed_page_bitset.init(pageframe_count, true);
         kernel.physical_allocator.pageframes.len = pageframe_count;
-        TODO();
+
+        kernel.physical_allocator.start_insert_free_pages();
+        const commit_limit = kernel.arch.populate_pageframes();
+        kernel.physical_allocator.end_insert_free_pages();
+        // here: actually initialize pageframe db
+
+        kernel.physical_allocator.commit_fixed_limit = commit_limit;
+        kernel.physical_allocator.commit_limit = commit_limit;
+        // log
     }
 
     TODO();
