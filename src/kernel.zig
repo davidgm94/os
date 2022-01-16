@@ -1,7 +1,4 @@
 const kernel = @This();
-const std = @import("std");
-const assert = std.debug.assert;
-const AtomicOrder = std.builtin.AtomicOrder;
 
 pub const Arch = switch (@import("builtin").target.cpu.arch)
 {
@@ -19,6 +16,11 @@ pub var physical_allocator: memory.Physical.Allocator = undefined;
 pub const memory = @import("memory.zig");
 pub const Scheduler = @import("scheduler.zig");
 pub const sync = @import("sync.zig");
+
+const std = @import("std");
+const assert = std.debug.assert;
+const AtomicOrder = std.builtin.AtomicOrder;
+const zeroes = std.mem.zeroes;
 
 pub fn Volatile(comptime T: type) type
 {
@@ -198,6 +200,18 @@ pub const Core = struct
 
 pub const Bitset = struct
 {
+    single_usage: []u32,
+    group_usage: []u16,
+
+    pub fn init(self: *@This(), count: u64, map_all: bool) void
+    {
+        self.single_usage.len = (count + 31) & ~@as(u64, 31);
+        self.group_usage.len = self.single_usage.len / group_size + 1;
+        self.single_usage.ptr = @intToPtr([*]u32, kernel.process.address_space.standard_allocate((self.single_usage.len >> 3) + (self.group_usage.len * 2), if (map_all) memory.Region.Flags.new_from_flag(.fixed) else memory.Region.Flags.empty()));
+        self.group_usage.ptr = @intToPtr([*]u16, @ptrToInt(self.single_usage.ptr) + ((self.single_usage.len >> 4) * @sizeOf(u16)));
+    }
+
+    const group_size = 0x1000;
 };
 
 pub fn AVLTree(comptime T: type) type
@@ -241,32 +255,234 @@ pub fn AVLTree(comptime T: type) type
             item.value = item_value;
             item.height = 1;
 
-            _ = duplicate_key_policy;
-            TODO();
-            //var link = &self.root;
-            //var parent: ?*Item = null;
+            var link = &self.root;
+            var parent: ?*Item = null;
             
+            while (true)
+            {
+                if (link.*) |node|
+                {
+                    if (item.compare(node) == 0)
+                    {
+                        if (duplicate_key_policy == .panic) panic_raw("avl duplicate panic")
+                        else if (duplicate_key_policy == .fail) return false;
+                    }
 
-            //while (true)
-            //{
-                //TODO();
-            //}
+                    const child_index = @boolToInt(item.compare(node) > 0);
+                    link = &node.children[child_index];
+                    parent = node;
+                }
+                else
+                {
+                    link.* = item;
+                    item.parent = parent;
+                    break;
+                }
+            }
+
+            var fake_root = zeroes(Item);
+            self.root.?.parent = &fake_root;
+            fake_root.tree = self;
+            fake_root.key = 0;
+            fake_root.children[0] = self.root;
+
+            var item_it = item.parent.?;
+
+            while (item_it != &fake_root)
+            {
+                const left_height = if (item_it.children[0]) |left| left.height else 0;
+                const right_height = if (item_it.children[1]) |right| right.height else 0;
+                const balance = left_height - right_height;
+                item_it.height = 1 + if (balance > 0) left_height else right_height;
+                var new_root: ?*Item = null;
+                var old_parent = item_it.parent.?;
+
+                if (balance > 1 and Item.compare_keys(key, item_it.children[0].?.key) <= 0)
+                {
+                    const right_rotation = item_it.rotate_right();
+                    new_root = right_rotation;
+                    const old_parent_child_index = @boolToInt(old_parent.children[1].? == item_it);
+                    old_parent.children[old_parent_child_index] = right_rotation;
+                }
+                else if (balance > 1 and Item.compare_keys(key, item_it.children[0].?.key) > 0 and item_it.children[0].?.children[1] != null)
+                {
+                    item_it.children[0] = item_it.children[0].?.rotate_left();
+                    item_it.children[0].?.parent = item_it;
+                    const right_rotation = item_it.rotate_right();
+                    new_root = right_rotation;
+                    const old_parent_child_index = @boolToInt(old_parent.children[1].? == item_it);
+                    old_parent.children[old_parent_child_index] = right_rotation;
+                }
+                else if (balance < -1 and Item.compare_keys(key, item_it.children[1].?.key) > 0)
+                {
+                    const left_rotation = item_it.rotate_left();
+                    new_root = left_rotation;
+                    const old_parent_child_index = @boolToInt(old_parent.children[1].? == item_it);
+                    old_parent.children[old_parent_child_index] = left_rotation;
+                }
+                else if (balance < -1 and Item.compare_keys(key, item_it.children[1].?.key) <= 0 and item_it.children[1].?.children[0] != null)
+                {
+                    item_it.children[1] = item_it.children[1].?.rotate_right();
+                    item_it.children[1].?.parent = item_it;
+                    const left_rotation = item_it.rotate_left();
+                    new_root = left_rotation;
+                    const old_parent_child_index = @boolToInt(old_parent.children[1].? == item_it);
+                    old_parent.children[old_parent_child_index] = left_rotation;
+                }
+
+                if (new_root) |new_root_unwrapped| new_root_unwrapped.parent = old_parent;
+                item_it = old_parent;
+            }
+
+            self.root = fake_root.children[0];
+            self.root.?.parent = null;
+
+            self.validate();
+            return true;
         }
 
         pub fn find(self: *@This(), key: Key, search_mode: SearchMode) ?*Item
         {
             if (self.modcheck) panic_raw("concurrent access\n");
             self.validate();
-            return self.find_recursive(self.root, &key, search_mode);
+            return self.find_recursive(self.root, key, search_mode);
         }
 
-        pub fn find_recursive(self: *@This(), root: ?*Item, key: *const Key, search_mode: SearchMode) ?*Item
+        pub fn find_recursive(self: *@This(), maybe_root: ?*Item, key: Key, search_mode: SearchMode) ?*Item
         {
-            _ = self;
-            _ = root;
-            _ = key;
-            _ = search_mode;
-            TODO();
+            if (maybe_root) |root|
+            {
+                if (Item.compare_keys(root.key, key) == 0) return root;
+
+                switch (search_mode)
+                {
+                    .exact => return self.find_recursive(root.children[0], key, search_mode),
+                    .smallest_above_or_equal =>
+                    {
+                        if (Item.compare_keys(root.key, key) > 0)
+                        {
+                            if (self.find_recursive(root.children[0], key, search_mode)) |item| return item
+                            else return root;
+                        }
+                        else return self.find_recursive(root.children[1], key, search_mode);
+                    },
+                    .largest_below_or_equal =>
+                    {
+                        if (Item.compare_keys(root.key, key) < 0)
+                        {
+                            if (self.find_recursive(root.children[1], key, search_mode)) |item| return item
+                            else return root;
+                        }
+                        else return self.find_recursive(root.children[0], key, search_mode);
+                    },
+                }
+            }
+            else
+            {
+                return null;
+            }
+        }
+
+        pub fn remove(self: *@This(), item: *Item) void
+        {
+            if (self.modcheck) panic_raw("concurrent modification");
+            self.modcheck = true;
+            defer self.modcheck = false;
+
+            self.validate();
+            if (item.tree != self) panic_raw("item not in tree");
+
+            var fake_root = zeroes(Item);
+            self.root.?.parent = &fake_root;
+            fake_root.tree = self;
+            fake_root.key = 0;
+            fake_root.children[0] = self.root;
+
+            if (item.children[0] != null and item.children[1] != null)
+            {
+                const smallest = 0;
+                const a = self.find_recursive(item.children[1], smallest, .smallest_above_or_equal).?;
+                const b = item;
+                a.swap(b);
+            }
+
+            var link = &item.parent.?.children[@boolToInt(item.parent.?.children[1] == item)];
+            link.* = if (item.children[0]) |left| left else item.children[1];
+
+            item.tree = null;
+            var item_it = blk:
+            {
+                if (link.*) |link_u|
+                {
+                    link_u.parent = item.parent;
+                    break :blk link.*.?;
+                }
+                else break :blk item.parent.?;
+            };
+
+            while (item_it != &fake_root)
+            {
+                const left_height = if (item_it.children[0]) |left| left.height else 0;
+                const right_height = if (item_it.children[1]) |right| right.height else 0;
+                const balance = left_height - right_height;
+                item_it.height = 1 + if (balance > 0) left_height else right_height;
+
+                var new_root: ?*Item = null;
+                var old_parent = item_it.parent.?;
+
+                if (balance > 1)
+                {
+                    const left_balance = if (item_it.children[0]) |left| left.get_balance() else 0;
+                    if (left_balance >= 0)
+                    {
+                        const right_rotation = item_it.rotate_right();
+                        new_root = right_rotation;
+                        const old_parent_child_index = @boolToInt(old_parent.children[1] == item_it);
+                        old_parent.children[old_parent_child_index] = right_rotation;
+                    }
+                    else
+                    {
+                        item_it.children[0] = item_it.children[0].?.rotate_left();
+                        item_it.children[0].?.parent = item_it;
+                        const right_rotation = item_it.rotate_right();
+                        new_root = right_rotation;
+                        const old_parent_child_index = @boolToInt(old_parent.children[1] == item_it);
+                        old_parent.children[old_parent_child_index] = right_rotation;
+                    }
+                }
+                else if (balance < -1)
+                {
+                    const right_balance = if (item_it.children[1]) |left| left.get_balance() else 0;
+                    if (right_balance <= 0)
+                    {
+                        const left_rotation = item_it.rotate_left();
+                        new_root = left_rotation;
+                        const old_parent_child_index = @boolToInt(old_parent.children[1] == item_it);
+                        old_parent.children[old_parent_child_index] = left_rotation;
+                    }
+                    else
+                    {
+                        item_it.children[1] = item_it.children[1].?.rotate_right();
+                        item_it.children[1].?.parent = item_it;
+                        const left_rotation = item_it.rotate_left();
+                        new_root = left_rotation;
+                        const old_parent_child_index = @boolToInt(old_parent.children[1] == item_it);
+                        old_parent.children[old_parent_child_index] = left_rotation;
+                    }
+                }
+
+                if (new_root) |new_root_unwrapped| new_root_unwrapped.parent = old_parent;
+                item_it = old_parent;
+            }
+
+            self.root = fake_root.children[0];
+            if (self.root) |root|
+            {
+                if (root.parent != &fake_root) panic_raw("incorrect root parent");
+                root.parent = null;
+            }
+
+            self.validate();
         }
 
         fn validate(self: *@This()) void
@@ -289,6 +505,89 @@ pub fn AVLTree(comptime T: type) type
             tree: ?*Tree,
             key: Key,
             height: i32,
+
+            fn rotate_left(self: *@This()) *Item
+            {
+                const x = self;
+                const y = x.children[1].?;
+                const maybe_t = y.children[0];
+                y.children[0] = x;
+                x.children[1] = maybe_t;
+                x.parent = y;
+                if (maybe_t) |t| t.parent = x;
+
+                {
+                    const left_height = if (x.children[0]) |left| left.height else 0;
+                    const right_height = if (x.children[1]) |right| right.height else 0;
+                    const balance = left_height - right_height;
+                    x.height = 1 + if (balance > 0) left_height else right_height;
+                }
+
+                {
+                    const left_height = if (y.children[0]) |left| left.height else 0;
+                    const right_height = if (y.children[1]) |right| right.height else 0;
+                    const balance = left_height - right_height;
+                    y.height = 1 + if (balance > 0) left_height else right_height;
+                }
+
+                return y;
+            }
+
+            fn rotate_right(self: *@This()) *Item
+            {
+                const y = self;
+                const x = y.children[0].?;
+                const maybe_t = x.children[1];
+                x.children[1] = y;
+                y.children[0] = maybe_t;
+                y.parent = x;
+                if (maybe_t) |t| t.parent = y;
+
+                {
+                    const left_height = if (y.children[0]) |left| left.height else 0;
+                    const right_height = if (y.children[1]) |right| right.height else 0;
+                    const balance = left_height - right_height;
+                    y.height = 1 + if (balance > 0) left_height else right_height;
+                }
+
+                {
+                    const left_height = if (x.children[0]) |left| left.height else 0;
+                    const right_height = if (x.children[1]) |right| right.height else 0;
+                    const balance = left_height - right_height;
+                    x.height = 1 + if (balance > 0) left_height else right_height;
+                }
+
+                return x;
+            }
+
+            fn swap(self: *@This(), other: *@This()) void
+            {
+                self.parent.?.children[@boolToInt(self.parent.?.children[1] == self)] = other;
+                other.parent.?.children[@boolToInt(other.parent.?.children[1] == other)] = self;
+
+                var temporal_self = self.*;
+                var temporal_other = other.*;
+                self.parent = temporal_other.parent;
+                other.parent = temporal_self.parent;
+                self.height = temporal_other.height;
+                other.height = temporal_self.height;
+                self.children[0] = temporal_other.children[0];
+                self.children[1] = temporal_other.children[1];
+                other.children[0] = temporal_self.children[0];
+                other.children[1] = temporal_self.children[1];
+
+                if (self.children[0]) |a_left| a_left.parent = self;
+                if (self.children[1]) |a_right| a_right.parent = self;
+                if (other.children[0]) |b_left| b_left.parent = other;
+                if (other.children[1]) |b_right| b_right.parent = other;
+            }
+
+            fn get_balance(self: *@This()) i32
+            {
+                const left_height = if (self.children[0]) |left| left.height else 0;
+                const right_height = if (self.children[1]) |right| right.height else 0;
+                return left_height - right_height;
+            }
 
             fn validate(self: *@This(), tree: *Tree, parent: ?*@This()) i32
             {
@@ -329,8 +628,13 @@ pub fn AVLTree(comptime T: type) type
 
             fn compare(self: *@This(), other: *@This()) i32
             {
-                if (self.key < other.key) return -1;
-                if (self.key > other.key) return 1;
+                return compare_keys(self.key, other.key);
+            }
+
+            fn compare_keys(key1: u64, key2: u64) i32
+            {
+                if (key1 < key2) return -1;
+                if (key1 > key2) return 1;
                 return 0;
             }
         };

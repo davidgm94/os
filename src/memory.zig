@@ -129,6 +129,11 @@ pub const Region = struct
             cache = 12,
             file = 13,
         });
+
+    pub fn zero_data_field(self: *@This()) void
+    {
+        std.mem.set(u8, @ptrCast([*]u8, &self.data)[0..@sizeOf(@TypeOf(self.data))], 0);
+    }
 };
 
 pub const AddressSpace = struct
@@ -252,9 +257,12 @@ pub const AddressSpace = struct
 
         if (self == &kernel.core.address_space)
         {
-            for (kernel.core.regions) |*region|
+            const regions = kernel.core.regions;
+            for (regions) |*region|
             {
-                if (region.u.core.used and region.descriptor.base_address <= address and region.descriptor.base_address + region.descriptor.page_count * page_size > address)
+                if (region.u.core.used and
+                    region.descriptor.base_address <= address and
+                    region.descriptor.base_address + (region.descriptor.page_count * page_size) > address)
                 {
                     return region;
                 }
@@ -326,7 +334,7 @@ pub const AddressSpace = struct
                         region.flags = flags;
                         // @WARNING: this is not working and may cause problem with the kernel
                         // region.data = std.mem.zeroes(@TypeOf(region.data));
-                        std.mem.set(u8, @ptrCast([*]u8, &region.data)[0..@sizeOf(@TypeOf(region.data))], 0);
+                        region.zero_data_field();
                         assert(region.data.u.normal.commit.ranges.items.len == 0);
 
                         break :blk region;
@@ -341,7 +349,38 @@ pub const AddressSpace = struct
             }
             else
             {
-                TODO();
+                // @TODO: implement guard pages?
+                
+                if (self.free_region_size.find(needed_page_count, .smallest_above_or_equal)) |item|
+                {
+                    const region = item.value.?;
+                    self.free_region_base.remove(&region.u.item.base);
+                    self.free_region_size.remove(&region.u.item.u.size);
+
+                    if (region.descriptor.page_count > needed_page_count)
+                    {
+                        const split = kernel.core.heap.allocateT(Region, true).?;
+                        split.* = region.*;
+
+                        split.descriptor.base_address += needed_page_count * page_size;
+                        split.descriptor.page_count -= needed_page_count;
+
+                        _ = self.free_region_base.insert(&split.u.item.base, split, split.descriptor.base_address, .panic);
+                        _ = self.free_region_size.insert(&split.u.item.u.size, split, split.descriptor.page_count, .allow);
+                    }
+
+                    region.zero_data_field();
+                    region.descriptor.page_count = needed_page_count;
+                    region.flags = flags;
+                    
+                    // @TODO: if guard pages needed
+                    _ = self.used_regions.insert(&region.u.item.base, region, region.descriptor.base_address, .panic);
+                    break :blk region;
+                }
+                else
+                {
+                    return null;
+                }
             }
         };
 
@@ -524,7 +563,7 @@ pub const Physical = struct
 
         manipulation_lock: Mutex,
         manipulation_processor_lock: Spinlock,
-        manipulation_region: u64,
+        manipulation_region: ?*Region,
 
         zero_page_thread: ?*Thread,
         zero_page_event: Event,
@@ -680,6 +719,8 @@ pub const Physical = struct
             zeroed = 2,
             lock_acquired = 3,
         });
+
+    pub const memory_manipulation_region_page_count = 0x10;
 };
 
 pub const ObjectCache = struct
@@ -977,6 +1018,7 @@ pub const Heap = struct
         }
     }
 
+    // @TODO: this may be relying on C undefined behavior and might be causing different results than expected
     // @TODO: make this a zig function
     extern fn heap_calculate_index(size: u64) callconv(.C) u64;
     comptime
@@ -996,21 +1038,36 @@ pub const Heap = struct
     const large_allocation_threshold = 32768;
 };
 
-
 pub fn init() void
 {
-    kernel.core.regions = @intToPtr([*]Region, kernel.Arch.core_memory_region_start)[0..1];
-    kernel.core.regions[0].u.core.used = false;
-    kernel.core.regions[0].descriptor.base_address = kernel.Arch.core_address_space_start;
-    kernel.core.regions[0].descriptor.page_count = kernel.Arch.core_address_space_size / page_size;
+    // Initialize the core and the kernel address spaces
+    {
+        kernel.core.regions = @intToPtr([*]Region, kernel.Arch.core_memory_region_start)[0..1];
+        var first_core_region = &kernel.core.regions[0];
+        first_core_region.u.core.used = false;
+        first_core_region.descriptor.base_address = kernel.Arch.core_address_space_start;
+        first_core_region.descriptor.page_count = kernel.Arch.core_address_space_size / page_size;
 
-    kernel.Arch.memory_init();
-    const region = kernel.core.heap.allocateT(Region, true).?;
-    region.descriptor.base_address = kernel_address_space_start;
-    region.descriptor.page_count = kernel_address_space_size / page_size;
-    _ = kernel.process.address_space.free_region_base.insert(&region.u.item.base, region, region.descriptor.base_address, .panic);
-    _ = kernel.process.address_space.free_region_size.insert(&region.u.item.u.size, region, region.descriptor.page_count, .allow);
+        kernel.Arch.memory_init();
+        const region = kernel.core.heap.allocateT(Region, true).?;
+        region.descriptor.base_address = kernel_address_space_start;
+        region.descriptor.page_count = kernel_address_space_size / page_size;
+        _ = kernel.process.address_space.free_region_base.insert(&region.u.item.base, region, region.descriptor.base_address, .panic);
+        _ = kernel.process.address_space.free_region_size.insert(&region.u.item.u.size, region, region.descriptor.page_count, .allow);
+    }
 
+    // Initialize the physical memory management
+    {
+        _ = kernel.process.address_space.reserve_mutex.acquire();
+        kernel.physical_allocator.manipulation_region = kernel.process.address_space.reserve(Physical.memory_manipulation_region_page_count * page_size, Region.Flags.empty());
+        kernel.process.address_space.reserve_mutex.release();
+
+        const pageframe_count = (kernel.arch.physical_memory.highest + (page_size << 3)) >> page_bit_count;
+        kernel.physical_allocator.pageframes.ptr = @intToPtr([*]PageFrame, kernel.process.address_space.standard_allocate(pageframe_count * @sizeOf(PageFrame), Region.Flags.new_from_flag(.fixed)));
+        kernel.physical_allocator.free_or_zeroed_page_bitset.init(pageframe_count, true);
+        kernel.physical_allocator.pageframes.len = pageframe_count;
+        TODO();
+    }
 
     TODO();
 }

@@ -228,12 +228,12 @@ pub fn memory_init() void
         }
     }
 
-    kernel.core.address_space.arch.commit.L1 = &AddressSpace.core_L1_commit;
+    kernel.core.address_space.arch.commit.L1 = @ptrCast([*]u8, &AddressSpace.core_L1_commit);
 
     _ = kernel.core.address_space.reserve_mutex.acquire();
     defer kernel.core.address_space.reserve_mutex.release();
     const kernel_address_space_L1_flags = memory.Region.Flags.new(.{ .normal, .no_commit_tracking, .fixed });
-    const kernel_address_space_L1 = @intToPtr(*@TypeOf(AddressSpace.core_L1_commit), kernel.core.address_space.reserve(AddressSpace.core_L1_commit.len, kernel_address_space_L1_flags).?.descriptor.base_address);
+    const kernel_address_space_L1 = @intToPtr([*]u8, kernel.core.address_space.reserve(AddressSpace.L1_commit_size, kernel_address_space_L1_flags).?.descriptor.base_address);
     kernel.process.address_space.arch.commit.L1 = kernel_address_space_L1;
 }
 
@@ -436,7 +436,7 @@ pub const AddressSpace = struct
     cr3: u64,
     commit: struct
     {
-        L1: *[core_L1_commit.len]u8,
+        L1: [*]u8,
         commit_L1: [L1_commit_commit_size]u8,
         L2: [L2_commit_size]u8,
         L3: [L3_commit_size]u8,
