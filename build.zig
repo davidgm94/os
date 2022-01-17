@@ -14,6 +14,7 @@ const print = std.debug.print;
 const assert = std.debug.assert;
 const panic = std.debug.panic;
 const allocPrint = std.fmt.allocPrint;
+const comptimePrint = std.fmt.comptimePrint;
 
 const a_megabyte = 1024 * 1024;
 
@@ -516,8 +517,8 @@ const UEFI = struct
                             "dd",
                             "if=/dev/zero",
                             "of=" ++ partition_image_str,
-                            try allocPrint(b.allocator, "bs={}", .{block_size}),
-                            try allocPrint(b.allocator, "count={}", .{partition_block_count}),
+                            comptimePrint("bs={}", .{block_size}),
+                            allocPrint(b.allocator, "count={}", .{partition_block_count}),
                         }
                     );
 
@@ -651,8 +652,8 @@ const UEFI = struct
                             "dd",
                             "if=/dev/zero",
                             "of=" ++ disk_image_str,
-                            try allocPrint(b.allocator, "bs={}", .{block_size}),
-                            try allocPrint(b.allocator, "count={}", .{block_count}),
+                            comptimePrint("bs={}", .{block_size}),
+                            comptimePrint("count={}", .{block_count}),
                         }
                     );
 
@@ -706,11 +707,11 @@ const UEFI = struct
                         &[_][]const u8
                         {
                             "dd",
-                            try allocPrint(b.allocator, "if={s}", .{partition_image_str}),
-                            try allocPrint(b.allocator, "of={s}", .{disk_image_str}),
-                            try allocPrint(b.allocator, "bs={}", .{block_size}),
+                            comptimePrint("if={s}", .{partition_image_str}),
+                            comptimePrint("of={s}", .{disk_image_str}),
+                            comptimePrint("bs={}", .{block_size}),
                             try allocPrint(b.allocator, "count={}", .{partition_block_count}),
-                            try allocPrint(b.allocator, "seek={}", .{partition_block_start}),
+                            comptimePrint("seek={}", .{partition_block_start}),
                             "conv=notrunc",
                         }
                     );
@@ -862,14 +863,15 @@ const Debug = struct
                 \\target remote localhost:1234
                 \\
                 \\c
-           , .{
-               comptime switch (kernel_version)
-                {
-                    .CPP => Kernel.cpp.elf_path,
-                    .Rust => Kernel.rust.elf_path,
-                    .Zig => Kernel.zig.elf_path,
-                }
-           });
+                ,
+        .{
+            comptime switch (kernel_version)
+            {
+                .CPP => Kernel.cpp.elf_path,
+                .Rust => Kernel.rust.elf_path,
+                .Zig => Kernel.zig.elf_path,
+            }
+        });
         
         const gdb_script_path = "zig-cache/gdb_script";
         try std.fs.cwd().writeFile(gdb_script_path, gdb_script);
