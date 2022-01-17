@@ -838,11 +838,46 @@ const Debug = struct
     fn build(given_step: *Step) !void
     {
         const self = @fieldParentPtr(Self, "step", given_step);
+        const gdb_script = std.fmt.comptimePrint(comptime
+                \\set disassembly-flavor intel
+                \\symbol-file {s}
+                \\
+                \\break 0x600
+                \\break 0x1000
+                \\b _start
+                \\b kernel_initialize
+                \\b panic
+                \\b KernelInitialise
+                \\b KernelPanic
+                \\b KernelMain
+                \\b core::panicking::panic
+                \\b renaissance-os::kernel::arch::x86_64::handle_page_fault
+                \\b translate_address
+                \\b kernel.panic
+                \\b kernel.panic_raw
+                \\b kernel.TODO
+                \\b interrupt_handler
+                \\
+                \\
+                \\target remote localhost:1234
+                \\
+                \\c
+           , .{
+               comptime switch (kernel_version)
+                {
+                    .CPP => Kernel.cpp.elf_path,
+                    .Rust => Kernel.rust.elf_path,
+                    .Zig => Kernel.zig.elf_path,
+                }
+           });
+        
+        const gdb_script_path = "zig-cache/gdb_script";
+        try std.fs.cwd().writeFile(gdb_script_path, gdb_script);
         const first_pid = try std.os.fork();
         if (first_pid == 0)
         {
             const debugger = try std.ChildProcess.init(
-                &[_][]const u8 { "gf2", "-x", ".gdb_script" }, self.b.allocator);
+                &[_][]const u8 { "gf2", "-x", gdb_script_path }, self.b.allocator);
             _ = try debugger.spawnAndWait();
         }
         else
