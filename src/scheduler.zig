@@ -7,6 +7,7 @@ const VolatilePointer = kernel.VolatilePointer;
 const Bitflag = kernel.Bitflag;
 
 const TODO = kernel.TODO;
+const panic_raw = kernel.panic_raw;
 
 const LinkedList = kernel.LinkedList;
 const Pool = kernel.Pool;
@@ -19,8 +20,11 @@ const Mutex = kernel.sync.Mutex;
 const WriterLock = kernel.sync.WriterLock;
 
 const AddressSpace = kernel.memory.AddressSpace;
+const Region = kernel.memory.Region;
 
 const InterruptContext = kernel.Arch.Interrupt.Context;
+const get_current_thread = kernel.Arch.get_current_thread;
+const page_size = kernel.Arch.page_size;
 
 const std = @import("std");
 const Atomic = std.atomic.Atomic;
@@ -37,9 +41,9 @@ async_task_spinlock: Spinlock,
 all_threads: LinkedList(Thread),
 all_processes: LinkedList(Process),
 
-thread_pool: Pool,
-process_pool: Pool,
-address_space_pool: Pool,
+thread_pool: Pool(Thread),
+process_pool: Pool(Process),
+address_space_pool: Pool(AddressSpace),
 
 next_thread_id: u64,
 next_process_id: u64,
@@ -83,7 +87,7 @@ pub const Thread = struct
     all_item: LinkedList(Thread).Item,
     process_item: LinkedList(Thread).Item,
 
-    process: *Process,
+    process: ?*Process,
     id: u64,
     cpu_time_slices: Volatile(u64),
     handle_count: Volatile(u64),
@@ -136,7 +140,7 @@ pub const Thread = struct
     interrupt_context: *InterruptContext,
     last_known_execution_address: u64, // @TODO: for debugging
 
-    pub const Priority = enum(u8)
+    pub const Priority = enum(i8)
     {
         normal = 0,
         low = 1,
@@ -166,6 +170,15 @@ pub const Thread = struct
         in_syscall = 2,
         user_block_request = 3,
     };
+
+    pub const Flags = Bitflag(enum(u32)
+        {
+            userland = 0,
+            low_priority = 1,
+            paused = 2,
+            async_task = 3,
+            idle = 4,
+        });
 };
 
 pub const MessageQueue = struct
@@ -191,6 +204,8 @@ pub const Process = struct
     id: u64,
     handle_count: Volatile(u64),
     all_item: LinkedList(Process).Item,
+
+    prevent_new_threads: bool,
     
     pub const Type = enum
     {
@@ -220,6 +235,119 @@ pub const Process = struct
         self.handle_count.write_volatile(1);
         self.permissions = Process.Permission.all();
         self.type = process_type;
+    }
+
+    pub fn spawn_thread_extended(self: *@This(), start_address: u64, argument1: u64, flags: Thread.Flags, argument2: u64) ?*Thread
+    {
+        const userland = flags.contains(.userland);
+
+        const parent_thread = get_current_thread();
+        _ = parent_thread;
+
+        if (userland and self == &kernel.process)
+        {
+            panic_raw("cannot add userland thread to kernel process");
+        }
+
+        _ = self.threads_mutex.acquire();
+        defer self.threads_mutex.release();
+
+        if (self.prevent_new_threads) return null;
+
+        if (kernel.scheduler.thread_pool.add()) |thread|
+        {
+            const kernel_stack_size: u64 = 0x5000;
+            const user_stack_reserve: u64 = if (userland) 0x400000 else kernel_stack_size;
+            const user_stack_commit: u64 = if (userland) 0x10000 else 0;
+            var user_stack: u64 = 0;
+            var kernel_stack: u64 = 0;
+
+            var failed = false;
+            if (!flags.contains(.idle))
+            {
+                kernel_stack = kernel.process.address_space.standard_allocate(kernel_stack_size, Region.Flags.new_from_flag(.fixed));
+                if (kernel_stack != 0)
+                {
+                    if (userland)
+                    {
+                        user_stack = self.address_space.standard_allocate_extended(user_stack_reserve, Region.Flags.empty(), 0, false);
+
+                        const region = self.address_space.find_and_pin_region(user_stack, user_stack_reserve).?;
+                        _ = self.address_space.reserve_mutex.acquire();
+                        const success = self.address_space.commit_range(region, (user_stack_reserve - user_stack_commit) / page_size, user_stack_commit / page_size);
+                        self.address_space.reserve_mutex.release();
+                        self.address_space.unpin_region(region);
+                        failed = !success or user_stack == 0;
+                    }
+                    else
+                    {
+                        user_stack = kernel_stack;
+                    }
+                }
+                else
+                {
+                    failed = true;
+                }
+            }
+
+            if (!failed)
+            {
+                thread.paused.write_volatile((parent_thread != null and parent_thread.?.process != null and parent_thread.?.paused.read_volatile()) or flags.contains(.paused));
+                thread.handle_count.write_volatile(2);
+                thread.is_kernel_thread = !userland;
+                thread.priority = @enumToInt(if (flags.contains(.low_priority)) Thread.Priority.low else Thread.Priority.normal);
+                thread.kernel_stack_base = kernel_stack;
+                thread.user_stack_base = if (userland) user_stack else 0;
+                thread.user_stack_reserve = user_stack_reserve;
+                thread.user_stack_commit.write_volatile(user_stack_commit);
+                thread.terminatable_state.write_volatile(if (userland) .terminatable else .in_syscall);
+                thread.type = if (flags.contains(.async_task)) Thread.Type.async_task else (if (flags.contains(.idle)) Thread.Type.idle else Thread.Type.normal);
+                thread.id = @atomicRmw(u64, &kernel.scheduler.next_thread_id, .Add, 1, .SeqCst);
+                thread.process = self;
+                thread.item.value = thread;
+                thread.all_item.value = thread;
+                thread.process_item.value = thread;
+
+                if (thread.type != .idle)
+                {
+                    thread.interrupt_context = kernel.Arch.initialize_thread(kernel_stack, kernel_stack_size, thread, start_address, argument1, argument2, userland, user_stack, user_stack_reserve);
+                }
+                else
+                {
+                    thread.state.write_volatile(.active);
+                    thread.executing.write_volatile(true);
+                }
+
+                self.threads.insert_at_end(&thread.process_item);
+
+                _ = kernel.scheduler.all_threads_mutex.acquire();
+                kernel.scheduler.all_threads.insert_at_start(&thread.all_item);
+                kernel.scheduler.all_threads_mutex.release();
+            }
+            else
+            {
+                if (user_stack != 0) _ = self.address_space.free(user_stack);
+                if (kernel_stack != 0) _ = self.address_space.free(kernel_stack);
+                kernel.scheduler.thread_pool.remove(thread);
+                return null;
+            }
+        }
+        else
+        {
+            return null;
+        }
+
+        _ = self;
+        _ = start_address;
+        _ = argument1;
+        _ = flags;
+        _ = argument2;
+        TODO();
+    }
+
+    pub fn spawn_thread(self: *@This(), start_address: u64, argument1: u64, flags: Thread.Flags) ?*Thread
+    {
+        return self.spawn_thread_extended(start_address, argument1, flags, 0);
     }
 };
 

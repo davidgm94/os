@@ -73,7 +73,7 @@ pub fn handle_page_fault(self: *@This(), fault_address: u64, flags: memory.Handl
                     if (current_thread.temporary_address_space.ptr != null)
                         current_thread.temporary_address_space.get_non_volatile()
                     else
-                        &current_thread.process.address_space;
+                        &current_thread.process.?.address_space;
                 return space.handle_page_fault(virtual_address, flags);
             }
             else
@@ -208,6 +208,20 @@ pub fn translate_address(self: *@This(), virtual_address: u64, write_access: boo
     if (write_access and physical_address & 2 == 0) return 0;
     if (physical_address & 1 == 0) return 0;
     return physical_address & 0x0000FFFFFFFFF000;
+}
+
+pub fn initialize_thread(kernel_stack: u64, kernel_stack_size: u64, thread: *Thread, start_address: u64, argument1: u64, argument2: u64, userland: bool, user_stack: u64, user_stack_size: u64) *Interrupt.Context
+{
+    _ = kernel_stack;
+    _ = kernel_stack_size;
+    _ = thread;
+    _ = start_address;
+    _ =argument1;
+    _=argument2;
+    _= userland;
+    _= user_stack;
+    _ = user_stack_size;
+    TODO();
 }
 
 /// Architecture-specific memory initialization

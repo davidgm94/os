@@ -4689,8 +4689,7 @@ bool OpenHandleToObject(void *object, KernelObjectType type, uint32_t flags);
 
 
 
-Thread *ThreadSpawn(const char *cName, uintptr_t startAddress, uintptr_t argument1 = 0, 
-		uint32_t flags = ES_FLAGS_DEFAULT, Process *process = nullptr, uintptr_t argument2 = 0)
+Thread *ThreadSpawn(const char *cName, uintptr_t startAddress, uintptr_t argument1 = 0, uint32_t flags = ES_FLAGS_DEFAULT, Process *process = nullptr, uintptr_t argument2 = 0)
 {
     bool userland = flags & SPAWN_THREAD_USERLAND;
 	Thread *parentThread = GetCurrentThread();

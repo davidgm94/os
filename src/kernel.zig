@@ -12,10 +12,12 @@ pub var scheduler: Scheduler = undefined;
 pub var process: Scheduler.Process = undefined;
 pub var core: Core = undefined;
 pub var physical_allocator: memory.Physical.Allocator = undefined;
+pub var active_session_manager: cache.ActiveSession.Manager = undefined;
 
 pub const memory = @import("memory.zig");
 pub const Scheduler = @import("scheduler.zig");
 pub const sync = @import("sync.zig");
+pub const cache = @import("cache.zig");
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -74,8 +76,15 @@ pub fn VolatilePointer(comptime T: type) type
             return self.ptr.?.*;
         }
 
+        pub fn write_at_address_volatile(self: *@This(), value: T) void
+        {
+            assert(self.ptr != null);
+            self.ptr.?.* = value;
+        }
+
         pub fn get_non_volatile(self: @This()) *T
         {
+            assert(self.ptr != null);
             return @ptrCast(*T, self.ptr.?);
         }
     };
@@ -196,6 +205,7 @@ pub const Core = struct
     regions: []memory.Region,
     region_commit_count: u64,
     heap: memory.Heap,
+    fixed_heap: memory.Heap,
 };
 
 pub const Bitset = struct
@@ -215,6 +225,13 @@ pub const Bitset = struct
     {
         self.single_usage[index >> 5] |= @as(u32, 1) << @truncate(u5, index);
         self.group_usage[index / group_size] += 1;
+    }
+
+    pub fn take(self: *@This(), index: u64) void
+    {
+        const group = index / group_size;
+        self.group_usage[group] -= 1;
+        self.single_usage[index >> 5] &= ~(@as(u32, 1) << @truncate(u5, index));
     }
 
     const group_size = 0x1000;
@@ -665,6 +682,30 @@ pub fn LinkedList(comptime T: type) type
             value: ?*T,
         };
 
+        pub fn insert_at_start(self: *@This(), item: *Item) void
+        {
+            if (item.list != null) panic_raw("inserting an item that is already in a list");
+
+            if (self.first) |first|
+            {
+                item.next = first;
+                item.previous = null;
+                first.previous = item;
+                self.first = item;
+            }
+            else
+            {
+                self.first = item;
+                self.last = item;
+                item.previous = null;
+                item.next = null;
+            }
+
+            self.count += 1;
+            item.list = self;
+            self.validate();
+        }
+
         pub fn insert_at_end(self: *@This(), item: *Item) void
         {
             if (item.list != null) panic_raw("inserting an item that is already in a list");
@@ -760,9 +801,53 @@ pub fn LinkedList(comptime T: type) type
 }
 
 
-pub const Pool = struct
+pub fn Pool(comptime T: type) type
 {
-};
+    return struct
+    {
+        cache_entries: [cache_count]?*T,
+        cache_entry_count: u64,
+        mutex: sync.Mutex,
+
+        const cache_count = 16;
+
+        pub fn add(self: *@This()) ?*T
+        {
+            _ = self.mutex.acquire();
+            defer self.mutex.release();
+
+            if (self.cache_entry_count != 0)
+            {
+                self.cache_entry_count -= 1;
+                const address = self.cache_entries[self.cache_entry_count];
+                std.mem.set(u8, @ptrCast([*]u8, address)[0..@sizeOf(T)], 0);
+                return address;
+            }
+            else
+            {
+                return @intToPtr(?*T, kernel.core.fixed_heap.allocate(@sizeOf(T), true));
+            }
+        }
+
+        pub fn remove(self: *@This(), pointer: ?*T) void
+        {
+            _ = self.mutex.acquire();
+            defer self.mutex.release();
+
+            if (pointer == null) return;
+
+            if (self.cache_entry_count == cache_count)
+            {
+                kernel.core.fixed_heap.free(@ptrToInt(pointer), @sizeOf(T));
+            }
+            else
+            {
+                self.cache_entries[self.cache_entry_count] = pointer;
+                self.cache_entry_count += 1;
+            }
+        }
+    };
+}
 
 pub const Range = struct
 {
@@ -947,6 +1032,13 @@ pub fn Array(comptime T: type, comptime heap_type: HeapType) type
             _ = count;
         }
     };
+}
+
+pub fn clamp(comptime Int: type, low: Int, high: Int, integer: Int) Int
+{
+    if (integer < low) return low;
+    if (integer > low) return high;
+    return integer;
 }
 
 var kernel_panic_buffer: [0x4000]u8 = undefined;

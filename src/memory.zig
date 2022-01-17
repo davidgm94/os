@@ -436,7 +436,7 @@ pub const AddressSpace = struct
         }
     }
 
-    fn commit_range(self: *@This(), region: *Region, page_offset: u64, page_count: u64) bool
+    pub fn commit_range(self: *@This(), region: *Region, page_offset: u64, page_count: u64) bool
     {
         self.reserve_mutex.assert_locked();
         
@@ -500,6 +500,49 @@ pub const AddressSpace = struct
 
         return true;
     }
+
+    pub fn find_and_pin_region(self: *@This(), address: u64, size: u64) ?*Region
+    {
+        // @TODO: this is overflow, we should handle it in a different way
+        if (address + size < address) return null;
+
+        _ = self.reserve_mutex.acquire();
+        defer self.reserve_mutex.release();
+
+        if (self.find_region(address)) |region|
+        {
+            if (region.descriptor.base_address > address) return null;
+            if (region.descriptor.base_address  + region.descriptor.page_count * page_size < address + size) return null;
+            if (!region.data.pin.take_extended(WriterLock.shared, true)) return null;
+
+            return region;
+        }
+        else
+        {
+            return null;
+        }
+    }
+
+    pub fn unpin_region(self: *@This(), region: *Region) void
+    {
+        _ = self.reserve_mutex.acquire();
+        region.data.pin.return_lock(WriterLock.shared);
+        self.reserve_mutex.release();
+    }
+
+    pub fn free(self: *@This(), address: u64) bool
+    {
+        return self.free_extended(address, 0, false);
+    }
+
+    pub fn free_extended(self: *@This(), address: u64, expected_size: u64, user_only: bool) bool
+    {
+        _ = self;
+        _ = address;
+        _ = expected_size;
+        _ = user_only;
+        TODO();
+    }
 };
 
 
@@ -513,7 +556,7 @@ pub const PageFrame = struct
         list: struct
         {
             next: Volatile(u64),
-            previous: Volatile(?*u64),
+            previous: VolatilePointer(u64),
         },
 
         active: struct
@@ -634,8 +677,61 @@ pub const Physical = struct
             }
             else
             {
-                TODO();
+                var not_zeroed = false;
+                const page = blk:
+                {
+                    var p: u64 = 0;
+                    p = self.first_zeroed_page;
+                    if (p == 0) { p = self.first_free_page; not_zeroed = true; }
+                    if (p == 0) { p = self.last_standby_page; not_zeroed = true; }
+                    break :blk p;
+                };
+
+                if (page != 0)
+                {
+                    const frame = &self.pageframes[page];
+
+                    switch (frame.state.read_volatile())
+                    {
+                        .active =>
+                        {
+                            panic_raw("corrupt pageframes");
+                        },
+                        .standby =>
+                        {
+                            if (frame.cache_reference.dereference_volatile() != ((page << page_bit_count) | shared_entry_present))
+                            {
+                                panic_raw("corrupt shared reference back pointer in frame");
+                            }
+
+                            frame.cache_reference.write_at_address_volatile(0);
+                        },
+                        else =>
+                        {
+                            self.free_or_zeroed_page_bitset.take(page);
+                        }
+                    }
+
+                    self.activate_pages(page, 1);
+
+                    const address = page << page_bit_count;
+                    if (not_zeroed and flags.contains(.zeroed))
+                    {
+                        TODO();
+                    }
+
+                    return address;
+                }
             }
+
+            // fail
+            if (!flags.contains(.can_fail))
+            {
+                panic_raw("out of memory");
+            }
+
+            self.decommit(commit_now, true);
+            return 0;
         }
 
         pub fn commit(self: *@This(), byte_count: u64, fixed: bool) bool
@@ -683,16 +779,72 @@ pub const Physical = struct
             return true;
         }
 
+        pub fn decommit(self: *@This(), byte_count: u64, fixed: bool) void
+        {
+            _ = self;
+            _ = byte_count;
+            _ = fixed;
+            TODO();
+        }
+        pub fn activate_pages(self: *@This(), pages: u64, page_count: u64) void
+        {
+            self.pageframe_mutex.assert_locked();
+
+            for (self.pageframes[pages..pages + page_count]) |*frame, frame_i|
+            {
+                switch (frame.state.read_volatile())
+                {
+                    .free =>
+                    {
+                        self.free_page_count -= 1;
+                    },
+                    .zeroed =>
+                    {
+                        self.zeroed_page_count -= 1;
+                    },
+                    .standby =>
+                    {
+                        self.standby_page_count -= 1;
+
+                        if (self.last_standby_page == pages + frame_i)
+                        {
+                            if (frame.u.list.previous.ptr == &self.first_standby_page)
+                            {
+                                self.last_standby_page = 0;
+                            }
+                            else
+                            {
+                                self.last_standby_page = (@ptrToInt(frame.u.list.previous.ptr) - @ptrToInt(self.pageframes.ptr)) / @sizeOf(PageFrame);
+                            }
+                        }
+                    },
+                    else => unreachable,
+                }
+
+                frame.u.list.previous.write_at_address_volatile(frame.u.list.next.read_volatile());
+                if (frame.u.list.next.read_volatile() != 0)
+                {
+                    self.pageframes[frame.u.list.next.read_volatile()].u.list.previous = frame.u.list.previous;
+                }
+
+                std.mem.set(u8, @ptrCast([*]u8, frame)[0..@sizeOf(@TypeOf(frame))], 0);
+                frame.state.write_volatile(.active);
+            }
+
+            self.active_page_count += page_count;
+            self.update_available_page_count(false);
+        }
+
         pub fn insert_free_pages_next(self: *@This(), page: u64) void
         {
             const frame = &self.pageframes[page];
             frame.state.write_volatile(.free);
 
             frame.u.list.next.write_volatile(self.first_free_page);
-            frame.u.list.previous.write_volatile(&self.first_free_page);
+            frame.u.list.previous.overwrite_address(&self.first_free_page);
             if (self.first_free_page != 0)
             {
-                self.pageframes[self.first_free_page].u.list.previous.write_volatile(&frame.u.list.next.value);
+                self.pageframes[self.first_free_page].u.list.previous.overwrite_address(&frame.u.list.next.value);
             }
             self.first_free_page = page;
 
@@ -860,15 +1012,24 @@ pub const Heap = struct
 
     pub fn allocate(self: *@This(), asked_size: u64, zero_memory: bool) u64
     {
-        _ = zero_memory;
-        _ = self;
         if (@bitCast(i64, asked_size) < 0) panic_raw("heap panic");
 
         const size = (asked_size + HeapRegion.used_header_size + 0x1f) & ~@as(u64, 0x1f);
 
         if (size >= large_allocation_threshold)
         {
-            TODO();
+            if (@intToPtr(?*HeapRegion, self.allocate_call(size))) |region|
+            {
+                region.used = HeapRegion.used_magic;
+                region.u1.size = 0;
+                region.u2.allocation_size = asked_size;
+                _ = self.size.atomic_fetch_add(asked_size);
+                return region.get_data();
+            }
+            else
+            {
+                return 0;
+            }
         }
 
         _ = self.mutex.acquire();
@@ -1014,6 +1175,14 @@ pub const Heap = struct
         }
     }
 
+    pub fn free(self: *@This(), address: u64, expected_size: u64) void
+    {
+        _ = self;
+        _ = address;
+        _ = expected_size;
+        TODO();
+    }
+
     fn validate(self: *@This()) void
     {
         if (self.cannot_validate) return;
@@ -1133,5 +1302,11 @@ pub fn init() void
         // log
     }
 
+    {
+        kernel.active_session_manager.init();
+    }
+
     TODO();
 }
+
+pub const shared_entry_present = 1;
