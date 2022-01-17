@@ -64,7 +64,7 @@ pub const ActiveSession = struct
             self.sections.ptr = @intToPtr([*]ActiveSession, kernel.core.fixed_heap.allocate(self.sections.len * @sizeOf(ActiveSession), true));
 
             _ = kernel.process.address_space.reserve_mutex.acquire();
-            self.base_address = kernel.process.address_space.reserve(self.sections.len * ActiveSession.size, memory.Region.Flags.new_from_flag(.cache)).?.descriptor.base_address;
+            self.base_address = kernel.process.address_space.reserve(self.sections.len * ActiveSession.size, memory.Region.Flags.from_flag(.cache)).?.descriptor.base_address;
             kernel.process.address_space.reserve_mutex.release();
 
             for (self.sections) |*section|

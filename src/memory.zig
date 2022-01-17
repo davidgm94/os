@@ -12,6 +12,9 @@ const LinkedList= kernel.LinkedList;
 const Bitset = kernel.Bitset;
 const Range = kernel.Range;
 
+const GlobalData = kernel.GlobalData;
+const open_handle = kernel.open_handle;
+
 const Mutex = kernel.sync.Mutex;
 const Spinlock = kernel.sync.Spinlock;
 const Event = kernel.sync.Event;
@@ -56,6 +59,88 @@ pub const MapPageFlags = Bitflag(enum(u32)
 
 pub const SharedRegion = struct
 {
+    size: u64,
+    handle_count: Volatile(u64),
+    mutex: Mutex,
+    address: u64,
+
+    fn create(size: u64, fixed: bool, below: u64) ?*@This()
+    {
+        if (size == 0) return null;
+
+        if (kernel.core.heap.allocateT(@This(), true)) |shared_region|
+        {
+            shared_region.handle_count.write_volatile(1);
+
+            if (!shared_region.resize(size))
+            {
+                kernel.core.heap.free(@ptrToInt(shared_region), 0);
+                return null;
+            }
+
+            if (fixed)
+            {
+                var i: u64 = 0;
+                while (i < shared_region.size >> page_bit_count) : (i += 1)
+                {
+                    const page = kernel.physical_allocator.allocate_extended(Physical.Flags.from_flag(.zeroed), 1, 1, below);
+                    @intToPtr([*]u64, shared_region.address)[i] = page | shared_entry_present;
+                }
+            }
+
+            return shared_region;
+        }
+        else return null;
+    }
+
+    pub fn resize(self: *@This(), byte_count: u64) bool
+    {
+        _ = self.mutex.acquire();
+        defer self.mutex.release();
+
+        const size = (byte_count + page_size - 1) & ~@as(u64, page_size - 1);
+        const page_count = size / page_size;
+        const old_page_count = self.size / page_size;
+        const old_address = self.address;
+
+        const new_address = kernel.core.heap.allocate(page_count * @sizeOf(u64), true);
+        if (new_address == 0 and page_count != 0) return false;
+
+        if (old_page_count > page_count)
+        {
+            kernel.physical_allocator.decommit(page_size * (old_page_count - page_count), true);
+        }
+        else if (page_count > old_page_count)
+        {
+            if (!kernel.physical_allocator.commit(page_size * (page_count - old_page_count), true))
+            {
+                kernel.core.heap.free(new_address, page_count * @sizeOf(u64));
+                return false;
+            }
+        }
+
+        self.size = size;
+        self.address = new_address;
+
+        if (old_address == 0) return true;
+
+        if (old_page_count > page_count)
+        {
+            var page = page_count;
+            while (page < old_page_count) : (page += 1)
+            {
+                var addresses = @intToPtr([*]u64, old_address);
+                const address = addresses[page];
+                if (address & shared_entry_present != 0) kernel.physical_allocator.free(page);
+            }
+        }
+
+        const copy = if (old_page_count > page_count) page_count else old_page_count;
+        std.mem.copy(u8, @intToPtr([*]u8, self.address)[0..@sizeOf(u64) * copy], @intToPtr([*]u8, old_address)[0..@sizeOf(u64) * copy]);
+        kernel.core.heap.free(old_address, old_page_count * @sizeOf(u64));
+
+        return true;
+    }
 };
 
 pub const Region = struct
@@ -223,7 +308,27 @@ pub const AddressSpace = struct
         }
         else if (region.flags.contains(.shared))
         {
-            TODO();
+            const shared_region = region.data.u.shared.region.?;
+
+            if (shared_region.handle_count.read_volatile() == 0) panic_raw("shared region has no handles");
+
+            _ = shared_region.mutex.acquire();
+            defer shared_region.mutex.release();
+
+            const offset = address - region.descriptor.base_address + region.data.u.shared.offset;
+
+            if (offset >= shared_region.size)
+            {
+                return false;
+            }
+
+            const entry = @intToPtr(*u64, shared_region.address + (offset / page_size * @sizeOf(u64)));
+            if (entry.* & shared_entry_present != 0) zero_page = false
+            else entry.* = kernel.physical_allocator.allocate_with_flags(physical_allocation_flags) | shared_entry_present;
+
+            _ = kernel.arch.map_page(self, entry.* & ~@as(u64, page_size - 1), address, map_page_flags);
+            if (zero_page) std.mem.set(u8, @intToPtr([*]u8, address)[0..page_size], 0);
+            return true;
         }
         else if (region.flags.contains(.file))
         {
@@ -491,7 +596,7 @@ pub const AddressSpace = struct
             var i: u64 = page_offset;
             while (i < page_offset + page_count) : (i += 1)
             {
-                if (!self.handle_page_fault(region.descriptor.base_address + i * page_size, HandlePageFaultFlags.new_from_flag(.lock_acquired)))
+                if (!self.handle_page_fault(region.descriptor.base_address + i * page_size, HandlePageFaultFlags.from_flag(.lock_acquired)))
                 {
                     panic_raw("unable to fix pages\n");
                 }
@@ -541,6 +646,36 @@ pub const AddressSpace = struct
         _ = address;
         _ = expected_size;
         _ = user_only;
+        TODO();
+    }
+
+    pub fn map_shared(self: *@This(), shared_region: *SharedRegion, offset: u64, byte_count: u64) u64
+    {
+        return self.map_shared(shared_region, offset, byte_count);
+    }
+
+    pub fn map_shared_extended(self: *@This(), shared_region: *SharedRegion, offset: u64, bytes: u64, additional_flags: Region.Flags, base_address: u64) u64
+    {
+        _ = open_handle(SharedRegion, shared_region, 0);
+
+        _ = self.reserve_mutex.acquire();
+        defer self.reserve_mutex.release();
+        var byte_count = bytes;
+        if (offset & (page_size - 1) != 0) byte_count += offset & (page_size - 1);
+        if (shared_region.size > offset and shared_region.size >= offset + byte_count)
+        {
+            if (self.reserve_extended(byte_count, additional_flags.or_flag(.shared), base_address)) |region|
+            {
+                if (!region.flags.contains(.shared)) panic_raw("cannot commit into non-shared region");
+                if (region.data.u.shared.region != null) panic_raw("a shared region has already been bound");
+
+                region.data.u.shared.region = shared_region;
+                region.data.u.shared.offset = offset & ~@as(u64, page_size - 1);
+                return region.descriptor.base_address + (offset & (page_size - 1));
+            }
+        }
+
+        // fail
         TODO();
     }
 };
@@ -608,7 +743,7 @@ pub const Physical = struct
         manipulation_processor_lock: Spinlock,
         manipulation_region: ?*Region,
 
-        zero_page_thread: ?*Thread,
+        zero_page_thread: *Thread,
         zero_page_event: Event,
 
         object_cache_list: LinkedList(ObjectCache),
@@ -665,7 +800,7 @@ pub const Physical = struct
                 if (flags.contains(.zeroed))
                 {
                     // @TODO: hack
-                    _ = kernel.arch.map_page(&kernel.core.address_space, page, @ptrToInt(&early_zero_buffer), MapPageFlags.new(.{.overwrite, .no_new_tables, .frame_lock_acquired}));
+                    _ = kernel.arch.map_page(&kernel.core.address_space, page, @ptrToInt(&early_zero_buffer), MapPageFlags.from_flags(.{.overwrite, .no_new_tables, .frame_lock_acquired}));
                     std.mem.set(u8, early_zero_buffer[0..], 0);
                 }
 
@@ -850,6 +985,20 @@ pub const Physical = struct
 
             self.free_or_zeroed_page_bitset.put(page);
             self.free_page_count += 1;
+        }
+
+        pub fn free(self: *@This(), page: u64) void
+        {
+            return self.free_extended(page, false, 1);
+        }
+
+        pub fn free_extended(self: *@This(), page: u64, mutex_already_acquired: bool, count: u64) void
+        {
+            _ = self;
+            _ = page;
+            _ = mutex_already_acquired;
+            _ = count;
+            TODO();
         }
 
         fn get_available_page_count(self: @This()) callconv(.Inline) u64
@@ -1155,11 +1304,11 @@ pub const Heap = struct
     {
         if (self == &kernel.core.heap)
         {
-            return kernel.core.address_space.standard_allocate(size, Region.Flags.new_from_flag(.fixed));
+            return kernel.core.address_space.standard_allocate(size, Region.Flags.from_flag(.fixed));
         }
         else
         {
-            return kernel.process.address_space.standard_allocate(size, Region.Flags.new_from_flag(.fixed));
+            return kernel.process.address_space.standard_allocate(size, Region.Flags.from_flag(.fixed));
         }
     }
 
@@ -1288,7 +1437,7 @@ pub fn init() void
         kernel.process.address_space.reserve_mutex.release();
 
         const pageframe_count = (kernel.arch.physical_memory.highest + (page_size << 3)) >> page_bit_count;
-        kernel.physical_allocator.pageframes.ptr = @intToPtr([*]PageFrame, kernel.process.address_space.standard_allocate(pageframe_count * @sizeOf(PageFrame), Region.Flags.new_from_flag(.fixed)));
+        kernel.physical_allocator.pageframes.ptr = @intToPtr([*]PageFrame, kernel.process.address_space.standard_allocate(pageframe_count * @sizeOf(PageFrame), Region.Flags.from_flag(.fixed)));
         kernel.physical_allocator.free_or_zeroed_page_bitset.init(pageframe_count, true);
         kernel.physical_allocator.pageframes.len = pageframe_count;
 
@@ -1306,6 +1455,49 @@ pub fn init() void
         kernel.active_session_manager.init();
     }
 
+    // Create threads
+    {
+        kernel.physical_allocator.zero_page_event.auto_reset.write_volatile(true);
+        _ = kernel.physical_allocator.commit(Physical.memory_manipulation_region_page_count * page_size, true);
+        kernel.physical_allocator.zero_page_thread = kernel.process.spawn_thread(@ptrToInt(zero_page_thread), 0, Thread.Flags.from_flag(.low_priority)).?;
+        kernel.process.spawn_thread(@ptrToInt(balance_thread), 0, Thread.Flags.empty()).?.is_page_generator = true;
+        _ = kernel.process.spawn_thread(@ptrToInt(object_cache_trim_thread), 0, Thread.Flags.empty());
+    }
+
+    // Create the global data shared region
+    {
+        kernel.global_data_region = SharedRegion.create(@sizeOf(GlobalData), false, 0).?;
+        kernel.global_data = @intToPtr(*GlobalData, kernel.process.address_space.map_shared_extended(kernel.global_data_region, 0, @sizeOf(GlobalData), Region.Flags.from_flag(.fixed), 0));
+        _ = fault_range(@ptrToInt(kernel.global_data), @sizeOf(GlobalData), HandlePageFaultFlags.from_flag(.for_supervisor));
+    }
+}
+
+pub fn fault_range(address: u64, byte_count: u64, flags: HandlePageFaultFlags) bool
+{
+    const start = address & ~@as(u64, page_size - 1);
+    const end = (address + byte_count - 1) & ~@as(u64, page_size - 1);
+
+    var page = start;
+    while (page <= end) : (page += page_size)
+    {
+        if (!kernel.arch.handle_page_fault(page, flags)) return false;
+    }
+
+    return true;
+}
+
+pub fn zero_page_thread() callconv(.C) void
+{
+    TODO();
+}
+
+pub fn balance_thread() callconv(.C) void
+{
+    TODO();
+}
+
+pub fn object_cache_trim_thread() callconv(.C) void
+{
     TODO();
 }
 

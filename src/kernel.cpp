@@ -12138,8 +12138,6 @@ void MMArchUnmapPages(MMSpace *space, uintptr_t virtualAddressStart, uintptr_t p
 	MMArchInvalidatePages(virtualAddressStart, pageCount);
 }
 
-
-
 void MMPhysicalFree(uintptr_t page, bool mutexAlreadyAcquired, size_t count) {
 	if (!page) KernelPanic("MMPhysicalFree - Invalid page.\n");
 	if (mutexAlreadyAcquired) KMutexAssertLocked(&pmm.pageFrameMutex);

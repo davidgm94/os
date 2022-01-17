@@ -12,6 +12,8 @@ const panic_raw = kernel.panic_raw;
 const LinkedList = kernel.LinkedList;
 const Pool = kernel.Pool;
 
+const open_handle = kernel.open_handle;
+
 const max_wait_count = kernel.max_wait_count;
 
 const Event = kernel.sync.Event;
@@ -78,6 +80,43 @@ pub fn notify_object_extended(self: *@This(), blocked_threads: *LinkedList(Threa
 pub fn notify_object(self: *@This(), blocked_threads: *LinkedList(Thread), unblock_all: bool) void
 {
     self.notify_object_extended(blocked_threads, unblock_all, null);
+}
+
+pub fn add_active_thread(self: *@This(), thread: *Thread, start: bool) void
+{
+    if (thread.type == .async_task) return;
+
+    self.dispatch_spinlock.assert_locked();
+
+    if (thread.state.read_volatile() != .active) panic_raw("thread not active");
+    if (thread.executing.read_volatile()) panic_raw("thread executing");
+    if (thread.type != .normal) panic_raw("thread is not normal");
+    if (thread.item.list != null) panic_raw("thread is already in a queue");
+
+    if (thread.paused.read_volatile() and thread.terminatable_state.read_volatile() == .terminatable)
+    {
+        self.paused_threads.insert_at_start(&thread.item);
+    }
+    else
+    {
+        const effective_priority = self.get_thread_efective_priority(thread);
+
+        if (start) self.active_threads[@intCast(u64, effective_priority)].insert_at_start(&thread.item)
+        else self.active_threads[@intCast(u64, effective_priority)].insert_at_end(&thread.item);
+    }
+}
+
+pub fn get_thread_efective_priority(self: *@This(), thread: *Thread) i8
+{
+    self.dispatch_spinlock.assert_locked();
+
+    var priority: i8 = 0;
+    while (priority < thread.priority) : (priority += 1)
+    {
+        if (thread.blocked_thread_priorities[@intCast(u64, priority)] != 0) return priority;
+    }
+
+    return thread.priority;
 }
 
 pub const Thread = struct
@@ -265,7 +304,7 @@ pub const Process = struct
             var failed = false;
             if (!flags.contains(.idle))
             {
-                kernel_stack = kernel.process.address_space.standard_allocate(kernel_stack_size, Region.Flags.new_from_flag(.fixed));
+                kernel_stack = kernel.process.address_space.standard_allocate(kernel_stack_size, Region.Flags.from_flag(.fixed));
                 if (kernel_stack != 0)
                 {
                     if (userland)
@@ -323,6 +362,21 @@ pub const Process = struct
                 _ = kernel.scheduler.all_threads_mutex.acquire();
                 kernel.scheduler.all_threads.insert_at_start(&thread.all_item);
                 kernel.scheduler.all_threads_mutex.release();
+
+                _ = open_handle(Process, self, 0);
+                // log
+
+                if (thread.type == .normal)
+                {
+                    // add to the start of the active thread list
+                    kernel.scheduler.dispatch_spinlock.acquire();
+                    kernel.scheduler.add_active_thread(thread, true);
+                    kernel.scheduler.dispatch_spinlock.release();
+                }
+                else {} // idle and asynchronous threads dont need to be added to a scheduling list
+
+                // The thread may now be terminated at any moment
+                return thread;
             }
             else
             {
@@ -337,12 +391,6 @@ pub const Process = struct
             return null;
         }
 
-        _ = self;
-        _ = start_address;
-        _ = argument1;
-        _ = flags;
-        _ = argument2;
-        TODO();
     }
 
     pub fn spawn_thread(self: *@This(), start_address: u64, argument1: u64, flags: Thread.Flags) ?*Thread

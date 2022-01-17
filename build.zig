@@ -839,7 +839,7 @@ const Debug = struct
     fn build(given_step: *Step) !void
     {
         const self = @fieldParentPtr(Self, "step", given_step);
-        const gdb_script = std.fmt.comptimePrint(comptime
+        const gdb_script = comptimePrint(comptime
                 \\set disassembly-flavor intel
                 \\symbol-file {s}
                 \\

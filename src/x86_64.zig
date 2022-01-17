@@ -40,15 +40,15 @@ pub fn handle_page_fault(self: *@This(), fault_address: u64, flags: memory.Handl
         if (virtual_address >= low_memory_map_start and virtual_address < low_memory_map_start + low_memory_limit and for_supervisor)
         {
             const physical_address = virtual_address - low_memory_map_start;
-            const map_page_flags = memory.MapPageFlags.new_from_flag(.commit_tables_now);
+            const map_page_flags = memory.MapPageFlags.from_flag(.commit_tables_now);
             _ = self.map_page(&kernel.process.address_space, physical_address, virtual_address, map_page_flags);
             return true;
         }
         else if (virtual_address >= core_memory_region_start and virtual_address < core_memory_region_start + core_memory_region_count * @sizeOf(memory.Region) and for_supervisor)
         {
-            const physical_allocation_flags = memory.Physical.Flags.new_from_flag(.zeroed);
+            const physical_allocation_flags = memory.Physical.Flags.from_flag(.zeroed);
             const physical_address = kernel.physical_allocator.allocate_with_flags(physical_allocation_flags);
-            const map_page_flags = memory.MapPageFlags.new_from_flag(.commit_tables_now);
+            const map_page_flags = memory.MapPageFlags.from_flag(.commit_tables_now);
             _ = self.map_page(&kernel.process.address_space, physical_address, virtual_address, map_page_flags);
             return true;
         }
@@ -212,15 +212,51 @@ pub fn translate_address(self: *@This(), virtual_address: u64, write_access: boo
 
 pub fn initialize_thread(kernel_stack: u64, kernel_stack_size: u64, thread: *Thread, start_address: u64, argument1: u64, argument2: u64, userland: bool, user_stack: u64, user_stack_size: u64) *Interrupt.Context
 {
-    _ = kernel_stack;
-    _ = kernel_stack_size;
-    _ = thread;
-    _ = start_address;
-    _ =argument1;
-    _=argument2;
-    _= userland;
-    _= user_stack;
-    _ = user_stack_size;
+    const thread_kernel_stack = kernel_stack + kernel_stack_size - 8;
+    const context = @intToPtr(*Interrupt.Context, thread_kernel_stack - @sizeOf(Interrupt.Context));
+    thread.kernel_stack = thread_kernel_stack;
+
+    // Terminate the thread when the outermost function exists
+    @intToPtr(*u64, thread_kernel_stack).* = @ptrToInt(_thread_terminate);
+
+    context.fx_save[32] = 0x80;
+    context.fx_save[33] = 0x1f;
+
+    if (userland)
+    {
+        context.cs = 0x5b;
+        context.ds = 0x63;
+        context.ss = 0x63;
+    }
+    else
+    {
+        context.cs = 0x48;
+        context.ds = 0x50;
+        context.ss = 0x50;
+    }
+
+    context._check = 0x123456789ABCDEF; // stack corruption detection
+    context.flags = 1 << 9; // interrupt flag
+    context.rip = start_address;
+    context.rsp = user_stack + user_stack_size - 8;
+    context.rdi = argument1;
+    context.rsi = argument2;
+
+    return context;
+}
+
+pub fn _thread_terminate() callconv(.Naked) noreturn
+{
+    asm volatile(
+        \\.intel_syntax noprefix
+        \\sub rsp, 8
+        \\jmp thread_terminate
+    );
+    unreachable;
+}
+
+export fn thread_terminate() callconv(.C) void
+{
     TODO();
 }
 
@@ -245,7 +281,7 @@ pub fn memory_init() void
 
     _ = kernel.core.address_space.reserve_mutex.acquire();
     defer kernel.core.address_space.reserve_mutex.release();
-    const kernel_address_space_L1_flags = memory.Region.Flags.new(.{ .normal, .no_commit_tracking, .fixed });
+    const kernel_address_space_L1_flags = memory.Region.Flags.from_flags(.{ .normal, .no_commit_tracking, .fixed });
     const kernel_address_space_L1 = @intToPtr([*]u8, kernel.core.address_space.reserve(AddressSpace.L1_commit_size, kernel_address_space_L1_flags).?.descriptor.base_address);
     kernel.process.address_space.arch.commit.L1 = kernel_address_space_L1;
 }
@@ -498,7 +534,7 @@ pub const AddressSpace = struct
         {
             if (flags.contains(.no_new_tables)) panic_raw("no new tables flag set but a table was missing\n");
 
-            const physical_allocation_flags = memory.Physical.Flags.new_from_flag(.lock_acquired);
+            const physical_allocation_flags = memory.Physical.Flags.from_flag(.lock_acquired);
             page_tables[level_index].ptr[index] = kernel.physical_allocator.allocate_with_flags(physical_allocation_flags) | 0b111;
             const previous_level_index = level_index - 1;
             const previous_index = indices[previous_level_index];
@@ -1144,7 +1180,7 @@ export fn interrupt_handler(context: *Interrupt.Context) callconv(.C) void
 
                     if (!kernel.arch.handle_page_fault(context.cr2,
                             blk: {
-                                var flags = memory.HandlePageFaultFlags.new(.{.for_supervisor});
+                                var flags = memory.HandlePageFaultFlags.from_flags(.{.for_supervisor});
                                 if (context.error_code & 2 != 0)
                                 {
                                     flags = flags.or_flag(.write);

@@ -13,6 +13,8 @@ pub var process: Scheduler.Process = undefined;
 pub var core: Core = undefined;
 pub var physical_allocator: memory.Physical.Allocator = undefined;
 pub var active_session_manager: cache.ActiveSession.Manager = undefined;
+pub var global_data_region: *memory.SharedRegion = undefined;
+pub var global_data: *GlobalData = undefined;
 
 pub const memory = @import("memory.zig");
 pub const Scheduler = @import("scheduler.zig");
@@ -119,7 +121,7 @@ pub fn Bitflag(comptime EnumT: type) type
 
         bits: IntType,
 
-        pub fn new(flags: anytype) callconv(.Inline) @This()
+        pub fn from_flags(flags: anytype) callconv(.Inline) @This()
         {
             const flags_type = @TypeOf(flags);
             const result = comptime blk:
@@ -141,7 +143,12 @@ pub fn Bitflag(comptime EnumT: type) type
             return @This() { .bits = result };
         }
 
-        pub fn new_from_flag(comptime flag: EnumT) callconv(.Inline) @This()
+        pub fn from_bits(bits: IntType) @This()
+        {
+            return @This() { .bits = bits };
+        }
+
+        pub fn from_flag(comptime flag: EnumT) callconv(.Inline) @This()
         {
             const bits = 1 << @enumToInt(flag);
             return @This() { .bits = bits };
@@ -217,7 +224,7 @@ pub const Bitset = struct
     {
         self.single_usage.len = (count + 31) & ~@as(u64, 31);
         self.group_usage.len = self.single_usage.len / group_size + 1;
-        self.single_usage.ptr = @intToPtr([*]u32, kernel.process.address_space.standard_allocate((self.single_usage.len >> 3) + (self.group_usage.len * 2), if (map_all) memory.Region.Flags.new_from_flag(.fixed) else memory.Region.Flags.empty()));
+        self.single_usage.ptr = @intToPtr([*]u32, kernel.process.address_space.standard_allocate((self.single_usage.len >> 3) + (self.group_usage.len * 2), if (map_all) memory.Region.Flags.from_flag(.fixed) else memory.Region.Flags.empty()));
         self.group_usage.ptr = @intToPtr([*]u16, @ptrToInt(self.single_usage.ptr) + ((self.single_usage.len >> 4) * @sizeOf(u16)));
     }
 
@@ -1040,6 +1047,47 @@ pub fn clamp(comptime Int: type, low: Int, high: Int, integer: Int) Int
     if (integer > low) return high;
     return integer;
 }
+
+pub fn open_handle(comptime T: type, object: *T, flags: u32) bool
+{
+    _ = flags;
+    var had_no_handles = false;
+    var failed = false;
+    
+    switch (T)
+    {
+        Scheduler.Process =>
+        {
+            had_no_handles = 0 == object.handle_count.atomic_fetch_add(1);
+        },
+        memory.SharedRegion =>
+        {
+            _ = object.mutex.acquire();
+            if (object.handle_count.read_volatile() == 0) had_no_handles = true
+            else object.handle_count.increment();
+            object.mutex.release();
+        },
+        else => unreachable,
+    }
+
+    if (had_no_handles) panic_raw("object had no handles");
+
+    return !failed;
+}
+
+pub const GlobalData = struct 
+{
+    click_chain_timeout_ms: Volatile(i32),
+    UI_scale: Volatile(f32),
+    swap_left_and_right_buttons: Volatile(bool),
+    show_cursor_shadow: Volatile(bool),
+    use_smart_quotes: Volatile(bool),
+    enable_hover_state: Volatile(bool),
+    animation_time_multiplier: Volatile(f32),
+    scheduler_time_ms: Volatile(u64),
+    scheduler_time_offset: Volatile(u64),
+    keyboard_layout: Volatile(u16),
+};
 
 var kernel_panic_buffer: [0x4000]u8 = undefined;
 
