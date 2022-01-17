@@ -678,6 +678,37 @@ pub const AddressSpace = struct
         // fail
         TODO();
     }
+
+    pub fn map_physical(self: *@This(), asked_offset: u64, asked_byte_count: u64, flags: Region.Flags) u64
+    {
+        const offset2 = asked_offset & (page_size - 1);
+        const offset = asked_offset - offset2;
+        const byte_count= asked_byte_count + @as(u64, if (offset2 != 0) page_size else 0);
+
+        const region = blk:
+        {
+            _ = self.reserve_mutex.acquire();
+            defer self.reserve_mutex.release();
+
+            if (self.reserve(byte_count, flags.or_flag(.physical).or_flag(.fixed))) |result|
+            {
+                result.data.u.physical.offset = offset;
+                break :blk result;
+            }
+            else
+            {
+                return 0;
+            }
+        };
+
+        var page: u64 = 0;
+        while (page < region.descriptor.page_count) : (page += 1)
+        {
+            _ = self.handle_page_fault(region.descriptor.base_address + page * page_size, HandlePageFaultFlags.empty());
+        }
+
+        return region.descriptor.base_address + offset2;
+    }
 };
 
 
@@ -1412,6 +1443,38 @@ pub const Heap = struct
     const large_allocation_threshold = 32768;
 };
 
+
+pub fn fault_range(address: u64, byte_count: u64, flags: HandlePageFaultFlags) bool
+{
+    const start = address & ~@as(u64, page_size - 1);
+    const end = (address + byte_count - 1) & ~@as(u64, page_size - 1);
+
+    var page = start;
+    while (page <= end) : (page += page_size)
+    {
+        if (!kernel.arch.handle_page_fault(page, flags)) return false;
+    }
+
+    return true;
+}
+
+pub fn zero_page_thread() callconv(.C) void
+{
+    TODO();
+}
+
+pub fn balance_thread() callconv(.C) void
+{
+    TODO();
+}
+
+pub fn object_cache_trim_thread() callconv(.C) void
+{
+    TODO();
+}
+
+pub const shared_entry_present = 1;
+
 pub fn init() void
 {
     // Initialize the core and the kernel address spaces
@@ -1471,34 +1534,3 @@ pub fn init() void
         _ = fault_range(@ptrToInt(kernel.global_data), @sizeOf(GlobalData), HandlePageFaultFlags.from_flag(.for_supervisor));
     }
 }
-
-pub fn fault_range(address: u64, byte_count: u64, flags: HandlePageFaultFlags) bool
-{
-    const start = address & ~@as(u64, page_size - 1);
-    const end = (address + byte_count - 1) & ~@as(u64, page_size - 1);
-
-    var page = start;
-    while (page <= end) : (page += page_size)
-    {
-        if (!kernel.arch.handle_page_fault(page, flags)) return false;
-    }
-
-    return true;
-}
-
-pub fn zero_page_thread() callconv(.C) void
-{
-    TODO();
-}
-
-pub fn balance_thread() callconv(.C) void
-{
-    TODO();
-}
-
-pub fn object_cache_trim_thread() callconv(.C) void
-{
-    TODO();
-}
-
-pub const shared_entry_present = 1;

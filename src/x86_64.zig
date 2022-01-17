@@ -6,12 +6,15 @@ const unused_delay = Port(0x0080);
 
 const TODO = kernel.TODO;
 const panic_raw = kernel.panic_raw;
+const sum_bytes = kernel.sum_bytes;
 
 const memory = kernel.memory;
 
 const Thread = kernel.Scheduler.Thread;
 
 const Mutex = kernel.sync.Mutex;
+
+const RootSystemDescriptorPointer = kernel.ACPI.RootSystemDescriptorPointer;
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -258,6 +261,56 @@ pub fn _thread_terminate() callconv(.Naked) noreturn
 export fn thread_terminate() callconv(.C) void
 {
     TODO();
+}
+
+pub const CPU = struct
+{
+    processor_ID: u8,
+    kernel_processor_ID: u8,
+    APIC_ID: u8,
+    boot_processor: bool,
+    kernel_stack: *align(1) u64,
+    local_storage: *LocalStorage,
+};
+
+pub fn find_RSDP() u64
+{
+    const UEFI_RSDP = @intToPtr(*u64, low_memory_map_start + bootloader_information_offset + 0x7fe8).*;
+    if (UEFI_RSDP != 0) return UEFI_RSDP;
+
+    var search_regions: [2]memory.Region.Descriptor = undefined;
+    search_regions[0].base_address = (@as(u64, @intToPtr([*]u16, low_memory_map_start)[0x40e]) << 4) + low_memory_map_start;
+    search_regions[0].page_count = 0x400;
+    search_regions[1].base_address = 0xe0000 + low_memory_map_start;
+    search_regions[1].page_count = 0x20000;
+
+    for (search_regions) |search_region|
+    {
+        var address = search_region.base_address;
+        while (address < search_region.base_address + search_region.page_count) : (address += 16)
+        {
+            const rsdp = @intToPtr(*RootSystemDescriptorPointer, address);
+
+            if (rsdp.signature != RootSystemDescriptorPointer.signature)
+            {
+                continue;
+            }
+
+            if (rsdp.revision == 0)
+            {
+                if (sum_bytes(@ptrCast([*]u8, rsdp)[0..20]) != 0) continue;
+
+                return @ptrToInt(rsdp) - low_memory_map_start;
+            }
+            else if (rsdp.revision == 2)
+            {
+                if (sum_bytes(@ptrCast([*]u8, rsdp)[0..@sizeOf(RootSystemDescriptorPointer)]) != 0) continue;
+                return @ptrToInt(rsdp) - low_memory_map_start;
+            }
+        }
+    }
+
+    return 0;
 }
 
 /// Architecture-specific memory initialization
@@ -1316,10 +1369,6 @@ pub const LocalStorage = struct
     }
 };
 
-pub const CPU = struct
-{
-};
-
 pub fn get_current_thread() callconv(.Inline) ?*Thread
 {
     return asm volatile(
@@ -1514,3 +1563,9 @@ pub const PhysicalMemory = struct
         self.original_page_count = physical_memory_region_ptr[self.regions.len].page_count;
     }
 };
+
+pub fn init() void
+{
+    kernel.acpi.parse_tables();
+    TODO();
+}

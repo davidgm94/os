@@ -16,10 +16,13 @@ pub var active_session_manager: cache.ActiveSession.Manager = undefined;
 pub var global_data_region: *memory.SharedRegion = undefined;
 pub var global_data: *GlobalData = undefined;
 
+pub var acpi: ACPI = undefined;
+
 pub const memory = @import("memory.zig");
 pub const Scheduler = @import("scheduler.zig");
 pub const sync = @import("sync.zig");
 pub const cache = @import("cache.zig");
+pub const ACPI = @import("acpi.zig");
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -1075,6 +1078,16 @@ pub fn open_handle(comptime T: type, object: *T, flags: u32) bool
     return !failed;
 }
 
+pub fn create_thread(start_address: u64, argument: u64) bool
+{
+    return kernel.process.spawn_thread_no_flags(start_address, argument) != null;
+}
+
+pub fn create_thread_noargs(start_address: u64) bool
+{
+    return create_thread(start_address, 0);
+}
+
 pub const GlobalData = struct 
 {
     click_chain_timeout_ms: Volatile(i32),
@@ -1088,6 +1101,19 @@ pub const GlobalData = struct
     scheduler_time_offset: Volatile(u64),
     keyboard_layout: Volatile(u16),
 };
+
+pub fn sum_bytes(bytes: []const u8) u8
+{
+    if (bytes.len == 0) return 0;
+
+    var total: u64 = 0;
+    for (bytes) |byte|
+    {
+        total += byte;
+    }
+
+    return @truncate(u8, total);
+}
 
 var kernel_panic_buffer: [0x4000]u8 = undefined;
 
@@ -1113,9 +1139,16 @@ pub fn TODO() noreturn
     panic_raw("To be implemented\n");
 }
 
+pub fn main_thread() callconv(.C) void
+{
+    TODO();
+}
+
 export fn init() callconv(.C) void
 {
     kernel.process.register(.kernel);
     kernel.memory.init();
+    _ = create_thread_noargs(@ptrToInt(main_thread));
+    kernel.Arch.init();
     TODO();
 }

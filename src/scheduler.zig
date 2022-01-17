@@ -397,8 +397,12 @@ pub const Process = struct
     {
         return self.spawn_thread_extended(start_address, argument1, flags, 0);
     }
-};
 
+    pub fn spawn_thread_no_flags(self: *@This(), start_address: u64, argument1: u64) ?*Thread
+    {
+        return self.spawn_thread(start_address, argument1, Thread.Flags.empty());
+    }
+};
 
 pub const AsyncTask = struct
 {
