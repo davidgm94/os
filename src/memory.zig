@@ -57,6 +57,14 @@ pub const MapPageFlags = Bitflag(enum(u32)
     }
 );
 
+pub const UnmapPagesFlags = Bitflag(enum(u32)
+    {
+        free = 0,
+        free_copied = 1,
+        balance_file = 2,
+    }
+);
+
 pub const SharedRegion = struct
 {
     size: u64,
@@ -304,7 +312,8 @@ pub const AddressSpace = struct
 
         if (region.flags.contains(.physical))
         {
-            TODO();
+            _ = kernel.arch.map_page(self, region.data.u.physical.offset + address - region.descriptor.base_address, address, map_page_flags);
+            return true;
         }
         else if (region.flags.contains(.shared))
         {
@@ -509,9 +518,49 @@ pub const AddressSpace = struct
 
     pub fn unreserve(self: *@This(), region_to_remove: *Region, unmap_pages: bool) void
     {
-        _ = self;
-        _ = region_to_remove;
-        _ = unmap_pages;
+        self.unreserve_extended(region_to_remove, unmap_pages, false);
+    }
+
+    pub fn unreserve_extended(self: *@This(), region_to_remove: *Region, unmap_pages: bool, guard_region: bool) void
+    {
+        self.reserve_mutex.assert_locked();
+
+        if (kernel.physical_allocator.next_region_to_balance == region_to_remove)
+        {
+            // if the balance thread paused while balancing this region, switch to the next region
+            kernel.physical_allocator.next_region_to_balance = if (region_to_remove.u.item.u.non_guard.next) |next_item| next_item.value else null;
+            kernel.physical_allocator.balance_resume_position = 0;
+        }
+
+        if (region_to_remove.flags.contains(.normal))
+        {
+            if (region_to_remove.data.u.normal.guard_before) |guard_before| self.unreserve_extended(guard_before, false, true);
+            if (region_to_remove.data.u.normal.guard_after) |guard_after| self.unreserve_extended(guard_after, false, true);
+        }
+        else if (region_to_remove.flags.contains(.guard) and !guard_region)
+        {
+            // you can't free a guard region
+            // @TODO: error
+            return;
+        }
+
+        if (region_to_remove.u.item.u.non_guard.list != null and !guard_region)
+        {
+            region_to_remove.u.item.u.non_guard.remove_from_list();
+        }
+
+        if (unmap_pages) kernel.arch.unmap_pages(self, region_to_remove.descriptor.base_address, region_to_remove.descriptor.page_count, UnmapPagesFlags.empty());
+
+        self.reserve_count += region_to_remove.descriptor.page_count;
+
+        if (self == &kernel.core.address_space)
+        {
+            TODO();
+        }
+        else
+        {
+            TODO();
+        }
         TODO();
     }
 
@@ -642,11 +691,56 @@ pub const AddressSpace = struct
 
     pub fn free_extended(self: *@This(), address: u64, expected_size: u64, user_only: bool) bool
     {
-        _ = self;
-        _ = address;
-        _ = expected_size;
-        _ = user_only;
-        TODO();
+        {
+            _ = self.reserve_mutex.acquire();
+            defer self.reserve_mutex.release();
+
+            if (self.find_region(address)) |region|
+            {
+                if (user_only and !region.flags.contains(.user)) return false;
+                if (!region.data.pin.take_extended(WriterLock.exclusive, true)) return false;
+                if (region.descriptor.base_address != address and !region.flags.contains(.physical)) return false;
+                if (expected_size != 0 and (expected_size + page_size - 1) / page_size != region.descriptor.page_count) return false;
+
+                var unmap_pages = true;
+
+                if (region.flags.contains(.normal))
+                {
+                    TODO();
+                }
+                else if (region.flags.contains(.shared))
+                {
+                    TODO();
+                }
+                else if (region.flags.contains(.file))
+                {
+                    TODO();
+                }
+                else if (region.flags.contains(.physical))
+                {
+                    // do nothing
+                }
+                else if (region.flags.contains(.guard))
+                {
+                    return false;
+                }
+                else
+                {
+                    panic_raw("unsupported region type\n");
+                }
+
+                self.unreserve(region, unmap_pages);
+            }
+            else
+            {
+                return false;
+            }
+        }
+
+        // @TODO: handle this in their if block
+        //if (sharedRegionToFree) CloseHandleToObject(sharedRegionToFree, KERNEL_OBJECT_SHMEM);
+        //if (nodeToFree && fileHandleFlags) CloseHandleToObject(nodeToFree, KERNEL_OBJECT_NODE, fileHandleFlags);
+        return true;
     }
 
     pub fn map_shared(self: *@This(), shared_region: *SharedRegion, offset: u64, byte_count: u64) u64

@@ -690,6 +690,18 @@ pub fn LinkedList(comptime T: type) type
             next: ?*Item,
             list: ?*Self,
             value: ?*T,
+
+            pub fn remove_from_list(self: *@This()) void
+            {
+                if (self.list) |list|
+                {
+                    list.remove(self);
+                }
+                else
+                {
+                    panic_raw("list null when trying to remove item");
+                }
+            }
         };
 
         pub fn insert_at_start(self: *@This(), item: *Item) void
@@ -740,7 +752,32 @@ pub fn LinkedList(comptime T: type) type
             self.validate();
         }
 
-        pub fn validate(self: *@This()) void
+        pub fn remove(self: *@This(), item: *Item) void
+        {
+            // @TODO: modchecks
+
+            if (item.list) |list|
+            {
+                if (list != self) panic_raw("item is in another list");
+            }
+            else
+            {
+                panic_raw("item is not in any list");
+            }
+
+            if (item.previous) |previous| previous.next = item.next
+            else self.first = item.next;
+
+            if (item.next) |next| next.previous = item.previous
+            else self.last = item.previous;
+
+            item.previous = null;
+            item.next = null;
+            self.count -= 1;
+            self.validate();
+        }
+
+        fn validate(self: *@This()) void
         {
             if (self.count == 0)
             {
@@ -809,7 +846,6 @@ pub fn LinkedList(comptime T: type) type
         }
     };
 }
-
 
 pub fn Pool(comptime T: type) type
 {

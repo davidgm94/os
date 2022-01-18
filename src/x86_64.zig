@@ -128,17 +128,17 @@ pub fn map_page(self: *@This(), space: *memory.AddressSpace, asked_physical_addr
     const physical_address = asked_physical_address & 0xFFFFFFFFFFFFF000;
     const virtual_address = asked_virtual_address & 0x0000FFFFFFFFF000;
 
-    const indices = PageTable.Level.compute_indices(virtual_address);
+    const indices = PageTables.compute_indices(virtual_address);
 
     if (space != &kernel.core.address_space and space != &kernel.process.address_space)
     {
-        const index_L4 = indices[@enumToInt(PageTable.Level.level4)];
+        const index_L4 = indices[@enumToInt(PageTables.Level.level4)];
         if (space.arch.commit.L3[index_L4 >> 3] & (@as(u8, 1) << @truncate(u3, index_L4 & 0b111)) == 0) panic_raw("attempt to map using uncommited L3 page table\n");
 
-        const index_L3 = indices[@enumToInt(PageTable.Level.level3)];
+        const index_L3 = indices[@enumToInt(PageTables.Level.level3)];
         if (space.arch.commit.L2[index_L3 >> 3] & (@as(u8, 1) << @truncate(u3, index_L3 & 0b111)) == 0) panic_raw("attempt to map using uncommited L3 page table\n");
 
-        const index_L2 = indices[@enumToInt(PageTable.Level.level2)];
+        const index_L2 = indices[@enumToInt(PageTables.Level.level2)];
         if (space.arch.commit.L1[index_L2 >> 3] & (@as(u8, 1) << @truncate(u3, index_L2 & 0b111)) == 0) panic_raw("attempt to map using uncommited L3 page table\n");
     }
 
@@ -146,7 +146,7 @@ pub fn map_page(self: *@This(), space: *memory.AddressSpace, asked_physical_addr
     space.arch.handle_missing_page_table(.level3, indices, flags);
     space.arch.handle_missing_page_table(.level2, indices, flags);
 
-    const old_value = page_tables[@enumToInt(PageTable.Level.level1)].ptr[indices[@enumToInt(PageTable.Level.level1)]];
+    const old_value = PageTables.read(.level1, indices);
     var value = physical_address | 0b11;
 
     if (flags.contains(.write_combining)) value |= 16;
@@ -184,7 +184,7 @@ pub fn map_page(self: *@This(), space: *memory.AddressSpace, asked_physical_addr
         }
     }
 
-    page_tables[@enumToInt(PageTable.Level.level1)].ptr[indices[@enumToInt(PageTable.Level.level1)]] = value;
+    PageTables.write(.level1, indices, value);
 
     invalidate_page(asked_virtual_address);
 
@@ -201,12 +201,12 @@ pub fn translate_address(self: *@This(), virtual_address: u64, write_access: boo
     // EsDefer(space->data.mutex.Release());
 
     const address = virtual_address & 0x0000FFFFFFFFF000;
-    const indices = PageTable.Level.compute_indices(address);
-    if (page_tables[@enumToInt(PageTable.Level.level4)].ptr[indices[@enumToInt(PageTable.Level.level4)]] & 1 == 0) return 0;
-    if (page_tables[@enumToInt(PageTable.Level.level3)].ptr[indices[@enumToInt(PageTable.Level.level3)]] & 1 == 0) return 0;
-    if (page_tables[@enumToInt(PageTable.Level.level2)].ptr[indices[@enumToInt(PageTable.Level.level2)]] & 1 == 0) return 0;
+    const indices = PageTables.compute_indices(address);
+    if (PageTables.read(.level4, indices) & 1 == 0) return 0;
+    if (PageTables.read(.level3, indices) & 1 == 0) return 0;
+    if (PageTables.read(.level2, indices) & 1 == 0) return 0;
 
-    const physical_address = page_tables[@enumToInt(PageTable.Level.level1)].ptr[indices[@enumToInt(PageTable.Level.level1)]];
+    const physical_address = PageTables.read(.level1, indices);
 
     if (write_access and physical_address & 2 == 0) return 0;
     if (physical_address & 1 == 0) return 0;
@@ -321,11 +321,11 @@ pub fn memory_init() void
     var page_i: u64 = 0x100;
     while (page_i < 0x200) : (page_i += 1)
     {
-        if (page_tables[@enumToInt(PageTable.Level.level4)].ptr[page_i] == 0)
+        if (PageTables.read_at_index(.level4, page_i) == 0)
         {
             const physical_address = kernel.physical_allocator.allocate_with_flags(memory.Physical.Flags.empty());
-            page_tables[@enumToInt(PageTable.Level.level4)].ptr[page_i] = physical_address | 0b11;
-            const page = @ptrCast([*]u8, &page_tables[@enumToInt(PageTable.Level.level3)].ptr[page_i * 0x200])[0..page_size];
+            PageTables.write_at_index(.level4, page_i, physical_address | 0b11);
+            const page = @intToPtr([*]u8, PageTables.take_address_of_element(.level3, page_i * 0x200))[0..page_size];
             std.mem.set(u8, page, 0);
         }
     }
@@ -492,6 +492,89 @@ pub fn populate_pageframes(self: *@This()) u64
     self.physical_memory.page_count = 0;
     return commit_limit;
 }
+pub fn unmap_pages(self: *@This(), space: *memory.AddressSpace, virtual_address_start: u64, page_count: u64, flags: memory.UnmapPagesFlags) void
+{
+    self.unmap_pages_extended(space, virtual_address_start, page_count, flags, 0, null);
+}
+
+pub fn unmap_pages_extended(self: *@This(), space: *memory.AddressSpace, virtual_address_start: u64, page_count: u64, flags: memory.UnmapPagesFlags, unmap_maximum: u64, resume_position: ?*u64) void
+{
+    // @TODO: refactor?
+    _ = self;
+
+    _ = kernel.physical_allocator.pageframe_mutex.acquire();
+    defer kernel.physical_allocator.pageframe_mutex.release();
+
+    _ = space.arch.mutex.acquire();
+    defer space.arch.mutex.release();
+
+    const table_base = virtual_address_start & 0x0000FFFFFFFFF000;
+    const start = if (resume_position) |rp| rp.* else 0;
+
+    var page = start;
+    while (page < page_count) : (page += 1)
+    {
+        const virtual_address = table_base + (page << page_bit_count);
+        const indices = PageTables.compute_indices(virtual_address);
+
+        comptime var level: PageTables.Level = .level4;
+        if (PageTables.read(level, indices) & 1 == 0)
+        {
+            page -= (virtual_address >> page_bit_count) % (1 << (entry_per_page_table_bit_count * @enumToInt(level)));
+            page += 1 << (entry_per_page_table_bit_count * @enumToInt(level));
+            continue;
+        }
+
+        level = .level3;
+        if (PageTables.read(level, indices) & 1 == 0)
+        {
+            page -= (virtual_address >> page_bit_count) % (1 << (entry_per_page_table_bit_count * @enumToInt(level)));
+            page += 1 << (entry_per_page_table_bit_count * @enumToInt(level));
+            continue;
+        }
+
+        level = .level2;
+        if (PageTables.read(level, indices) & 1 == 0)
+        {
+            page -= (virtual_address >> page_bit_count) % (1 << (entry_per_page_table_bit_count * @enumToInt(level)));
+            page += 1 << (entry_per_page_table_bit_count * @enumToInt(level));
+            continue;
+        }
+
+        const translation = PageTables.read(.level1, indices);
+
+        if (translation & 1 == 0) continue; // the page wasnt mapped
+
+        const copy = (translation & (1 << 9)) != 0;
+
+        if (copy and flags.contains(.balance_file) and !flags.contains(.free_copied)) continue; // Ignore copied pages when balancing file mappings
+
+        if ((~translation & (1 << 5) != 0) or (~translation & (1 << 6) != 0))
+        {
+            panic_raw("page found without accessed or dirty bit set");
+        }
+
+        PageTables.write(.level1, indices, 0);
+        const physical_address = translation & 0x0000FFFFFFFFF000;
+
+        if (flags.contains(.free) or (flags.contains(.free_copied) and copy))
+        {
+            kernel.physical_allocator.free_extended(physical_address, true, 1);
+        }
+        else if (flags.contains(.balance_file))
+        {
+            _ = unmap_maximum;
+            TODO();
+        }
+    }
+
+    invalidate_pages(virtual_address_start, page_count);
+}
+
+pub fn invalidate_pages(virtual_address_start: u64, page_count: u64) void
+{
+    _ = virtual_address_start; _ = page_count;
+}
 
 pub fn invalidate_page(page: u64) callconv(.Inline) void
 {
@@ -503,9 +586,39 @@ pub fn invalidate_page(page: u64) callconv(.Inline) void
     );
 }
 
-const PageTable = struct
+const PageTables = struct
 {
-    ptr: [*]volatile u64,
+    const levels = [4][*]volatile u64
+    {
+        @intToPtr([*]volatile u64, 0xFFFFFF0000000000),
+        @intToPtr([*]volatile u64, 0xFFFFFF7F80000000),
+        @intToPtr([*]volatile u64, 0xFFFFFF7FBFC00000),
+        @intToPtr([*]volatile u64, 0xFFFFFF7FBFDFE000),
+    };
+    fn read(level: Level, indices: Indices) u64
+    {
+        return read_at_index(level, indices[@enumToInt(level)]);
+    }
+
+    fn read_at_index(level: Level, index: u64) u64
+    {
+        return levels[@enumToInt(level)][index];
+    }
+
+    fn write(level: Level, indices: Indices, value: u64) void
+    {
+        write_at_index(level, indices[@enumToInt(level)], value);
+    }
+
+    fn write_at_index(level: Level, index: u64, value: u64) void
+    {
+        levels[@enumToInt(level)][index] = value;
+    }
+
+    fn take_address_of_element(level: Level, index: u64) u64
+    {
+        return @ptrToInt(&levels[@enumToInt(level)][index]);
+    }
 
     fn new(comptime address: u64) @This()
     {
@@ -515,7 +628,17 @@ const PageTable = struct
         };
     }
 
-    const Indices = [PageTable.Level.count]u64;
+    const Indices = [PageTables.Level.count]u64;
+    fn compute_indices(virtual_address: u64) callconv(.Inline) Indices
+    {
+        var indices: Indices = undefined;
+        inline for (comptime std.enums.values(PageTables.Level)) |value|
+        {
+            indices[@enumToInt(value)] = virtual_address >> (page_bit_count + entry_per_page_table_bit_count * @enumToInt(value));
+        }
+
+        return indices;
+    }
     const Level = enum(u8)
     {
         level1 = 0,
@@ -523,27 +646,9 @@ const PageTable = struct
         level3 = 2,
         level4 = 3,
 
-        fn compute_indices(virtual_address: u64) callconv(.Inline) Indices
-        {
-            var indices: Indices = undefined;
-            inline for (comptime std.enums.values(PageTable.Level)) |value|
-            {
-                indices[@enumToInt(value)] = virtual_address >> (page_bit_count + entry_per_page_table_bit_count * @enumToInt(value));
-            }
 
-            return indices;
-        }
-
-        const count = std.enums.values(PageTable.Level).len;
+        const count = std.enums.values(PageTables.Level).len;
     };
-};
-
-const page_tables = [PageTable.Level.count]PageTable
-{
-    PageTable.new(0xFFFFFF0000000000),
-    PageTable.new(0xFFFFFF7F80000000),
-    PageTable.new(0xFFFFFF7FBFC00000),
-    PageTable.new(0xFFFFFF7FBFDFE000),
 };
 
 pub fn fake_timer_interrupt() callconv(.Inline) void
@@ -576,23 +681,20 @@ pub const AddressSpace = struct
 
     var core_L1_commit: [(0xFFFF800200000000 - 0xFFFF800100000000) >> (entry_per_page_table_bit_count + page_bit_count + 3)]u8 = undefined;
 
-    fn handle_missing_page_table(self: *@This(), comptime level: PageTable.Level, indices: PageTable.Indices, flags: memory.MapPageFlags) callconv(.Inline) void
+    fn handle_missing_page_table(self: *@This(), comptime level: PageTables.Level, indices: PageTables.Indices, flags: memory.MapPageFlags) callconv(.Inline) void
     {
         assert(level != .level1);
 
-        const level_index = @enumToInt(level);
-        const index = indices[level_index];
-
-        if (page_tables[level_index].ptr[index] & 1 == 0)
+        if (PageTables.read(level, indices) & 1 == 0)
         {
             if (flags.contains(.no_new_tables)) panic_raw("no new tables flag set but a table was missing\n");
 
             const physical_allocation_flags = memory.Physical.Flags.from_flag(.lock_acquired);
-            page_tables[level_index].ptr[index] = kernel.physical_allocator.allocate_with_flags(physical_allocation_flags) | 0b111;
-            const previous_level_index = level_index - 1;
-            const previous_index = indices[previous_level_index];
+            const physical_allocation = kernel.physical_allocator.allocate_with_flags(physical_allocation_flags) | 0b111;
+            PageTables.write(level, indices, physical_allocation);
+            const previous_level = @intToEnum(PageTables.Level, @enumToInt(level) - 1);
 
-            const page = @ptrToInt(&page_tables[previous_level_index].ptr[previous_index]);
+            const page = PageTables.take_address_of_element(previous_level, indices[@enumToInt(previous_level)]);
             invalidate_page(page);
             const page_slice = @intToPtr([*]u8, page & ~@as(u64, page_size - 1))[0..page_size];
             std.mem.set(u8, page_slice, 0);
@@ -1563,6 +1665,7 @@ pub const PhysicalMemory = struct
         self.original_page_count = physical_memory_region_ptr[self.regions.len].page_count;
     }
 };
+
 
 pub fn init() void
 {
