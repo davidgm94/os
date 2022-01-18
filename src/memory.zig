@@ -559,7 +559,38 @@ pub const AddressSpace = struct
         }
         else
         {
-            TODO();
+            self.used_regions.remove(&region_to_remove.u.item.base);
+            const address = region_to_remove.descriptor.base_address;
+
+            {
+                if (self.free_region_base.find(address, .largest_below_or_equal)) |before|
+                {
+                    if (before.value.?.descriptor.base_address + before.value.?.descriptor.page_count * page_size == region_to_remove.descriptor.base_address)
+                    {
+                        region_to_remove.descriptor.base_address = before.value.?.descriptor.base_address;
+                        region_to_remove.descriptor.page_count += before.value.?.descriptor.page_count;
+                        self.free_region_base.remove(before);
+                        self.free_region_size.remove(&before.value.?.u.item.u.size);
+                        kernel.core.heap.free(@ptrToInt(before.value), @sizeOf(Region));
+                    }
+                }
+            }
+
+            {
+                if (self.free_region_base.find(address, .smallest_above_or_equal)) |after|
+                {
+                    if (region_to_remove.descriptor.base_address + region_to_remove.descriptor.page_count * page_size == after.value.?.descriptor.base_address)
+                    {
+                        region_to_remove.descriptor.page_count += after.value.?.descriptor.page_count;
+                        self.free_region_base.remove(after);
+                        self.free_region_size.remove(&after.value.?.u.item.u.size);
+                        kernel.core.heap.free(@ptrToInt(after.value), @sizeOf(Region));
+                    }
+                }
+            }
+            
+            self.free_region_base.insert(&region_to_remove.u.item.base, @ptrToInt(region_to_remove), region_to_remove.descriptor.base_address);
+            self.free_region_size.insert(&region_to_remove.u.item.u.size, @ptrToInt(region_to_remove), region_to_remove.descriptor.page_count);
         }
         TODO();
     }
