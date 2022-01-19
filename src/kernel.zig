@@ -46,9 +46,13 @@ pub fn Volatile(comptime T: type) type
         }
 
         /// Only supported for integer types
-        pub fn atomic_fetch_add(self: *@This(), value_to_be_added: T) callconv(.Inline) u64
+        pub fn atomic_fetch_add(self: *@This(), value: T) callconv(.Inline) u64
         {
-            return @atomicRmw(T, &self.value, .Add, value_to_be_added, .SeqCst);
+            return @atomicRmw(T, &self.value, .Add, value, .SeqCst);
+        }
+        pub fn atomic_fetch_sub(self: *@This(), value: T) callconv(.Inline) u64
+        {
+            return @atomicRmw(T, &self.value, .Sub, value, .SeqCst);
         }
         
         pub fn increment(self: *@This()) void

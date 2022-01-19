@@ -589,10 +589,9 @@ pub const AddressSpace = struct
                 }
             }
             
-            self.free_region_base.insert(&region_to_remove.u.item.base, @ptrToInt(region_to_remove), region_to_remove.descriptor.base_address);
-            self.free_region_size.insert(&region_to_remove.u.item.u.size, @ptrToInt(region_to_remove), region_to_remove.descriptor.page_count);
+            _ = self.free_region_base.insert(&region_to_remove.u.item.base, region_to_remove, region_to_remove.descriptor.base_address, .panic);
+            _ = self.free_region_size.insert(&region_to_remove.u.item.u.size, region_to_remove, region_to_remove.descriptor.page_count, .allow);
         }
-        TODO();
     }
 
     pub fn standard_allocate(self: *@This(), byte_count: u64, flags: Region.Flags) u64
@@ -1472,20 +1471,98 @@ pub const Heap = struct
     {
         if (self == &kernel.core.heap)
         {
-            return kernel.core.address_space.free(@ptrToInt(region));
+            _ = kernel.core.address_space.free(@ptrToInt(region));
         }
         else
         {
-            return kernel.process.address_space.free(@ptrToInt(region));
+            _ = kernel.process.address_space.free(@ptrToInt(region));
         }
     }
 
     pub fn free(self: *@This(), address: u64, expected_size: u64) void
     {
-        _ = self;
-        _ = address;
-        _ = expected_size;
-        TODO();
+        if (address == 0 and expected_size != 0) panic_raw("heap panic");
+        if (address == 0) return;
+
+        var region = @intToPtr(*HeapRegion, address).get_header().?;
+        if (region.used != HeapRegion.used_magic) panic_raw("heap panic");
+        if (expected_size != 0 and region.u2.allocation_size != expected_size) panic_raw("heap panic");
+
+        if (region.u1.size == 0)
+        {
+            _ = self.size.atomic_fetch_sub(region.u2.allocation_size);
+            self.free_call(region);
+            return;
+        }
+
+        {
+            const first_region = @intToPtr(*HeapRegion, @ptrToInt(region) - region.offset + 65536 - 32);
+            if (@intToPtr(**Heap, first_region.get_data()).* != self) panic_raw("heap panic");
+        }
+
+        _ = self.mutex.acquire();
+
+        self.validate();
+
+        region.used = 0;
+
+        if (region.offset < region.previous) panic_raw("heap panic");
+
+        self.allocation_count.decrement();
+        _ = self.size.atomic_fetch_sub(region.u1.size);
+
+        if (region.get_next()) |next_region|
+        {
+            if (next_region.used == 0)
+            {
+                next_region.remove_free();
+                region.u1.size += next_region.u1.size;
+                next_region.get_next().?.previous = region.u1.size;
+            }
+        }
+
+        if (region.get_previous()) |previous_region|
+        {
+            if (previous_region.used == 0)
+            {
+                previous_region.remove_free();
+
+                previous_region.u1.size += region.u1.size;
+                region.get_next().?.previous = previous_region.u1.size;
+                region = previous_region;
+            }
+        }
+
+        if (region.u1.size == 65536 - 32)
+        {
+            if (region.offset != 0) panic_raw("heap panic");
+
+            self.block_count.decrement();
+
+            if (!self.cannot_validate)
+            {
+                var found = false;
+                for (self.blocks[0..self.block_count.read_volatile() + 1]) |*heap_region|
+                {
+                    if (heap_region.* == region)
+                    {
+                        heap_region.* = self.blocks[self.block_count.read_volatile()];
+                        found = true;
+                        break;
+                    }
+                }
+
+                assert(found);
+            }
+
+            self.free_call(region);
+            self.mutex.release();
+            return;
+        }
+
+        self.add_free_region(region);
+        self.validate();
+        self.mutex.release();
     }
 
     fn validate(self: *@This()) void
