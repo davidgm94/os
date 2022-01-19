@@ -15,6 +15,7 @@ pub var physical_allocator: memory.Physical.Allocator = undefined;
 pub var active_session_manager: cache.ActiveSession.Manager = undefined;
 pub var global_data_region: *memory.SharedRegion = undefined;
 pub var global_data: *GlobalData = undefined;
+pub var random_number_generator: RandomNumberGenerator = undefined;
 
 pub var acpi: ACPI = undefined;
 
@@ -63,6 +64,11 @@ pub fn Volatile(comptime T: type) type
         pub fn decrement(self: *@This()) void
         {
             self.write_volatile(self.read_volatile() - 1);
+        }
+
+        pub fn atomic_compare_and_swap(self: *@This(), expected_value: T, new_value: T) ?T
+        {
+            return @cmpxchgStrong(@TypeOf(self.value), &self.value, expected_value, new_value, .SeqCst, .SeqCst);
         }
     };
 }
@@ -1155,6 +1161,49 @@ pub fn sum_bytes(bytes: []const u8) u8
     return @truncate(u8, total);
 }
 
+pub const RandomNumberGenerator = struct
+{
+    s: [4]u64,
+    lock: kernel.sync.Spinlock,
+
+    pub fn add_entropy(self: *@This(), n: u64) void
+    {
+        @setRuntimeSafety(false); // We are relying on overflow here
+        self.lock.acquire();
+        var x = n;
+
+        for (self.s) |*s|
+        {
+            x += 0x9E3779B97F4A7C15;
+            var result = x;
+            result = (result ^ (result >> 30)) * 0xBF58476D1CE4E5B9;
+            result = (result ^ (result >> 27)) * 0x94D049BB133111EB;
+            s.* ^= result ^ (result >> 31);
+        }
+        self.lock.release();
+    }
+
+    const Spinlock = struct
+    {
+        state: Volatile(u8),
+
+        fn acquire(self: *@This()) void
+        {
+            @fence(.SeqCst);
+            while (self.state.atomic_compare_and_swap(0, 1) == null) {}
+            @fence(.SeqCst);
+        }
+
+        fn release(self: *@This()) void
+        {
+            @fence(.SeqCst);
+            if (self.state.read_volatile() == 0) panic_raw("spinlock not acquired");
+            self.state.write_volatile(0);
+            @fence(.SeqCst);
+        }
+    };
+};
+
 var kernel_panic_buffer: [0x4000]u8 = undefined;
 
 pub fn panic(comptime format: []const u8, args: anytype) noreturn
@@ -1190,5 +1239,5 @@ export fn init() callconv(.C) void
     kernel.memory.init();
     _ = create_thread_noargs(@ptrToInt(main_thread));
     kernel.Arch.init();
-    TODO();
+    kernel.scheduler.started.write_volatile(true);
 }

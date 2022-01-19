@@ -58,6 +58,12 @@ pub const IO_APIC = struct
     id: u8,
     address: [*]volatile u32,
     GSI_base: u32,
+
+    pub fn read(self: *@This(), register: u32) u32
+    {
+        self.address[0] = register;
+        return self.address[4];
+    }
 };
 
 pub const InterruptOverride = struct
@@ -97,6 +103,12 @@ pub const DescriptorTable = extern struct
     }
 };
 
+pub const MultipleAPICDescriptionTable = extern struct
+{
+    LAPIC_address: u32,
+    flags: u32,
+};
+
 pub fn parse_tables(self: *@This()) void
 {
     var is_XSDT = false;
@@ -129,7 +141,9 @@ pub fn parse_tables(self: *@This()) void
 
     const table_list_address = @ptrToInt(sdt) + DescriptorTable.header_length;
 
+    var found_madt = false;
     var i: u64 = 0;
+
     while (i < table_count) : (i += 1)
     {
         const address =
@@ -142,7 +156,84 @@ pub fn parse_tables(self: *@This()) void
         {
             MADT_signature =>
             {
-                TODO();
+                const madt_header = @intToPtr(*align(1) DescriptorTable, kernel.process.address_space.map_physical(address, header.length, Region.Flags.empty()));
+                madt_header.check();
+
+                if (@intToPtr(?*align(1) MultipleAPICDescriptionTable, @ptrToInt(madt_header) + DescriptorTable.header_length)) |madt|
+                {
+                    found_madt = true;
+
+                    const start_length = madt_header.length - DescriptorTable.header_length - @sizeOf(MultipleAPICDescriptionTable);
+                    var length = start_length;
+                    var madt_bytes = @intToPtr([*]u8, @ptrToInt(madt) + @sizeOf(MultipleAPICDescriptionTable));
+                    self.LAPIC_address = @intToPtr([*]volatile u32, map_physical_memory(madt.LAPIC_address, 0x10000));
+                    _ = length;
+                    _ = madt_bytes;
+
+                    var entry_length: u8 = undefined;
+
+                    while (length != 0 and length <= start_length) :
+                        ({
+                            length -= entry_length;
+                            madt_bytes = @intToPtr([*]u8, @ptrToInt(madt_bytes) + entry_length);
+                        })
+                    {
+                        const entry_type = madt_bytes[0];
+                        entry_length = madt_bytes[1];
+
+                        switch (entry_type)
+                        {
+                            0 =>
+                            {
+                                if (madt_bytes[4] & 1 == 0) continue;
+                                const cpu = &self.processors[self.processor_count];
+                                cpu.processor_ID = madt_bytes[2];
+                                cpu.APIC_ID = madt_bytes[3];
+                                self.processor_count += 1;
+                            },
+                            1 =>
+                            {
+                                const madt_u32 = @ptrCast([*]align(1)u32, madt_bytes);
+                                var io_apic = &self.IO_APICs[self.IO_APIC_count];
+                                io_apic.id = madt_bytes[2];
+                                io_apic.address = @intToPtr([*]volatile u32, map_physical_memory(madt_u32[1], 0x10000));
+                                // make sure it's mapped
+                                _ = io_apic.read(0);
+                                io_apic.GSI_base = madt_u32[2];
+                                self.IO_APIC_count += 1;
+                            },
+                            2 =>
+                            {
+                                const madt_u32 = @ptrCast([*]align(1)u32, madt_bytes);
+                                const interrupt_override = &self.interrupt_overrides[self.interrupt_override_count];
+                                interrupt_override.source_IRQ = madt_bytes[3];
+                                interrupt_override.GSI_number = madt_u32[1];
+                                interrupt_override.active_low = madt_bytes[8] & 2 != 0;
+                                interrupt_override.level_triggered = madt_bytes[8] & 8 != 0;
+                                self.interrupt_override_count += 1;
+                            },
+                            4 =>
+                            {
+                                const nmi = &self.LAPIC_NMIs[self.LAPIC_NMI_count];
+                                nmi.processor = madt_bytes[2];
+                                nmi.lint_index = madt_bytes[5];
+                                nmi.active_low = madt_bytes[3] & 2 != 0;
+                                nmi.level_triggered = madt_bytes[3] & 8 != 0;
+                                self.LAPIC_NMI_count += 1;
+                            },
+                            else => {},
+                        }
+                    }
+
+                    if (self.processor_count > 256 or self.IO_APIC_count > 16 or self.interrupt_override_count > 256 or self.LAPIC_NMI_count > 32)
+                    {
+                        panic_raw("wrong numbers");
+                    }
+                }
+                else
+                {
+                    panic_raw("ACPI initialization - couldn't find the MADT table");
+                }
             },
             FADT_signature =>
             {
@@ -189,8 +280,14 @@ pub fn parse_tables(self: *@This()) void
             else => {},
         }
 
+
         _ = kernel.process.address_space.free(@ptrToInt(header));
     }
 
-    TODO();
+    if (!found_madt) panic_raw("MADT not found");
+}
+
+fn map_physical_memory(physical_address: u64, length: u64) u64
+{
+    return kernel.process.address_space.map_physical(physical_address, length, Region.Flags.from_flag(.not_cacheable));
 }

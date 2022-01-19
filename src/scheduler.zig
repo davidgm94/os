@@ -27,6 +27,7 @@ const Region = kernel.memory.Region;
 const InterruptContext = kernel.Arch.Interrupt.Context;
 const get_current_thread = kernel.Arch.get_current_thread;
 const page_size = kernel.Arch.page_size;
+const LocalStorage = kernel.Arch.LocalStorage;
 
 const std = @import("std");
 const Atomic = std.atomic.Atomic;
@@ -117,6 +118,22 @@ pub fn get_thread_efective_priority(self: *@This(), thread: *Thread) i8
     }
 
     return thread.priority;
+}
+
+pub fn async_task_thread() callconv(.C) void
+{
+    TODO();
+}
+
+const max_processors = 256;
+
+pub fn create_processor_threads(self: *@This(), local_storage: *LocalStorage) void
+{
+    local_storage.async_task_thread = kernel.process.spawn_thread(@ptrToInt(async_task_thread), 0, Thread.Flags.from_flag(.async_task));
+    local_storage.idle_thread = kernel.process.spawn_thread(0, 0, Thread.Flags.from_flag(.idle));
+    local_storage.current_thread = local_storage.idle_thread;
+    local_storage.processor_ID = @intCast(u32, @atomicRmw(@TypeOf(self.next_process_id), &self.next_process_id, .Add, 1, .SeqCst));
+    if (local_storage.processor_ID >= max_processors) panic_raw("maximum processor count reached");
 }
 
 pub const Thread = struct

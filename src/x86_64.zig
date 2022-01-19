@@ -1,5 +1,6 @@
 // Members of the arch-specific kernel structure
 physical_memory: PhysicalMemory,
+timestamp_ticks_per_ms: u64,
 
 const kernel = @import("kernel.zig");
 const unused_delay = Port(0x0080);
@@ -710,7 +711,7 @@ fn Port(comptime port: u16) type
     {
         const Self = @This();
 
-        pub fn read(comptime T: type) callconv(.Inline) T
+        fn read(comptime T: type) callconv(.Inline) T
         {
             return switch(T)
             {
@@ -721,7 +722,7 @@ fn Port(comptime port: u16) type
             };
         }
 
-        pub fn write(comptime T: type, value: T) callconv(.Inline) void
+        fn write(comptime T: type, value: T) callconv(.Inline) void
         {
             switch(T)
             {
@@ -732,7 +733,7 @@ fn Port(comptime port: u16) type
             }
         }
 
-        pub fn write_delayed(comptime T: type, value: T) callconv(.Inline) void
+        fn write_delayed(comptime T: type, value: T) callconv(.Inline) void
         {
             switch(T)
             {
@@ -830,6 +831,9 @@ export fn PIC_disable() callconv(.C) void
     PIC2_data.write_delayed(u8, 0xff);
 }
 
+pub const PIT_data = Port(0x40);
+pub const PIT_command = Port(0x43);
+
 pub const core_memory_region_start = 0xFFFF8001F0000000;
 pub const core_memory_region_count = (0xFFFF800200000000 - 0xFFFF8001F0000000) / @sizeOf(memory.Region);
 
@@ -886,6 +890,30 @@ export var pagingTCESupport: u32 linksection(".data") = 1;
 export var simdSSE3Support: u32 linksection(".data") = 1;
 export var simdSSSE3Support: u32 linksection(".data") = 1;
 
+export var global_descriptor_table: GDT.WithDescriptor align(0x10) linksection(".data") = GDT.WithDescriptor
+{
+    .gdt = GDT
+    {
+        .null_entry = GDT.Entry.new(0, 0, 0, 0),
+        .code_entry = GDT.Entry.new(0xffff, 0, 0xcf9a, 0),
+        .data_entry = GDT.Entry.new(0xffff, 0, 0xcf92, 0),
+        .code_entry16 = GDT.Entry.new(0xffff, 0, 0x0f9a, 0),
+        .data_entry16 = GDT.Entry.new(0xffff, 0, 0x0f92, 0),
+        .user_code = GDT.Entry.new(0xffff, 0, 0xcffa, 0),
+        .user_data = GDT.Entry.new(0xffff, 0, 0xcff2, 0),
+        .tss = TSS { .foo1 = 0x68, .foo2 = 0, .foo3 = 0xe9, .foo4 = 0, .foo5 = 0 },
+        .code_entry64 = GDT.Entry.new(0xffff, 0, 0xaf9a, 0),
+        .data_entry64 = GDT.Entry.new(0xffff, 0, 0xaf92, 0),
+        .user_code64 = GDT.Entry.new(0xffff, 0, 0xaffa, 0),
+        .user_data64 = GDT.Entry.new(0xffff, 0, 0xaff2, 0),
+        .user_code64c = GDT.Entry.new(0xffff, 0, 0xaffa, 0),
+    },
+    .descriptor = GDT.Descriptor
+    {
+        .limit = @sizeOf(GDT) - 1,
+        .base = 0x11000,
+    },
+};
 
 export fn _start() callconv(.Naked) noreturn
 {
@@ -940,7 +968,7 @@ export fn _start() callconv(.Naked) noreturn
         \\and rsp, ~0xf
         \\call init
 
-        \\jmp CPU_stop
+        \\jmp CPU_ready
     );
     unreachable;
 }
@@ -1147,10 +1175,11 @@ export fn CPU_setup_1() callconv(.Naked) void
     unreachable;
 }
 
-fn next_timer(timer: u64) callconv(.C) void
+fn next_timer(ms: u64) callconv(.C) void
 {
-    _ = timer;
-    unreachable;
+    while (!kernel.scheduler.started.read_volatile()) {}
+    LocalStorage.get().?.scheduler_ready = true;
+    LAPIC.next_timer(ms);
 }
 
 export fn CPU_ready() callconv(.C) noreturn
@@ -1165,7 +1194,6 @@ export fn CPU_idle() callconv(.C) noreturn
     while (true)
     {
         asm volatile(
-        \\.intel_syntax noprefix
         \\sti
         \\hlt
         );
@@ -1390,9 +1418,27 @@ export fn interrupt_handler(context: *Interrupt.Context) callconv(.C) void
         },
         else =>
         {
-            if (maybe_local_storage) |_|
+            if (maybe_local_storage) |local|
             {
-                TODO();
+                local.IRQ_switch_thread = false;
+
+                if (interrupt_number == timer_interrupt)
+                {
+                    local.IRQ_switch_thread = true;
+                }
+                else if (interrupt_number == yield_IPI)
+                {
+                    local.IRQ_switch_thread = true;
+                }
+                else if (interrupt_number >= IRQ_base and interrupt_number < IRQ_base + 0x20)
+                {
+                    TODO();
+                }
+
+                if (local.IRQ_switch_thread and kernel.scheduler.started.read_volatile() and local.scheduler_ready)
+                {
+                    TODO();
+                }
             }
         },
     }
@@ -1469,6 +1515,17 @@ pub const LocalStorage = struct
                 : [out] "=r" (-> ?*@This())
         );
     }
+
+    fn set(storage: *@This()) callconv(.Inline) void
+    {
+        asm volatile(
+            \\mov %[in], %%gs:0x0
+            :
+            : [in] "r" (storage)
+        );
+    }
+    //extern fn set(storage: *LocalStorage) callconv(.C) void;
+    //comptime asm
 };
 
 pub fn get_current_thread() callconv(.Inline) ?*Thread
@@ -1479,16 +1536,15 @@ pub fn get_current_thread() callconv(.Inline) ?*Thread
     );
 }
 
-pub fn read_timestamp() u64
+pub fn read_timestamp() callconv(.Inline) u64
 {
-    asm volatile(
-        \\.intel_syntax noprefix
-        \\rdtsc
-        \\shl rdx, 32
-        \\or rax, rdx
-        \\ret
+    var eax: u32 = undefined;
+    var edx: u32 = undefined;
+    asm volatile ("rdtsc"
+        : [_] "={eax}" (eax),
+          [_] "={edx}" (edx)
     );
-    unreachable;
+    return @as(u64, eax) + (@as(u64, edx) << 32);
 }
 
 pub const Interrupt = struct
@@ -1666,9 +1722,234 @@ pub const PhysicalMemory = struct
     }
 };
 
+const timer_interrupt = 0x40;
+const yield_IPI = 0x41;
+const IRQ_base = 0x50;
+
+const LAPIC = struct
+{
+    fn read(register: u32) u32
+    {
+        return kernel.acpi.LAPIC_address[register];
+    }
+
+    fn write(register: u32, value: u32) void
+    {
+        kernel.acpi.LAPIC_address[register] = value;
+    }
+
+    fn next_timer(ms: u64) void
+    {
+        LAPIC.write(0x320 >> 2, timer_interrupt | (1 << 17));
+        LAPIC.write(0x380 >> 2, @intCast(u32, kernel.acpi.LAPIC_ticks_per_ms * ms));
+    }
+
+    fn end_of_interrupt() void
+    {
+        LAPIC.write(0xb0 >> 2, 0);
+    }
+};
+
+const NewProcessorStorage = extern struct
+{
+    local: *LocalStorage,
+    gdt: u64,
+
+    fn allocate(cpu: *CPU) @This()
+    {
+        var storage: @This() = undefined;
+        storage.local = @intToPtr(*LocalStorage, kernel.core.fixed_heap.allocate(@sizeOf(LocalStorage), true));
+        const gdt_physical_address = kernel.physical_allocator.allocate_with_flags(memory.Physical.Flags.from_flag(.commit_now));
+        storage.gdt = kernel.process.address_space.map_physical(gdt_physical_address, page_size, memory.Region.Flags.empty());
+        storage.local.cpu = cpu;
+        cpu.local_storage = storage.local;
+        kernel.scheduler.create_processor_threads(storage.local);
+        cpu.kernel_processor_ID = @intCast(u8, storage.local.processor_ID);
+        return storage;
+    }
+};
+const GDT = packed struct
+{
+    null_entry: Entry,
+    code_entry: Entry,
+    data_entry: Entry,
+    code_entry16: Entry,
+    data_entry16: Entry,
+    user_code: Entry,
+    user_data: Entry,
+    tss: TSS,
+    code_entry64: Entry,
+    data_entry64: Entry,
+    user_code64: Entry,
+    user_data64: Entry,
+    user_code64c: Entry,
+
+    const Entry = packed struct
+    {
+        foo1: u32,
+        foo2: u8,
+        foo3: u16,
+        foo4: u8,
+
+        fn new(foo1: u32, foo2: u8, foo3: u16, foo4: u8) @This()
+        {
+            return @This()
+            {
+                .foo1 = foo1,
+                .foo2 = foo2,
+                .foo3 = foo3,
+                .foo4 = foo4,
+            };
+        }
+    };
+
+    const Descriptor = packed struct
+    {
+        limit: u16,
+        base: u64,
+    };
+
+    const WithDescriptor = packed struct
+    {
+        gdt: GDT,
+        descriptor: Descriptor,
+    };
+
+    fn load() callconv(.Inline) void
+    {
+        asm volatile(
+            \\lgdt %[gdt_descriptor]
+            :
+            : [gdt_descriptor] "*gdt_descriptor" (&global_descriptor_table.descriptor)
+        );
+    }
+
+    comptime
+    {
+        assert(@sizeOf(Entry) == 8);
+        assert(@sizeOf(TSS) == 16);
+        assert(@sizeOf(GDT) == @sizeOf(u64) * 14);
+        assert(@sizeOf(Descriptor) == 10);
+        assert(@offsetOf(GDT.WithDescriptor, "descriptor") == @sizeOf(GDT));
+        // This is false
+        //assert(@sizeOf(Complete) == @sizeOf(GDT) + @sizeOf(Descriptor));
+    }
+};
+
+const TSS = packed struct
+{
+    foo1: u32,
+    foo2: u8,
+    foo3: u16,
+    foo4: u8,
+    foo5: u64,
+
+    fn load(value: u16) callconv(.Inline) void
+    {
+        asm volatile(
+            \\ltr %[ts_selector]
+            :
+            : [ts_selector] "r" (value)
+        );
+    }
+};
+
+export fn setup_processor2(storage: *NewProcessorStorage) void
+{
+    // Setup the local interrupts for the current processor
+    for (kernel.acpi.LAPIC_NMIs[0..kernel.acpi.LAPIC_NMI_count]) |nmi|
+    {
+        if (nmi.processor == 0xff or nmi.processor == storage.local.cpu.?.processor_ID)
+        {
+            const register_index = (0x350 + @as(u32, nmi.lint_index << 4)) >> 2;
+            var value: u32 = 2 | (1 << 10);
+            if (nmi.active_low) value |= 1 << 13;
+            if (nmi.level_triggered) value |= 1 << 15;
+            LAPIC.write(register_index, value);
+        }
+    }
+
+    LAPIC.write(0x350 >> 2, LAPIC.read(0x350 >> 2) & ~@as(u32, 1 << 16));
+    LAPIC.write(0x360 >> 2, LAPIC.read(0x360 >> 2) & ~@as(u32, 1 << 16));
+    LAPIC.write(0x80 >> 2, 0);
+    if (LAPIC.read(0x30 >> 2) & 0x80000000 != 0) LAPIC.write(0x410 >> 2, 0);
+    LAPIC.end_of_interrupt();
+
+    // Configure the LAPIC timer
+    LAPIC.write(0x3e0 >> 2, 2);
+
+    // Create the processor local storage
+    LocalStorage.set(storage.local);
+
+    // Setup a GDT and TSS for the processor
+    const gdt = storage.gdt;
+    const bootstrap_GDT = @intToPtr(*align(1) u64, (@ptrToInt(&gdt_descriptor) + @sizeOf(u16))).*;
+    std.mem.copy(u8, @intToPtr([*]u8, gdt)[0..2048], @intToPtr([*]u8, bootstrap_GDT)[0..2048]);
+    const tss = gdt + 2048;
+    storage.local.cpu.?.kernel_stack = @intToPtr(*align(1) u64, tss + @sizeOf(u32));
+
+    const offset = 56;
+    const gdt_plus_offset = gdt + offset;
+    var tss_it = tss;
+    @intToPtr(*u16, gdt_plus_offset + 2).* = @truncate(u16, tss_it);
+    tss_it >>= 16;
+    @intToPtr(*u8, gdt_plus_offset + 4).* = @truncate(u8, tss_it);
+    tss_it >>= 8;
+    @intToPtr(*u8, gdt_plus_offset + 7).* = @truncate(u8, tss_it);
+    tss_it >>= 8;
+    @intToPtr(*u64, gdt_plus_offset + 8).* = tss_it;
+
+    const old_base = global_descriptor_table.descriptor.base;
+    global_descriptor_table.descriptor.base = gdt;
+    GDT.load();
+    global_descriptor_table.descriptor.base = old_base;
+    TSS.load(0x38);
+}
 
 pub fn init() void
 {
     kernel.acpi.parse_tables();
-    TODO();
+    const bootstrap_LAPIC_ID = @intCast(u8, LAPIC.read(0x20 >> 2) >> 24);
+    
+    const current_CPU = blk:
+    {
+        for (kernel.acpi.processors[0..kernel.acpi.processor_count]) |*processor|
+        {
+            if (processor.APIC_ID == bootstrap_LAPIC_ID)
+            {
+                processor.boot_processor = true;
+                break :blk processor;
+            }
+        }
+
+        panic_raw("could not find the bootstrap processor");
+    };
+
+    Interrupt.disable();
+    const start = read_timestamp();
+    LAPIC.write(0x380 >> 2, std.math.maxInt(u32));
+    // Wait 8 ms
+    {
+        var i: u8 = 0;
+        while (i < 8) : (i += 1)
+        {
+            PIT_command.write(u8, 0x30);
+            PIT_data.write(u8, 0xa9);
+            PIT_data.write(u8, 0x04);
+
+            while (true)
+            {
+                PIT_command.write(u8, 0xe2);
+                if (PIT_data.read(u8) & (1 << 7) != 0) break;
+            }
+        }
+    }
+
+    kernel.acpi.LAPIC_ticks_per_ms = (std.math.maxInt(u32) - LAPIC.read(0x390 >> 2)) >> 4;
+    kernel.random_number_generator.add_entropy(LAPIC.read(0x390 >> 2));
+    const end = read_timestamp();
+    kernel.arch.timestamp_ticks_per_ms = (end - start) >> 3;
+    Interrupt.enable();
+    var processor_storage = NewProcessorStorage.allocate(current_CPU);
+    setup_processor2(&processor_storage);
 }
