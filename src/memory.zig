@@ -833,6 +833,17 @@ pub const AddressSpace = struct
 
         return region.descriptor.base_address + offset2;
     }
+
+    pub fn open_reference(self: *@This()) void
+    {
+        if (self == &kernel.process.address_space) return;
+        if (self.reference_count.read_volatile() < 1) panic_raw("space has invalid reference count");
+
+        // @TODO: max processors macro 
+        if (self.reference_count.read_volatile() >= 256 + 1) panic_raw("space has too many references");
+
+        _ = self.reference_count.atomic_fetch_add(1);
+    }
 };
 
 

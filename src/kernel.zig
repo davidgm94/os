@@ -47,11 +47,11 @@ pub fn Volatile(comptime T: type) type
         }
 
         /// Only supported for integer types
-        pub fn atomic_fetch_add(self: *@This(), value: T) callconv(.Inline) u64
+        pub fn atomic_fetch_add(self: *@This(), value: T) callconv(.Inline) T
         {
             return @atomicRmw(T, &self.value, .Add, value, .SeqCst);
         }
-        pub fn atomic_fetch_sub(self: *@This(), value: T) callconv(.Inline) u64
+        pub fn atomic_fetch_sub(self: *@This(), value: T) callconv(.Inline) T
         {
             return @atomicRmw(T, &self.value, .Sub, value, .SeqCst);
         }
@@ -856,6 +856,61 @@ pub fn LinkedList(comptime T: type) type
         }
     };
 }
+
+pub const SimpleList = struct
+{
+    previous_or_last: ?*@This(),
+    next_or_first: ?*@This(),
+
+    pub fn insert(self: *@This(), item: *SimpleList, start: bool) void
+    {
+        if (item.previous_or_last != null or item.next_or_first != null)
+        {
+            panic_raw("bad links");
+        }
+
+        if (self.next_or_first == null and self.previous_or_last == null)
+        {
+            item.previous_or_last = self;
+            item.next_or_first = self;
+            self.next_or_first = item;
+            self.previous_or_last = item;
+        }
+        else if (start)
+        {
+            item.previous_or_last = self;
+            item.next_or_first = self.next_or_first;
+            self.next_or_first.?.previous_or_last = item;
+            self.next_or_first = item;
+        }
+        else
+        {
+            item.previous_or_last = self.previous_or_last;
+            item.next_or_first = self;
+            self.previous_or_last.?.next_or_first = item;
+            self.previous_or_last = item;
+        }
+    }
+
+    pub fn remove(self: *@This()) void
+    {
+        if (self.previous_or_last.next != self or self.next_or_first.previous != self) panic_raw("bad links");
+
+        if (self.previous_or_last == self.next_or_first)
+        {
+            self.next_or_first.?.next_or_first = null;
+            self.next_or_first.?.previous_or_last = null;
+        }
+        else
+        {
+            self.previous_or_last.?.next_or_first = self.next_or_first;
+            self.next_or_first.?.previous_or_last = self.previous_or_last;
+        }
+
+        self.previous_or_last = null;
+        self.next_or_first = null;
+    }
+};
 
 pub fn Pool(comptime T: type) type
 {

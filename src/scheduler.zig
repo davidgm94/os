@@ -1,6 +1,7 @@
 const kernel = @import("kernel.zig");
 
 
+const SimpleList = kernel.SimpleList;
 const Volatile = kernel.Volatile;
 const VolatilePointer = kernel.VolatilePointer;
 
@@ -24,7 +25,8 @@ const WriterLock = kernel.sync.WriterLock;
 const AddressSpace = kernel.memory.AddressSpace;
 const Region = kernel.memory.Region;
 
-const InterruptContext = kernel.Arch.Interrupt.Context;
+const interrupts = kernel.Arch.Interrupt;
+const InterruptContext = interrupts.Context;
 const get_current_thread = kernel.Arch.get_current_thread;
 const page_size = kernel.Arch.page_size;
 const LocalStorage = kernel.Arch.LocalStorage;
@@ -132,8 +134,157 @@ pub fn create_processor_threads(self: *@This(), local_storage: *LocalStorage) vo
     local_storage.async_task_thread = kernel.process.spawn_thread(@ptrToInt(async_task_thread), 0, Thread.Flags.from_flag(.async_task));
     local_storage.idle_thread = kernel.process.spawn_thread(0, 0, Thread.Flags.from_flag(.idle));
     local_storage.current_thread = local_storage.idle_thread;
-    local_storage.processor_ID = @intCast(u32, @atomicRmw(@TypeOf(self.next_process_id), &self.next_process_id, .Add, 1, .SeqCst));
+    local_storage.processor_ID = @intCast(u32, @atomicRmw(@TypeOf(self.next_processor_id), &self.next_processor_id, .Add, 1, .SeqCst));
     if (local_storage.processor_ID >= max_processors) panic_raw("maximum processor count reached");
+}
+
+pub fn thread_kill(task: *AsyncTask) void
+{
+    _ = task;
+    TODO();
+}
+
+pub fn yield(self: *@This(), context: *InterruptContext) void
+{
+    if (!self.started.read_volatile()) return;
+    if (LocalStorage.get()) |local|
+    {
+        if (!local.scheduler_ready) return;
+
+        if (local.processor_ID == 0)
+        {
+            self.time_ms = kernel.arch.get_time_ms();
+            kernel.global_data.scheduler_time_ms.write_volatile(self.time_ms);
+            self.active_timers_spinlock.acquire();
+            var timer_it = self.active_timers.first;
+
+            while (timer_it != null) : (timer_it = timer_it.?.next)
+            {
+                const timer = timer_it.?.value.?;
+
+                if (timer.trigger_time_ms <= self.time_ms)
+                {
+                    self.active_timers.remove(timer_it.?);
+                    _ = timer.event.set(false);
+
+                    _ = context;
+                    if (timer.callback != null)
+                    {
+                        TODO();
+                    }
+                }
+                else
+                {
+                    break;
+                }
+            }
+
+            self.active_timers_spinlock.release();
+        }
+        if (local.spinlock_count != 0) panic_raw("spinlocks acquired while attempting to yield");
+
+        interrupts.disable();
+        self.dispatch_spinlock.acquire();
+
+        if (self.dispatch_spinlock.interrupts_enabled.read_volatile()) panic_raw("interrupts were enabled when scheduler lock was acquired");
+
+        const current_thread = local.current_thread.?;
+        if (!current_thread.executing.read_volatile()) panic_raw("current thread marked as not executing");
+
+        const old_address_space: *AddressSpace = if (current_thread.temporary_address_space.ptr) |_| undefined else &current_thread.process.?.address_space;
+        current_thread.interrupt_context = context;
+        current_thread.executing.write_volatile(false);
+
+        const kill_thread = current_thread.terminatable_state.read_volatile() == .terminatable and current_thread.terminating.read_volatile();
+        const keep_thread_alive = current_thread.terminatable_state.read_volatile() == .user_block_request and current_thread.terminating.read_volatile();
+        _ = keep_thread_alive;
+        _ = old_address_space;
+
+        if (kill_thread)
+        {
+            current_thread.state.write_volatile(.terminated);
+            current_thread.kill_async_task.register(thread_kill);
+        }
+        else
+        {
+            switch (current_thread.state.read_volatile())
+            {
+                .waiting_mutex =>
+                {
+                    TODO();
+                },
+                .waiting_event =>
+                {
+                    TODO();
+                },
+                .waiting_writer_lock =>
+                {
+                    TODO();
+                },
+                else => {},
+            }
+        }
+
+        if (!kill_thread and current_thread.state.read_volatile() == .active)
+        {
+            switch (current_thread.type)
+            {
+                .normal =>
+                {
+                    TODO();
+                },
+                .idle, .async_task => {},
+            }
+        }
+
+        if (self.pick_thread(local)) |new_thread|
+        {
+            local.current_thread = new_thread;
+
+            if (new_thread.executing.read_volatile()) panic_raw("thread in active queue already executing");
+
+            new_thread.executing.write_volatile(true);
+            new_thread.executing_processor_ID = local.processor_ID;
+            new_thread.cpu_time_slices.increment();
+            if (new_thread.type == .idle) new_thread.process.?.idle_time_slices += 1
+            else new_thread.process.?.cpu_time_slices += 1;
+
+            const one_ms = 1;
+            kernel.Arch.next_timer(one_ms);
+
+            const new_context = new_thread.interrupt_context;
+            // @TODO: this may cause bugs!!!
+            const address_space: *AddressSpace = if (new_thread.temporary_address_space.ptr) |_| undefined else &new_thread.process.?.address_space;
+            address_space.open_reference();
+            kernel.Arch.switch_context(new_context, &address_space.arch, new_thread.kernel_stack, new_thread, old_address_space);
+        }
+        else
+        {
+            panic_raw("could not find a thread to execute");
+        }
+    }
+}
+
+pub fn pick_thread(self: *@This(), local: *LocalStorage) ?*Thread
+{
+    self.dispatch_spinlock.assert_locked();
+
+    if ((local.async_task_list.next_or_first != null or local.in_async_task) and local.async_task_thread.?.state.read_volatile() == .active)
+    {
+        return local.async_task_thread;
+    }
+
+    var thread_priority: u64 = 0;
+    while (thread_priority < Thread.priority_count) : (thread_priority += 1)
+    {
+        if (self.active_threads[thread_priority].first) |item|
+        {
+            item.remove_from_list();
+            return item.value;
+        }
+    }
+
+    return local.idle_thread;
 }
 
 pub const Thread = struct
@@ -261,7 +412,21 @@ pub const Process = struct
     handle_count: Volatile(u64),
     all_item: LinkedList(Process).Item,
 
+    crash_mutex: Mutex,
+    //...
+    all_threads_terminated: bool,
+    block_shutdown: bool,
     prevent_new_threads: bool,
+    exit_status: i32,
+    killed_event: Event,
+
+    executable_state: u8,
+    executable_start_request: bool,
+    executable_load_attempt_complete: Event,
+    executable_main_thread: ?*Thread,
+
+    cpu_time_slices: u64,
+    idle_time_slices: u64,
     
     pub const Type = enum
     {
@@ -423,8 +588,29 @@ pub const Process = struct
 
 pub const AsyncTask = struct
 {
+    item: SimpleList,
+    callback: ?Callback,
+
+    pub const Callback = fn (*@This()) void;
+
+    pub fn register(self: *@This(), callback: Callback) void
+    {
+        kernel.scheduler.async_task_spinlock.acquire();
+        if (self.callback == null)
+        {
+            self.callback = callback;
+            LocalStorage.get().?.async_task_list.insert(&self.item, false);
+        }
+        kernel.scheduler.async_task_spinlock.release();
+    }
 };
 
 pub const Timer = struct
 {
+    event: Event,
+    async_task: AsyncTask,
+    item: LinkedList(Timer).Item,
+    trigger_time_ms: u64,
+    callback: ?AsyncTask.Callback,
+    argument: u64,
 };

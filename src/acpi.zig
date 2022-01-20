@@ -28,7 +28,7 @@ PS2_controller_unavailable: bool,
 VGA_controller_unavailable: bool,
 century_register_index: u8,
 
-HPET_base_address: [*]volatile u64,
+HPET_base_address: ?[*]volatile u64,
 HPET_period: u64,
 
 const RSDP_signature = 0x2052545020445352;
@@ -262,16 +262,16 @@ pub fn parse_tables(self: *@This()) void
                     if (@intToPtr(?[*]volatile u64, kernel.process.address_space.map_physical(@ptrCast(*align(1) u64, &header_bytes[44]).*, 1024, Region.Flags.empty()))) |HPET_base_address|
                     {
                         self.HPET_base_address = HPET_base_address;
-                        self.HPET_base_address[2] |= 1; // start the main counter
+                        self.HPET_base_address.?[2] |= 1; // start the main counter
 
-                        self.HPET_period = self.HPET_base_address[0] >> 32;
+                        self.HPET_period = self.HPET_base_address.?[0] >> 32;
                         // @INFO: Just for logging
                         //const revision_ID = @truncate(u8, self.HPET_base_address[0]);
                         //const initial_count = self.HPET_base_address[30];
                     }
                     else
                     {
-                        panic_raw("failed to map HPET base addres\n");
+                        panic_raw("failed to map HPET base address\n");
                     }
                 }
 

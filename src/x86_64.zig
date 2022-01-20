@@ -1,13 +1,15 @@
 // Members of the arch-specific kernel structure
 physical_memory: PhysicalMemory,
 timestamp_ticks_per_ms: u64,
+timestamp_counter_synchronization_value: Volatile(u64),
 
 const kernel = @import("kernel.zig");
-const unused_delay = Port(0x0080);
 
+const SimpleList = kernel.SimpleList;
 const TODO = kernel.TODO;
 const panic_raw = kernel.panic_raw;
 const sum_bytes = kernel.sum_bytes;
+const Volatile = kernel.Volatile;
 
 const memory = kernel.memory;
 
@@ -26,6 +28,8 @@ pub const page_size = 0x1000;
 
 pub const entry_per_page_table_count = 512;
 pub const entry_per_page_table_bit_count = 9;
+
+const unused_delay = Port(0x0080);
 
 pub fn handle_page_fault(self: *@This(), fault_address: u64, flags: memory.HandlePageFaultFlags) bool
 {
@@ -570,6 +574,37 @@ pub fn unmap_pages_extended(self: *@This(), space: *memory.AddressSpace, virtual
     }
 
     invalidate_pages(virtual_address_start, page_count);
+}
+
+var get_time_from_PIT_ms_started = false;
+var get_time_from_PIT_ms_cumulative: u64 = 0;
+var get_time_from_PIT_ms_last: u64 = 0;
+pub fn get_time_from_PIT_ms() u64
+{
+    // @TODO: this is not working on real hardware but early delay ms is?
+    // askjdkjaskd
+    //
+    if (!get_time_from_PIT_ms_started)
+    {
+        TODO();
+    }
+    else
+    {
+        TODO();
+    }
+}
+
+pub fn get_time_ms(self: *@This()) u64
+{
+    self.timestamp_counter_synchronization_value.write_volatile(((self.timestamp_counter_synchronization_value.read_volatile() & 0x8000000000000000) ^ 0x8000000000000000) | read_timestamp());
+    if (kernel.acpi.HPET_base_address != null and kernel.acpi.HPET_period != 0)
+    {
+        const fs_to_ms = 1000000000000;
+        const reading: u128 = @ptrToInt(kernel.acpi.HPET_base_address.?);
+        return @intCast(u64, reading * kernel.acpi.HPET_period / fs_to_ms);
+    }
+
+    return get_time_from_PIT_ms();
 }
 
 pub fn invalidate_pages(virtual_address_start: u64, page_count: u64) void
@@ -1175,7 +1210,7 @@ export fn CPU_setup_1() callconv(.Naked) void
     unreachable;
 }
 
-fn next_timer(ms: u64) callconv(.C) void
+pub fn next_timer(ms: u64) callconv(.C) void
 {
     while (!kernel.scheduler.started.read_volatile()) {}
     LocalStorage.get().?.scheduler_ready = true;
@@ -1429,6 +1464,7 @@ export fn interrupt_handler(context: *Interrupt.Context) callconv(.C) void
                 else if (interrupt_number == yield_IPI)
                 {
                     local.IRQ_switch_thread = true;
+                    get_current_thread().?.received_yield_IPI.write_volatile(true);
                 }
                 else if (interrupt_number >= IRQ_base and interrupt_number < IRQ_base + 0x20)
                 {
@@ -1437,7 +1473,7 @@ export fn interrupt_handler(context: *Interrupt.Context) callconv(.C) void
 
                 if (local.IRQ_switch_thread and kernel.scheduler.started.read_volatile() and local.scheduler_ready)
                 {
-                    TODO();
+                    kernel.scheduler.yield(context);
                 }
             }
         },
@@ -1506,7 +1542,7 @@ pub const LocalStorage = struct
     processor_ID: u32,
     spinlock_count: u64,
     cpu: ?*CPU,
-    //async_task_list
+    async_task_list: SimpleList,
     //
     pub fn get() callconv(.Inline) ?*@This()
     {
@@ -1590,6 +1626,7 @@ pub const Interrupt = struct
                 kernel.panic_raw("context sanity check failed\n");
             }
         }
+
     };
 
     pub fn enable() callconv(.Inline) void
@@ -1853,6 +1890,20 @@ const TSS = packed struct
         );
     }
 };
+
+pub fn switch_context(context: *Interrupt.Context, arch_virtual_address_space: *AddressSpace, thread_kernel_stack: u64, new_thread: *Thread, old_address_space: *memory.AddressSpace) noreturn
+{
+    asm volatile(
+        \\cli
+    );
+    _ = context;
+    _ = arch_virtual_address_space;
+    _ = thread_kernel_stack;
+    _ = new_thread;
+    _ = old_address_space;
+
+    TODO();
+}
 
 export fn setup_processor2(storage: *NewProcessorStorage) void
 {

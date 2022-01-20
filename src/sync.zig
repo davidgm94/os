@@ -356,6 +356,7 @@ pub const Event = struct
     blocked_threads: LinkedList(Thread),
     handle_count: Volatile(u64),
 
+    /// already_set default = false
     pub fn set(self: *@This(), already_set: bool) bool
     {
         if (self.state.read_volatile() != 0 and !already_set)
