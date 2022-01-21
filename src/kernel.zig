@@ -10,6 +10,7 @@ pub const Arch = switch (@import("builtin").target.cpu.arch)
 pub var arch: Arch = undefined;
 pub var scheduler: Scheduler = undefined;
 pub var process: Scheduler.Process = undefined;
+pub var desktop: Scheduler.Process = undefined;
 pub var core: Core = undefined;
 pub var physical_allocator: memory.Physical.Allocator = undefined;
 pub var active_session_manager: cache.ActiveSession.Manager = undefined;
@@ -1285,7 +1286,12 @@ pub fn TODO() noreturn
 
 pub fn main_thread() callconv(.C) void
 {
-    TODO();
+    desktop.register(.desktop);
+    asm volatile("cli");
+    while (true)
+    {
+        asm volatile ("hlt");
+    }
 }
 
 export fn init() callconv(.C) void

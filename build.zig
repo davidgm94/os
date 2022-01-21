@@ -518,7 +518,7 @@ const UEFI = struct
                             "if=/dev/zero",
                             "of=" ++ partition_image_str,
                             comptimePrint("bs={}", .{block_size}),
-                            allocPrint(b.allocator, "count={}", .{partition_block_count}),
+                            try allocPrint(b.allocator, "count={}", .{partition_block_count}),
                         }
                     );
 
@@ -798,7 +798,7 @@ const qemu_base_command_str = &[_][]const u8
     "-m", "4096",
     //"-serial", "stdio",
     "-d", "int,cpu_reset,in_asm",
-    //"-D", "logging.txt",
+    "-D", "logging.txt",
     //"-d", "guest_errors,int,cpu,cpu_reset,in_asm"
 };
 
@@ -842,9 +842,6 @@ const Debug = struct
         const gdb_script = comptimePrint(comptime
                 \\set disassembly-flavor intel
                 \\symbol-file {s}
-                \\
-                \\break 0x600
-                \\break 0x1000
                 \\b _start
                 \\b kernel_initialize
                 \\b panic
@@ -857,11 +854,11 @@ const Debug = struct
                 \\b kernel.panic
                 \\b kernel.panic_raw
                 \\b kernel.TODO
-                \\b interrupt_handler
-                \\
-                \\
+                \\b kernel.main_thread
+                \\b main_thread
+                \\b x86_64.switch_context
+                \\b scheduler.Process.register
                 \\target remote localhost:1234
-                \\
                 \\c
                 ,
         .{

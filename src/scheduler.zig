@@ -191,7 +191,7 @@ pub fn yield(self: *@This(), context: *InterruptContext) void
         const current_thread = local.current_thread.?;
         if (!current_thread.executing.read_volatile()) panic_raw("current thread marked as not executing");
 
-        const old_address_space: *AddressSpace = if (current_thread.temporary_address_space.ptr) |_| undefined else &current_thread.process.?.address_space;
+        const old_address_space: *AddressSpace = if (current_thread.temporary_address_space.ptr) |temp_addr_space| @ptrCast(*AddressSpace, temp_addr_space) else &current_thread.process.?.address_space;
         current_thread.interrupt_context = context;
         current_thread.executing.write_volatile(false);
 
@@ -254,7 +254,7 @@ pub fn yield(self: *@This(), context: *InterruptContext) void
 
             const new_context = new_thread.interrupt_context;
             // @TODO: this may cause bugs!!!
-            const address_space: *AddressSpace = if (new_thread.temporary_address_space.ptr) |_| undefined else &new_thread.process.?.address_space;
+            const address_space: *AddressSpace = if (new_thread.temporary_address_space.ptr) |new_thread_tmp_addr_space| @ptrCast(*AddressSpace, new_thread_tmp_addr_space) else &new_thread.process.?.address_space;
             address_space.open_reference();
             kernel.Arch.switch_context(new_context, &address_space.arch, new_thread.kernel_stack, new_thread, old_address_space);
         }
@@ -307,7 +307,7 @@ pub const Thread = struct
     user_stack_commit: Volatile(u64),
 
     tls_address: u64,
-    time_adjust_address: u64,
+    timer_adjust_address: u64,
     timer_adjust_ticks: u64,
     last_interrupt_timestamp: u64,
 

@@ -22,6 +22,7 @@ const WriterLock = kernel.sync.WriterLock;
 
 const Thread = kernel.Scheduler.Thread;
 const Process = kernel.Scheduler.Process;
+const AsyncTask = kernel.Scheduler.AsyncTask;
 
 const page_size = kernel.Arch.page_size;
 const page_bit_count = kernel.Arch.page_bit_count;
@@ -244,8 +245,7 @@ pub const AddressSpace = struct
     user: bool,
     commit_count: u64,
     reserve_count: u64,
-    // async_task
-    //
+    remove_async_task: AsyncTask,
     pub fn handle_page_fault(self: *@This(), fault_address: u64, flags: HandlePageFaultFlags) bool
     {
         const address = fault_address & ~@as(u64, page_size - 1);
@@ -843,6 +843,22 @@ pub const AddressSpace = struct
         if (self.reference_count.read_volatile() >= 256 + 1) panic_raw("space has too many references");
 
         _ = self.reference_count.atomic_fetch_add(1);
+    }
+
+    pub fn close_reference(self: *@This()) void
+    {
+        if (self == &kernel.process.address_space) return;
+        if (self.reference_count.read_volatile() < 1) panic_raw("space has invalid reference count");
+
+        if (self.reference_count.atomic_fetch_sub(1) > 1) return;
+
+        self.remove_async_task.register(remove_async);
+    }
+
+    fn remove_async(task: *AsyncTask) void
+    {
+        _ = task;
+        TODO();
     }
 };
 

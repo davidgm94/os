@@ -321,7 +321,9 @@ pub fn find_RSDP() u64
 /// Architecture-specific memory initialization
 pub fn memory_init() void
 {
-    kernel.core.address_space.arch.cr3 = CR3.read();
+    const cr3 = CR3.read();
+    kernel.core.address_space.arch.cr3 = cr3;
+    kernel.process.address_space.arch.cr3 = cr3;
 
     var page_i: u64 = 0x100;
     while (page_i < 0x200) : (page_i += 1)
@@ -1572,6 +1574,24 @@ pub fn get_current_thread() callconv(.Inline) ?*Thread
     );
 }
 
+fn set_current_thread(thread: *Thread) callconv(.Inline) void
+{
+    asm volatile(
+            \\mov %[in], %%gs:0x10
+            :
+            : [in] "r" (thread)
+    );
+}
+
+fn set_stack(stack: u64) callconv(.Inline) void
+{
+    asm volatile(
+            \\mov %[in], %%gs:0x08
+            :
+            : [in] "r" (stack)
+    );
+}
+
 pub fn read_timestamp() callconv(.Inline) u64
 {
     var eax: u32 = undefined;
@@ -1891,18 +1911,153 @@ const TSS = packed struct
     }
 };
 
-pub fn switch_context(context: *Interrupt.Context, arch_virtual_address_space: *AddressSpace, thread_kernel_stack: u64, new_thread: *Thread, old_address_space: *memory.AddressSpace) noreturn
-{
-    asm volatile(
-        \\cli
-    );
-    _ = context;
-    _ = arch_virtual_address_space;
-    _ = thread_kernel_stack;
-    _ = new_thread;
-    _ = old_address_space;
+//pub fn switch_context(
+    //context: *Interrupt.Context, //rdi
+    //arch_virtual_address_space: *AddressSpace, //rsi
+    //thread_kernel_stack: u64, // rdx
+    //new_thread: *Thread, // rcx
+    //old_address_space: *memory.AddressSpace) // r8
+    //callconv(.C) noreturn
+//{
+    //asm volatile("cli");
+    //set_current_thread(new_thread);
+    //set_stack(thread_kernel_stack);
+    
+    //if (arch_virtual_address_space.cr3 != CR3.read()) CR3.write(arch_virtual_address_space.cr3);
+    //asm volatile("mov %[context], %%rsp"
+        //:
+        //: [context] "r" (context));
 
-    TODO();
+    //post_context_switch(context, old_address_space);
+
+    //asm volatile("jmp return_from_interrupt_handler");
+    //unreachable;
+//}
+pub extern fn switch_context(
+    context: *Interrupt.Context, //rdi
+    arch_virtual_address_space: *AddressSpace, //rsi
+    thread_kernel_stack: u64, // rdx
+    new_thread: *Thread, // rcx
+    old_address_space: *memory.AddressSpace) // r8
+    callconv(.C) noreturn;
+comptime
+{
+    asm(
+        \\.global switch_context
+        \\switch_context:
+        \\cli
+        \\mov %rcx, %gs:0x10
+        \\mov %rdx, %gs:0x08
+        \\mov (%rsi), %rsi
+        \\mov %cr3, %rax
+        \\cmp %rsi, %rax
+        \\je .cont
+        \\mov %rsi, %cr3
+        \\.cont:
+        \\mov %rdi, %rsp
+        \\mov %r8, %rsi
+        \\call post_context_switch
+        \\jmp return_from_interrupt_handler
+    );
+}
+
+export fn post_context_switch(context: *Interrupt.Context, old_address_space: *memory.AddressSpace) callconv(.C) void
+{
+    //_ = post_context_switch(context, old_address_space);
+    // @TODO: trying to inline the function. If not possible, come back here
+    if (kernel.scheduler.dispatch_spinlock.interrupts_enabled.read_volatile()) panic_raw("interrupts were enabled");
+
+    kernel.scheduler.dispatch_spinlock.release_ex(true);
+    const current_thread = get_current_thread().?;
+    const local = LocalStorage.get().?;
+    local.cpu.?.kernel_stack.* = current_thread.kernel_stack;
+
+    const is_new_thread = current_thread.cpu_time_slices.read_volatile() == 1;
+    _ = is_new_thread;
+    LAPIC.end_of_interrupt();
+    context.sanity_check();
+    set_thread_storage(current_thread.tls_address);
+    old_address_space.close_reference();
+    current_thread.last_known_execution_address = context.rip;
+    if (Interrupt.are_enabled()) panic_raw("interrupts were enabled");
+
+    if (local.spinlock_count != 0) panic_raw("spinlock_count not zero");
+
+    current_thread.timer_adjust_ticks += read_timestamp() - local.current_thread.?.last_interrupt_timestamp;
+    if (current_thread.timer_adjust_address != 0 and is_buffer_in_user_range(current_thread.timer_adjust_address, @sizeOf(u64)))
+    {
+        TODO();
+    }
+}
+
+fn is_buffer_in_user_range(base_address: u64, byte_count: u64) bool
+{
+    if (base_address & 0xFFFF800000000000 != 0) return false;
+    if (byte_count & 0xFFFF800000000000 != 0) return false;
+    if ((base_address + byte_count) & 0xFFFF800000000000 != 0) return false;
+    return true;
+}
+//comptime
+//{
+        //\\mov %rdi, %rsp
+        //\\mov %r8, %rsi
+        //\\call post_context_switch
+        //\\jmp return_from_interrupt_handler
+    //);
+//}
+
+//export fn post_context_switch(context: *Interrupt.Context, old_address_space: *memory.AddressSpace) callconv(.C) bool
+//{
+    //_ = context;
+    //_ = old_address_space;
+    //TODO();
+//}
+//
+
+const IA32_EFER    = MSR(0xC0000080);
+const IA32_STAR    = MSR(0xC0000081);
+const IA32_LSTAR   = MSR(0xC0000082);
+const IA32_FMASK   = MSR(0xC0000084);
+
+const IA32_FS_BASE = MSR(0xC0000100);
+const IA32_GS_BASE = MSR(0xC0000101);
+
+fn MSR(comptime msr: u32) type
+{
+    return struct
+    {
+        pub fn read() callconv(.Inline) u64
+        {
+            var low: u32 = undefined;
+            var high: u32 = undefined;
+            asm volatile(
+                "rdmsr"
+                : [_] "={eax}" (low),
+                  [_] "={edx}" (high),
+                  [_] "={ecx}" (msr),
+            );
+
+            return (@as(u64, high) << 32) | @as(u64, low);
+        }
+
+        pub fn write(value: u64) callconv(.Inline) void
+        {
+            const low = @truncate(u32, value);
+            const high = @truncate(u32, value >> 32);
+            asm volatile(
+                "wrmsr"
+                :
+                : [_] "{eax}" (low),
+                  [_] "{edx}" (high),
+                  [_] "{ecx}" (msr)
+            );
+        }
+    };
+}
+
+fn set_thread_storage(tls: u64) callconv(.Inline) void
+{
+    IA32_GS_BASE.write(tls);
 }
 
 export fn setup_processor2(storage: *NewProcessorStorage) void

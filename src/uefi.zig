@@ -340,7 +340,7 @@ pub fn main() noreturn
             const kernel_file = blk:
             {
                 var file: *uefi.protocols.FileProtocol = undefined;
-                efi_check(filesystem_root.open(&file, std.unicode.utf8ToUtf16LeStringLiteral("renaissance-os.stripped"), uefi.protocols.FileProtocol.efi_file_mode_read, 0),
+                efi_check(filesystem_root.open(&file, std.unicode.utf8ToUtf16LeStringLiteral("zig-kernel.elf"), uefi.protocols.FileProtocol.efi_file_mode_read, 0),
                     "Can't open kernel");
                 break :blk file;
             };
