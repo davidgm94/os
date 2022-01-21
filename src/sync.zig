@@ -399,7 +399,7 @@ pub const Event = struct
 
     pub fn wait(self: *@This()) bool
     {
-        return self.wait(no_timeout);
+        return self.wait_extended(no_timeout);
     }
     
     pub fn wait_extended(self: *@This(), timeout_ms: u64) bool

@@ -1,10 +1,5 @@
 const kernel = @This();
 
-pub const Arch = switch (@import("builtin").target.cpu.arch)
-{
-    .x86_64 => @import("x86_64.zig"),
-    else => unreachable,
-};
 
 // Kernel object members
 pub var arch: Arch = undefined;
@@ -20,11 +15,17 @@ pub var random_number_generator: RandomNumberGenerator = undefined;
 
 pub var acpi: ACPI = undefined;
 
+pub const Arch = switch (@import("builtin").target.cpu.arch)
+{
+    .x86_64 => @import("x86_64.zig"),
+    else => unreachable,
+};
 pub const memory = @import("memory.zig");
 pub const Scheduler = @import("scheduler.zig");
 pub const sync = @import("sync.zig");
 pub const cache = @import("cache.zig");
 pub const ACPI = @import("acpi.zig");
+pub const drivers = @import("drivers.zig");
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -1284,16 +1285,6 @@ pub fn TODO() noreturn
     panic_raw("To be implemented\n");
 }
 
-pub fn main_thread() callconv(.C) void
-{
-    desktop.register(.desktop);
-    asm volatile("cli");
-    while (true)
-    {
-        asm volatile ("hlt");
-    }
-}
-
 export fn init() callconv(.C) void
 {
     kernel.process.register(.kernel);
@@ -1301,4 +1292,12 @@ export fn init() callconv(.C) void
     _ = create_thread_noargs(@ptrToInt(main_thread));
     kernel.Arch.init();
     kernel.scheduler.started.write_volatile(true);
+}
+
+pub var shutdown_event: kernel.sync.Event = undefined;
+pub fn main_thread() callconv(.C) void
+{
+    desktop.register(.desktop);
+    drivers.init();
+    _ = shutdown_event.wait();
 }
