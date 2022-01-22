@@ -42,7 +42,7 @@ pub const Mutex = struct
                         panic_raw("thread is terminatable\n");
                     }
 
-                    if (self.owner == current_thread)
+                    if (self.owner != null and self.owner == current_thread)
                     {
                         panic_raw("Attempt to acquire a mutex owned by current thread already acquired\n");
                     }
