@@ -842,22 +842,16 @@ const Debug = struct
         const gdb_script = comptimePrint(comptime
                 \\set disassembly-flavor intel
                 \\symbol-file {s}
-                \\b _start
-                \\b kernel_initialize
                 \\b panic
                 \\b KernelInitialise
                 \\b KernelPanic
                 \\b KernelMain
-                \\b core::panicking::panic
-                \\b renaissance-os::kernel::arch::x86_64::handle_page_fault
-                \\b translate_address
                 \\b kernel.panic
                 \\b kernel.panic_raw
                 \\b kernel.TODO
                 \\b kernel.main_thread
                 \\b main_thread
-                \\b x86_64.switch_context
-                \\b scheduler.Process.register
+                \\b init
                 \\target remote localhost:1234
                 \\c
                 ,

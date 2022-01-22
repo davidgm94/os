@@ -4,7 +4,6 @@ const TODO = kernel.TODO;
 const panic_raw = kernel.panic_raw;
 
 const Volatile = kernel.Volatile;
-const VolatilePointer = kernel.VolatilePointer;
 
 const Bitflag = kernel.Bitflag;
 const AVLTree = kernel.AVLTree;
@@ -867,13 +866,13 @@ pub const PageFrame = struct
 {
     state: Volatile(PageFrame.State),
     flags: Volatile(u8),
-    cache_reference: VolatilePointer(u64),
+    cache_reference: ?*volatile u64,
     u: extern union
     {
         list: struct
         {
             next: Volatile(u64),
-            previous: VolatilePointer(u64),
+            previous: ?*volatile u64,
         },
 
         active: struct
@@ -1016,12 +1015,12 @@ pub const Physical = struct
                         },
                         .standby =>
                         {
-                            if (frame.cache_reference.dereference_volatile() != ((page << page_bit_count) | shared_entry_present))
+                            if (frame.cache_reference.?.* != ((page << page_bit_count) | shared_entry_present))
                             {
                                 panic_raw("corrupt shared reference back pointer in frame");
                             }
 
-                            frame.cache_reference.write_at_address_volatile(0);
+                            frame.cache_reference.?.* = 0;
                         },
                         else =>
                         {
@@ -1125,20 +1124,20 @@ pub const Physical = struct
 
                         if (self.last_standby_page == pages + frame_i)
                         {
-                            if (frame.u.list.previous.ptr == &self.first_standby_page)
+                            if (frame.u.list.previous == &self.first_standby_page)
                             {
                                 self.last_standby_page = 0;
                             }
                             else
                             {
-                                self.last_standby_page = (@ptrToInt(frame.u.list.previous.ptr) - @ptrToInt(self.pageframes.ptr)) / @sizeOf(PageFrame);
+                                self.last_standby_page = (@ptrToInt(frame.u.list.previous) - @ptrToInt(self.pageframes.ptr)) / @sizeOf(PageFrame);
                             }
                         }
                     },
                     else => unreachable,
                 }
 
-                frame.u.list.previous.write_at_address_volatile(frame.u.list.next.read_volatile());
+                frame.u.list.previous.?.* = frame.u.list.next.read_volatile();
                 if (frame.u.list.next.read_volatile() != 0)
                 {
                     self.pageframes[frame.u.list.next.read_volatile()].u.list.previous = frame.u.list.previous;
@@ -1158,10 +1157,10 @@ pub const Physical = struct
             frame.state.write_volatile(.free);
 
             frame.u.list.next.write_volatile(self.first_free_page);
-            frame.u.list.previous.overwrite_address(&self.first_free_page);
+            frame.u.list.previous = &self.first_free_page;
             if (self.first_free_page != 0)
             {
-                self.pageframes[self.first_free_page].u.list.previous.overwrite_address(&frame.u.list.next.value);
+                self.pageframes[self.first_free_page].u.list.previous = &frame.u.list.next.value;
             }
             self.first_free_page = page;
 
@@ -1694,7 +1693,13 @@ pub fn zero_page_thread() callconv(.C) void
 
 pub fn balance_thread() callconv(.C) void
 {
-    TODO();
+    var target_available_pages: u64 = 0;
+    _ = target_available_pages;
+
+    while (true)
+    {
+        //if (kernel.physical_allocator.get_available_page_count() >= target_available_pages),f
+    }
 }
 
 pub fn object_cache_trim_thread() callconv(.C) void

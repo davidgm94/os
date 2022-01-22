@@ -4,24 +4,27 @@ const panic_raw = kernel.panic_raw;
 
 const TODO = kernel.TODO;
 
+const max_wait_count = kernel.max_wait_count;
 const no_timeout = kernel.wait_no_timeout;
 
 const Volatile = kernel.Volatile;
-const VolatilePointer = kernel.VolatilePointer;
-const UnalignedVolatilePointer = kernel.UnalignedVolatilePointer;
 
 const LinkedList = kernel.LinkedList;
 
 const Thread = kernel.Scheduler.Thread;
+const Timer = kernel.Scheduler.Timer;
 
 const get_current_thread = kernel.Arch.get_current_thread;
 const LocalStorage = kernel.Arch.LocalStorage;
 const interrupts = kernel.Arch.Interrupt;
 const fake_timer_interrupt = kernel.Arch.fake_timer_interrupt;
 
+const std = @import("std");
+const zeroes = std.mem.zeroes;
+
 pub const Mutex = struct
 {
-    owner: UnalignedVolatilePointer(Thread),
+    owner: ?*align(1) volatile Thread,
     blocked_threads: LinkedList(Thread),
 
     pub fn acquire(self: *@This()) bool
@@ -39,7 +42,7 @@ pub const Mutex = struct
                         panic_raw("thread is terminatable\n");
                     }
 
-                    if (self.owner.ptr != null and self.owner.ptr.? == current_thread)
+                    if (self.owner == current_thread)
                     {
                         panic_raw("Attempt to acquire a mutex owned by current thread already acquired\n");
                     }
@@ -58,11 +61,10 @@ pub const Mutex = struct
         while (true)
         {
             kernel.scheduler.dispatch_spinlock.acquire();
-            const old = self.owner;
-            if (old.ptr == null) self.owner.overwrite_address(current_thread);
+            if (self.owner == null) self.owner = current_thread;
             kernel.scheduler.dispatch_spinlock.release();
 
-            if (old.ptr == null) break;
+            if (self.owner == null) break;
 
             @fence(.SeqCst);
 
@@ -75,21 +77,30 @@ pub const Mutex = struct
                         panic_raw("Attempting to wait on a mutex in a non-active thread\n");
                     }
 
-                    current_thread.blocking.mutex.overwrite_address(self);
+                    current_thread.blocking.mutex = self;
                     @fence(.SeqCst);
 
                     current_thread.state.write_volatile(.waiting_mutex);
 
                     kernel.scheduler.dispatch_spinlock.acquire();
-                    const spin = self.owner.ptr != null and self.owner.dereference_volatile().executing.read_volatile();
+                    const spin = blk:
+                    {
+                        if (self.owner) |owner|
+                        {
+                            const boolean = owner.executing;
+                            break :blk boolean.read_volatile();
+                        }
+                        break :blk false;
+                    };
+
                     kernel.scheduler.dispatch_spinlock.release();
 
-                    if (!spin and current_thread.blocking.mutex.dereference_volatile().owner.ptr != null)
+                    if (!spin and current_thread.blocking.mutex.?.owner != null)
                     {
                         fake_timer_interrupt();
                     }
 
-                    while ((!current_thread.terminating.read_volatile() or current_thread.terminatable_state.read_volatile() != .user_block_request) and self.owner.ptr != null)
+                    while ((!current_thread.terminating.read_volatile() or current_thread.terminatable_state.read_volatile() != .user_block_request) and self.owner != null)
                     {
                         current_thread.state.write_volatile(.waiting_mutex);
                     }
@@ -107,7 +118,7 @@ pub const Mutex = struct
 
         @fence(.SeqCst);
 
-        if (self.owner.ptr.? != current_thread)
+        if (self.owner != current_thread)
         {
             panic_raw("Invalid owner thread\n");
         }
@@ -125,12 +136,12 @@ pub const Mutex = struct
 
         if (maybe_current_thread) |current_thread|
         {
-            if (@cmpxchgStrong(@TypeOf(self.owner.ptr), &self.owner.ptr, current_thread, null, .SeqCst, .SeqCst) != null)
+            if (@cmpxchgStrong(@TypeOf(self.owner), &self.owner, current_thread, null, .SeqCst, .SeqCst) != null)
             {
                 panic_raw("Invalid owner thread\n");
             }
         }
-        else self.owner.ptr = null;
+        else self.owner = null;
 
         const preempt = self.blocked_threads.count != 0;
         if (kernel.scheduler.started.read_volatile())
@@ -158,7 +169,7 @@ pub const Mutex = struct
             }
         };
 
-        if (self.owner.ptr.? != current_thread)
+        if (self.owner != current_thread)
         {
             panic_raw("Mutex not correctly acquired\n");
         }
@@ -249,7 +260,7 @@ pub const WriterLock = struct
         const maybe_current_thread = get_current_thread();
         if (maybe_current_thread) |thread|
         {
-            thread.blocking.writer.lock.overwrite_address(self);
+            thread.blocking.writer.lock = self;
             thread.blocking.writer.type = write;
             @fence(.SeqCst);
         }
@@ -404,8 +415,80 @@ pub const Event = struct
     
     pub fn wait_extended(self: *@This(), timeout_ms: u64) bool
     {
-        _ = self;
-        _ = timeout_ms;
-        TODO();
+        var events: [2]*Event = undefined;
+        events[0] = self;
+
+        if (timeout_ms == no_timeout)
+        {
+            const index = wait_multiple(events[0..1]);
+            return index == 0;
+        }
+        else
+        {
+            var timer: Timer = undefined;
+            std.mem.set(u8, @ptrCast([*]u8, &timer)[0..@sizeOf(Timer)], 0);
+            timer.set(timeout_ms);
+            events[1] = &timer.event;
+            const index = wait_multiple(events[0..2]);
+            timer.remove();
+            return index == 0;
+        }
+    }
+
+    fn wait_multiple(events: []*Event) u64
+    {
+        if (events.len > max_wait_count) panic_raw("count too high")
+        else if (events.len == 0) panic_raw("count 0")
+        else if (!interrupts.are_enabled()) panic_raw("timer with interrupts disabled");
+
+        const thread = get_current_thread().?;
+        thread.blocking.event.count = events.len;
+
+        var event_items = zeroes([512]LinkedList(Thread).Item);
+        thread.blocking.event.items = &event_items;
+        defer thread.blocking.event.items = null;
+
+        for (thread.blocking.event.items.?[0..thread.blocking.event.count]) |*event_item, i|
+        {
+            event_item.value = thread;
+            thread.blocking.event.array[i] = events[i];
+        }
+
+        while (!thread.terminating.read_volatile() or thread.terminatable_state.read_volatile() != .user_block_request)
+        {
+            for (events) |event, i|
+            {
+                if (event.auto_reset.read_volatile())
+                {
+                    if (event.state.read_volatile() != 0)
+                    {
+                        thread.state.write_volatile(.active);
+                        const result = event.state.atomic_compare_and_swap(0, 1);
+                        if (result) |resultu|
+                        {
+                            if (resultu != 0) return i;
+                        }
+                        else
+                        {
+                            return i;
+                        }
+
+                        thread.state.write_volatile(.waiting_event);
+                    }
+                }
+                else
+                {
+                    if (event.state.read_volatile() != 0)
+                    {
+                        thread.state.write_volatile(.active);
+                        return i;
+                    }
+                }
+            }
+
+            fake_timer_interrupt();
+        }
+        
+        return std.math.maxInt(u64);
     }
 };

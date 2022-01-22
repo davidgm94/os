@@ -3,7 +3,6 @@ const kernel = @import("kernel.zig");
 
 const SimpleList = kernel.SimpleList;
 const Volatile = kernel.Volatile;
-const VolatilePointer = kernel.VolatilePointer;
 
 const Bitflag = kernel.Bitflag;
 
@@ -167,10 +166,9 @@ pub fn yield(self: *@This(), context: *InterruptContext) void
                     self.active_timers.remove(timer_it.?);
                     _ = timer.event.set(false);
 
-                    _ = context;
                     if (timer.callback != null)
                     {
-                        TODO();
+                        timer.async_task.register(timer.callback.?);
                     }
                 }
                 else
@@ -181,6 +179,7 @@ pub fn yield(self: *@This(), context: *InterruptContext) void
 
             self.active_timers_spinlock.release();
         }
+
         if (local.spinlock_count != 0) panic_raw("spinlocks acquired while attempting to yield");
 
         interrupts.disable();
@@ -191,14 +190,12 @@ pub fn yield(self: *@This(), context: *InterruptContext) void
         const current_thread = local.current_thread.?;
         if (!current_thread.executing.read_volatile()) panic_raw("current thread marked as not executing");
 
-        const old_address_space: *AddressSpace = if (current_thread.temporary_address_space.ptr) |temp_addr_space| @ptrCast(*AddressSpace, temp_addr_space) else &current_thread.process.?.address_space;
+        const old_address_space: *AddressSpace = if (current_thread.temporary_address_space) |temp_addr_space| @ptrCast(*AddressSpace, temp_addr_space) else &current_thread.process.?.address_space;
         current_thread.interrupt_context = context;
         current_thread.executing.write_volatile(false);
 
         const kill_thread = current_thread.terminatable_state.read_volatile() == .terminatable and current_thread.terminating.read_volatile();
         const keep_thread_alive = current_thread.terminatable_state.read_volatile() == .user_block_request and current_thread.terminating.read_volatile();
-        _ = keep_thread_alive;
-        _ = old_address_space;
 
         if (kill_thread)
         {
@@ -211,11 +208,30 @@ pub fn yield(self: *@This(), context: *InterruptContext) void
             {
                 .waiting_mutex =>
                 {
-                    TODO();
+                    const mutex = current_thread.blocking.mutex.?;
+
+                    if (!keep_thread_alive and mutex.owner != null)
+                    {
+                        // @INFO: this should fail if the result is negative
+                        const index = @intCast(u64, current_thread.priority);
+                        mutex.owner.?.blocked_thread_priorities[index] += 1;
+                        TODO();
+                    }
+                    else
+                    {
+                        current_thread.state.write_volatile(.active);
+                    }
                 },
                 .waiting_event =>
                 {
-                    TODO();
+                    if (keep_thread_alive)
+                    {
+                        current_thread.state.write_volatile(.active);
+                    }
+                    else
+                    {
+                        TODO();
+                    }
                 },
                 .waiting_writer_lock =>
                 {
@@ -225,16 +241,9 @@ pub fn yield(self: *@This(), context: *InterruptContext) void
             }
         }
 
-        if (!kill_thread and current_thread.state.read_volatile() == .active)
+        if (!kill_thread and current_thread.state.read_volatile() == .active and current_thread.type == .normal)
         {
-            switch (current_thread.type)
-            {
-                .normal =>
-                {
-                    TODO();
-                },
-                .idle, .async_task => {},
-            }
+            TODO();
         }
 
         if (self.pick_thread(local)) |new_thread|
@@ -254,7 +263,7 @@ pub fn yield(self: *@This(), context: *InterruptContext) void
 
             const new_context = new_thread.interrupt_context;
             // @TODO: this may cause bugs!!!
-            const address_space: *AddressSpace = if (new_thread.temporary_address_space.ptr) |new_thread_tmp_addr_space| @ptrCast(*AddressSpace, new_thread_tmp_addr_space) else &new_thread.process.?.address_space;
+            const address_space = if (new_thread.temporary_address_space) |new_thread_tmp_addr_space| @ptrCast(*AddressSpace, new_thread_tmp_addr_space) else &new_thread.process.?.address_space;
             address_space.open_reference();
             kernel.Arch.switch_context(new_context, &address_space.arch, new_thread.kernel_stack, new_thread, old_address_space);
         }
@@ -326,24 +335,24 @@ pub const Thread = struct
 
     blocking: extern union
     {
-        mutex: VolatilePointer(Mutex),
+        mutex: ?*volatile Mutex,
         writer: struct
         {
-            lock: VolatilePointer(WriterLock),
+            lock: ?*volatile WriterLock,
             type: bool,
         },
         event: struct
         {
-            items: LinkedList(Thread).Item,
-            events: [max_wait_count]VolatilePointer(Event),
-            event_count: u64,
+            items: ?[*]volatile LinkedList(Thread).Item,
+            array: [max_wait_count]*volatile Event,
+            count: u64,
         },
     },
 
     killed_event: Event,
     kill_async_task: AsyncTask,
 
-    temporary_address_space: VolatilePointer(AddressSpace),
+    temporary_address_space: ?*volatile AddressSpace,
     interrupt_context: *InterruptContext,
     last_known_execution_address: u64, // @TODO: for debugging
 
@@ -613,4 +622,55 @@ pub const Timer = struct
     trigger_time_ms: u64,
     callback: ?AsyncTask.Callback,
     argument: u64,
+
+    pub fn set_extended(self: *@This(), trigger_in_ms: u64, maybe_callback: ?AsyncTask.Callback, maybe_argument: u64) void
+    {
+        kernel.scheduler.active_timers_spinlock.acquire();
+
+        if (self.item.list != null) kernel.scheduler.active_timers.remove(&self.item);
+
+        self.event.reset();
+
+        self.trigger_time_ms = trigger_in_ms + kernel.scheduler.time_ms;
+        self.callback = maybe_callback;
+        self.argument = maybe_argument;
+        self.item.value = self;
+
+        var maybe_timer = kernel.scheduler.active_timers.first;
+        while (maybe_timer != null)
+        {
+            const timer = maybe_timer.?.value.?;
+            const next = maybe_timer.?.next;
+            if (timer.trigger_time_ms > self.trigger_time_ms) break;
+
+            maybe_timer = next;
+        }
+
+        if (maybe_timer) |timer|
+        {
+            kernel.scheduler.active_timers.insert_before(&self.item, timer);
+        }
+        else
+        {
+            kernel.scheduler.active_timers.insert_at_end(&self.item);
+        }
+
+        kernel.scheduler.active_timers_spinlock.release();
+    }
+
+    pub fn set(self: *@This(), trigger_in_ms: u64) void
+    {
+        self.set_extended(trigger_in_ms, null, 0);
+    }
+
+    pub fn remove(self: *@This()) void
+    {
+        kernel.scheduler.active_timers_spinlock.acquire();
+
+        if (self.callback != null) panic_raw("timer with callback cannot be removed");
+
+        if (self.item.list != null) kernel.scheduler.active_timers.remove(&self.item);
+
+        kernel.scheduler.active_timers_spinlock.release();
+    }
 };

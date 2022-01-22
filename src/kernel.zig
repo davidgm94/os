@@ -38,9 +38,9 @@ pub fn Volatile(comptime T: type) type
     {
         value: T,
 
-        pub fn read_volatile(self: *@This()) callconv(.Inline) T
+        pub fn read_volatile(self: *const @This()) callconv(.Inline) T
         {
-            return @ptrCast(*volatile T, &self.value).*;
+            return @ptrCast(*const volatile T, &self.value).*;
         }
 
         pub fn write_volatile(self: *@This(), value: T) callconv(.Inline) void
@@ -71,58 +71,6 @@ pub fn Volatile(comptime T: type) type
         pub fn atomic_compare_and_swap(self: *@This(), expected_value: T, new_value: T) ?T
         {
             return @cmpxchgStrong(@TypeOf(self.value), &self.value, expected_value, new_value, .SeqCst, .SeqCst);
-        }
-    };
-}
-
-pub fn VolatilePointer(comptime T: type) type
-{
-    return struct
-    {
-        const Ptr = *volatile T;
-        ptr: ?Ptr,
-
-        pub fn overwrite_address(self: *@This(), address: ?*T) callconv(.Inline) void
-        {
-            self.ptr = @ptrCast(?Ptr, address);
-        }
-
-        pub fn dereference_volatile(self: *@This()) callconv(.Inline) T
-        {
-            assert(self.ptr != null);
-            return self.ptr.?.*;
-        }
-
-        pub fn write_at_address_volatile(self: *@This(), value: T) void
-        {
-            assert(self.ptr != null);
-            self.ptr.?.* = value;
-        }
-
-        pub fn get_non_volatile(self: @This()) *T
-        {
-            assert(self.ptr != null);
-            return @ptrCast(*T, self.ptr.?);
-        }
-    };
-}
-
-pub fn UnalignedVolatilePointer(comptime T: type) type
-{
-    return struct
-    {
-        const Ptr = *volatile align(1)T;
-        ptr: ?Ptr,
-
-        pub fn overwrite_address(self: *@This(), address: ?Ptr) callconv(.Inline) void
-        {
-            self.ptr = address;
-        }
-
-        pub fn dereference_volatile(self: *@This()) callconv(.Inline) T
-        {
-            assert(self.ptr != null);
-            return self.ptr.?.*;
         }
     };
 }
@@ -758,6 +706,29 @@ pub fn LinkedList(comptime T: type) type
                 item.previous = null;
                 item.next = null;
             }
+
+            self.count += 1;
+            item.list = self;
+            self.validate();
+        }
+
+        pub fn insert_before(self: *@This(), item: *Item, before: *Item) void
+        {
+            if (item.list != null) panic_raw("inserting an item that is already in a list");
+
+            if (before != self.first)
+            {
+                item.previous = before.previous;
+                item.previous.?.next = item;
+            }
+            else
+            {
+                self.first = item;
+                item.previous = null;
+            }
+
+            item.next = before;
+            before.previous = item;
 
             self.count += 1;
             item.list = self;

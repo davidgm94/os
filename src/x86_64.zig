@@ -77,12 +77,8 @@ pub fn handle_page_fault(self: *@This(), fault_address: u64, flags: memory.Handl
             // @Unsafe
             if (get_current_thread()) |current_thread|
             {
-                const space =
-                    if (current_thread.temporary_address_space.ptr != null)
-                        current_thread.temporary_address_space.get_non_volatile()
-                    else
-                        &current_thread.process.?.address_space;
-                return space.handle_page_fault(virtual_address, flags);
+                if (current_thread.temporary_address_space) |temporary_address_space| return @ptrCast(*memory.AddressSpace, temporary_address_space).handle_page_fault(virtual_address, flags)
+                else return current_thread.process.?.address_space.handle_page_fault(virtual_address, flags);
             }
             else
             {
@@ -1339,6 +1335,7 @@ export fn interrupt_handler(context: *Interrupt.Context) callconv(.C) void
 
     const interrupt_number = context.interrupt_number;
     var maybe_local_storage = LocalStorage.get();
+    // @TODO: @ERROR: @HERE Something is happening here
     if (maybe_local_storage) |local_storage|
     {
         if (local_storage.current_thread) |local_current_thread|
@@ -1476,6 +1473,10 @@ export fn interrupt_handler(context: *Interrupt.Context) callconv(.C) void
                 if (local.IRQ_switch_thread and kernel.scheduler.started.read_volatile() and local.scheduler_ready)
                 {
                     kernel.scheduler.yield(context);
+                }
+                else
+                {
+                    LAPIC.end_of_interrupt();
                 }
             }
         },
