@@ -842,6 +842,7 @@ const Debug = struct
         const gdb_script = comptimePrint(comptime
                 \\set disassembly-flavor intel
                 \\symbol-file {s}
+                \\b _start
                 \\b panic
                 \\b KernelInitialise
                 \\b KernelPanic
