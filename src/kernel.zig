@@ -1115,6 +1115,7 @@ pub fn Array(comptime T: type, comptime heap_type: HeapType) type
             _ = self;
             _ = position;
             _ = count;
+            TODO();
         }
     };
 }

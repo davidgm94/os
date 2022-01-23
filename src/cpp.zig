@@ -1058,9 +1058,9 @@ const Scheduler = extern struct
     all_threads: LinkedList(Thread),
     all_processes: LinkedList(Process),
 
-    thread_pool: Pool(Thread),
-    process_pool: Pool(Process),
-    address_space_pool: Pool(AddressSpace),
+    thread_pool: Pool,
+    process_pool: Pool,
+    address_space_pool: Pool,
 
     next_thread_id: u64,
     next_process_id: u64,
@@ -1940,54 +1940,478 @@ pub const Process = extern struct
 
 extern fn ProcessSpawn(process_type: Process.Type) callconv(.C) ?*Process;
 
-pub fn Pool(comptime T: type) type
+pub const Heap = extern struct
 {
-    return extern struct
+    mutex: Mutex,
+    regions: [12]?*HeapRegion,
+    allocation_count: Volatile(u64),
+    size: Volatile(u64),
+    block_count: Volatile(u64),
+    blocks: [16]?*HeapRegion,
+    cannot_validate: bool,
+
+    //pub fn allocate(self: *@This(), asked_size: u64, zero_memory: bool) u64
+    //{
+        //if (@bitCast(i64, asked_size) < 0) KernelPanic("heap panic");
+
+        //const size = (asked_size + HeapRegion.used_header_size + 0x1f) & ~@as(u64, 0x1f);
+
+        //if (size >= large_allocation_threshold)
+        //{
+            //if (@intToPtr(?*HeapRegion, self.allocate_call(size))) |region|
+            //{
+                //region.used = HeapRegion.used_magic;
+                //region.u1.size = 0;
+                //region.u2.allocation_size = asked_size;
+                //_ = self.size.atomic_fetch_add(asked_size);
+                //return region.get_data();
+            //}
+            //else
+            //{
+                //return 0;
+            //}
+        //}
+
+        //_ = self.mutex.acquire();
+
+        //self.validate();
+
+        //const region = blk:
+        //{
+            //var heap_index = heap_calculate_index(size);
+            //if (heap_index < self.regions.len)
+            //{
+                //for (self.regions[heap_index..]) |maybe_heap_region|
+                //{
+                    //if (maybe_heap_region) |heap_region|
+                    //{
+                        //if (heap_region.u1.size >= size)
+                        //{
+                            //const result = heap_region;
+                            //result.remove_free();
+                            //break :blk result;
+                        //}
+                    //}
+                //}
+            //}
+
+            //const allocation = @intToPtr(?*HeapRegion, self.allocate_call(65536));
+            //if (self.block_count.read_volatile() < 16)
+            //{
+                //self.blocks[self.block_count.read_volatile()] = allocation;
+            //}
+            //else
+            //{
+                //self.cannot_validate = true;
+            //}
+            //self.block_count.increment();
+
+            //if (allocation) |result|
+            //{
+                //result.u1.size = 65536 - 32;
+                //const end_region = result.get_next().?;
+                //end_region.used = HeapRegion.used_magic;
+                //end_region.offset = 65536 - 32;
+                //end_region.u1.next = 32;
+                //@intToPtr(?*?*Heap, end_region.get_data()).?.* = self;
+
+                //break :blk result;
+            //}
+            //else
+            //{
+                //// it failed
+                //self.mutex.release();
+                //return 0;
+            //}
+        //};
+
+        //if (region.used != 0 or region.u1.size < size) KernelPanic("heap panic\n");
+
+        //self.allocation_count.increment();
+        //_ = self.size.atomic_fetch_add(size);
+
+        //if (region.u1.size != size)
+        //{
+            //const old_size = region.u1.size;
+            //assert(size <= std.math.maxInt(u16));
+            //const truncated_size = @intCast(u16, size);
+            //region.u1.size = truncated_size;
+            //region.used = HeapRegion.used_magic;
+
+            //const free_region = region.get_next().?;
+            //free_region.u1.size = old_size - truncated_size;
+            //free_region.previous = truncated_size;
+            //free_region.offset = region.offset + truncated_size;
+            //free_region.used = 0;
+            //self.add_free_region(free_region);
+
+            //const next_region = free_region.get_next().?;
+            //next_region.previous = free_region.u1.size;
+
+            //self.validate();
+        //}
+
+        //region.used = HeapRegion.used_magic;
+        //region.u2.allocation_size = asked_size;
+        //self.mutex.release();
+
+        //const address = region.get_data();
+        //const memory = @intToPtr([*]u8, address)[0..asked_size];
+        //if (zero_memory)
+        //{
+            //std.mem.set(u8, memory, 0);
+        //}
+        //else
+        //{
+            //std.mem.set(u8, memory, 0xa1);
+        //}
+
+        //return address;
+    //}
+
+    //fn allocateT(self: *@This(), comptime T: type, zero_memory: bool) callconv(.Inline) ?*T
+    //{
+        //return @intToPtr(?*T, self.allocate(@sizeOf(T), zero_memory));
+    //}
+
+    //fn add_free_region(self: *@This(), region: *HeapRegion) void
+    //{
+        //if (region.used != 0 or region.u1.size < 32)
+        //{
+            //KernelPanic("heap panic\n");
+        //}
+
+        //const index = heap_calculate_index(region.u1.size);
+        //region.u2.region_list_next = self.regions[index];
+        //if (region.u2.region_list_next) |region_list_next|
+        //{
+            //region_list_next.region_list_reference = &region.u2.region_list_next;
+        //}
+        //self.regions[index] = region;
+        //region.region_list_reference = &self.regions[index];
+    //}
+
+    //fn allocate_call(self: *@This(), size: u64) u64
+    //{
+        //if (self == &kernel.core.heap)
+        //{
+            //return kernel.core.address_space.standard_allocate(size, Region.Flags.from_flag(.fixed));
+        //}
+        //else
+        //{
+            //return kernel.process.address_space.standard_allocate(size, Region.Flags.from_flag(.fixed));
+        //}
+    //}
+
+    //fn free_call(self: *@This(), region: *HeapRegion) void
+    //{
+        //if (self == &kernel.core.heap)
+        //{
+            //_ = kernel.core.address_space.free(@ptrToInt(region));
+        //}
+        //else
+        //{
+            //_ = kernel.process.address_space.free(@ptrToInt(region));
+        //}
+    //}
+
+    //pub fn free(self: *@This(), address: u64, expected_size: u64) void
+    //{
+        //if (address == 0 and expected_size != 0) KernelPanic("heap panic");
+        //if (address == 0) return;
+
+        //var region = @intToPtr(*HeapRegion, address).get_header().?;
+        //if (region.used != HeapRegion.used_magic) KernelPanic("heap panic");
+        //if (expected_size != 0 and region.u2.allocation_size != expected_size) KernelPanic("heap panic");
+
+        //if (region.u1.size == 0)
+        //{
+            //_ = self.size.atomic_fetch_sub(region.u2.allocation_size);
+            //self.free_call(region);
+            //return;
+        //}
+
+        //{
+            //const first_region = @intToPtr(*HeapRegion, @ptrToInt(region) - region.offset + 65536 - 32);
+            //if (@intToPtr(**Heap, first_region.get_data()).* != self) KernelPanic("heap panic");
+        //}
+
+        //_ = self.mutex.acquire();
+
+        //self.validate();
+
+        //region.used = 0;
+
+        //if (region.offset < region.previous) KernelPanic("heap panic");
+
+        //self.allocation_count.decrement();
+        //_ = self.size.atomic_fetch_sub(region.u1.size);
+
+        //if (region.get_next()) |next_region|
+        //{
+            //if (next_region.used == 0)
+            //{
+                //next_region.remove_free();
+                //region.u1.size += next_region.u1.size;
+                //next_region.get_next().?.previous = region.u1.size;
+            //}
+        //}
+
+        //if (region.get_previous()) |previous_region|
+        //{
+            //if (previous_region.used == 0)
+            //{
+                //previous_region.remove_free();
+
+                //previous_region.u1.size += region.u1.size;
+                //region.get_next().?.previous = previous_region.u1.size;
+                //region = previous_region;
+            //}
+        //}
+
+        //if (region.u1.size == 65536 - 32)
+        //{
+            //if (region.offset != 0) KernelPanic("heap panic");
+
+            //self.block_count.decrement();
+
+            //if (!self.cannot_validate)
+            //{
+                //var found = false;
+                //for (self.blocks[0..self.block_count.read_volatile() + 1]) |*heap_region|
+                //{
+                    //if (heap_region.* == region)
+                    //{
+                        //heap_region.* = self.blocks[self.block_count.read_volatile()];
+                        //found = true;
+                        //break;
+                    //}
+                //}
+
+                //assert(found);
+            //}
+
+            //self.free_call(region);
+            //self.mutex.release();
+            //return;
+        //}
+
+        //self.add_free_region(region);
+        //self.validate();
+        //self.mutex.release();
+    //}
+
+    //fn validate(self: *@This()) void
+    //{
+        //if (self.cannot_validate) return;
+
+        //for (self.blocks[0..self.block_count.read_volatile()]) |maybe_start, i|
+        //{
+            //if (maybe_start) |start|
+            //{
+                //const end = @intToPtr(*HeapRegion, @ptrToInt(self.blocks[i]) + 65536);
+                //var maybe_previous: ?* HeapRegion = null;
+                //var region = start;
+
+                //while (@ptrToInt(region) < @ptrToInt(end))
+                //{
+                    //if (maybe_previous) |previous|
+                    //{
+                        //if (@ptrToInt(previous) != @ptrToInt(region.get_previous()))
+                        //{
+                            //KernelPanic("heap panic\n");
+                        //}
+                    //}
+                    //else
+                    //{
+                        //if (region.previous != 0) KernelPanic("heap panic\n");
+                    //}
+
+                    //if (region.u1.size & 31 != 0) KernelPanic("heap panic");
+
+                    //if (@ptrToInt(region) - @ptrToInt(start) != region.offset)
+                    //{
+                        //KernelPanic("heap panic\n");
+                    //}
+
+                    //if (region.used != HeapRegion.used_magic and region.used != 0)
+                    //{
+                        //KernelPanic("heap panic");
+                    //}
+
+                    //if (region.used == 0 and region.region_list_reference == null)
+                    //{
+                        //KernelPanic("heap panic\n");
+                    //}
+
+                    //if (region.used == 0 and region.u2.region_list_next != null and region.u2.region_list_next.?.region_list_reference != &region.u2.region_list_next)
+                    //{
+                        //KernelPanic("heap panic");
+                    //}
+
+                    //maybe_previous = region;
+                    //region = region.get_next().?;
+                //}
+
+                //if (region != end)
+                //{
+                    //KernelPanic("heap panic");
+                //}
+            //}
+        //}
+    //}
+
+    //// @TODO: this may be relying on C undefined behavior and might be causing different results than expected
+    //// @TODO: make this a zig function
+    //extern fn heap_calculate_index(size: u64) callconv(.C) u64;
+    //comptime
+    //{
+        //asm(
+        //\\.intel_syntax noprefix
+        //\\.global heap_calculate_index
+        //\\heap_calculate_index:
+        //\\bsr eax, edi
+        //\\xor eax, -32
+        //\\add eax, 33
+        //\\add rax, -5
+        //\\ret
+        //);
+    //}
+
+    //const large_allocation_threshold = 32768;
+};
+
+export var heapCore: Heap = undefined;
+export var heapFixed: Heap = undefined;
+
+extern fn EsHeapAllocate(size: u64, zeroMemory: bool, heap: *Heap) callconv(.C) u64;
+extern fn EsHeapFree(address: u64, expectedSize: u64, heap: *Heap) callconv(.C) void;
+
+pub const HeapRegion = extern struct
+{
+    u1: extern union
     {
-        element_size: u64, // @ABICompatibility @Delete
-        cache_entries: [cache_count]?*T,
-        cache_entry_count: u64,
-        mutex: Mutex,
+        next: u16,
+        size: u16,
+    },
 
-        const cache_count = 16;
+    previous: u16,
+    offset: u16,
+    used: u16,
 
-        //pub fn add(self: *@This()) ?*T
+    u2: extern union
+    {
+        allocation_size: u64,
+        region_list_next: ?*HeapRegion,
+    },
+
+    region_list_reference: ?*?*@This(),
+
+    const used_header_size = @sizeOf(HeapRegion) - @sizeOf(?*?*HeapRegion);
+    const free_header_size = @sizeOf(HeapRegion);
+    const used_magic = 0xabcd;
+
+    //fn remove_free(self: *@This()) void
+    //{
+        //if (self.region_list_reference == null or self.used != 0) KernelPanic("heap panic\n");
+
+        //self.region_list_reference.?.* = self.u2.region_list_next;
+
+        //if (self.u2.region_list_next) |region_list_next|
         //{
-            //_ = self.mutex.acquire();
-            //defer self.mutex.release();
-
-            //if (self.cache_entry_count != 0)
-            //{
-                //self.cache_entry_count -= 1;
-                //const address = self.cache_entries[self.cache_entry_count];
-                //std.mem.set(u8, @ptrCast([*]u8, address)[0..@sizeOf(T)], 0);
-                //return address;
-            //}
-            //else
-            //{
-                //return @intToPtr(?*T, kernel.core.fixed_heap.allocate(@sizeOf(T), true));
-            //}
+            //region_list_next.region_list_reference = self.region_list_reference;
         //}
+        //self.region_list_reference = null;
+    //}
 
-        //pub fn remove(self: *@This(), pointer: ?*T) void
+    //fn get_header(self: *@This()) ?*HeapRegion
+    //{
+        //return @intToPtr(?*HeapRegion, @ptrToInt(self) - used_header_size);
+    //}
+
+    //fn get_data(self: *@This()) u64
+    //{
+        //return @ptrToInt(self) + used_header_size;
+    //}
+
+    //fn get_next(self: *@This()) ?*HeapRegion
+    //{
+        //return @intToPtr(?*HeapRegion, @ptrToInt(self) + self.u1.next);
+    //}
+
+    //fn get_previous(self: *@This()) ?*HeapRegion
+    //{
+        //if (self.previous != 0)
         //{
-            //_ = self.mutex.acquire();
-            //defer self.mutex.release();
-
-            //if (pointer == null) return;
-
-            //if (self.cache_entry_count == cache_count)
-            //{
-                //kernel.core.fixed_heap.free(@ptrToInt(pointer), @sizeOf(T));
-            //}
-            //else
-            //{
-                //self.cache_entries[self.cache_entry_count] = pointer;
-                //self.cache_entry_count += 1;
-            //}
+            //return @intToPtr(?*HeapRegion, @ptrToInt(self) - self.previous);
         //}
-    };
+        //else
+        //{
+            //return null;
+        //}
+    //}
+};
+
+pub const Pool = extern struct
+{
+    element_size: u64, // @ABICompatibility @Delete
+    cache_entries: [cache_count]u64,
+    cache_entry_count: u64,
+    mutex: Mutex,
+
+    const cache_count = 16;
+
+    pub fn add(self: *@This(), element_size: u64) u64
+    {
+        _ = self.mutex.acquire();
+        defer self.mutex.release();
+
+        if (self.element_size != 0 and element_size != self.element_size) KernelPanic("pool size mismatch");
+        self.element_size = element_size;
+
+        if (self.cache_entry_count != 0)
+        {
+            self.cache_entry_count -= 1;
+            const address = self.cache_entries[self.cache_entry_count];
+            std.mem.set(u8, @intToPtr([*]u8, address)[0..self.element_size], 0);
+            return address;
+        }
+        else
+        {
+            return EsHeapAllocate(self.element_size, true, &heapFixed);
+            //return @intToPtr(?*T, kernel.core.fixed_heap.allocate(@sizeOf(T), true));
+        }
+    }
+
+    pub fn remove(self: *@This(), pointer: u64) void
+    {
+        _ = self.mutex.acquire();
+        defer self.mutex.release();
+
+        if (pointer == 0) return;
+
+        if (self.cache_entry_count == cache_count)
+        {
+            EsHeapFree(pointer, self.element_size, &heapFixed);
+        }
+        else
+        {
+            self.cache_entries[self.cache_entry_count] = pointer;
+            self.cache_entry_count += 1;
+        }
+    }
+};
+
+export fn PoolAdd(pool: *Pool, element_size: u64) callconv(.C) u64
+{
+    return pool.add(element_size);
 }
+
+export fn PoolRemove(pool: *Pool, pointer: u64) callconv(.C) void
+{
+    pool.remove(pointer);
+}
+
 pub const ArchAddressSpace = extern struct
 {
     cr3: u64,
@@ -3760,9 +4184,4 @@ export fn KernelInitialise() callconv(.C) void
     CreateMainThread();
     ArchInitialise();
     scheduler.started.write_volatile(true);
-}
-
-export fn get_size() callconv(.C) u64
-{
-    return @sizeOf(Scheduler);
 }

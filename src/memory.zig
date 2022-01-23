@@ -1265,70 +1265,6 @@ pub const ObjectCache = struct
 {
 };
 
-pub const HeapRegion = extern struct
-{
-    u1: extern union
-    {
-        next: u16,
-        size: u16,
-    },
-
-    previous: u16,
-    offset: u16,
-    used: u16,
-
-    u2: extern union
-    {
-        allocation_size: u64,
-        region_list_next: ?*HeapRegion,
-    },
-
-    region_list_reference: ?*?*@This(),
-
-    const used_header_size = @sizeOf(HeapRegion) - @sizeOf(?*?*HeapRegion);
-    const free_header_size = @sizeOf(HeapRegion);
-    const used_magic = 0xabcd;
-
-    fn remove_free(self: *@This()) void
-    {
-        if (self.region_list_reference == null or self.used != 0) panic_raw("heap panic\n");
-
-        self.region_list_reference.?.* = self.u2.region_list_next;
-
-        if (self.u2.region_list_next) |region_list_next|
-        {
-            region_list_next.region_list_reference = self.region_list_reference;
-        }
-        self.region_list_reference = null;
-    }
-
-    fn get_header(self: *@This()) ?*HeapRegion
-    {
-        return @intToPtr(?*HeapRegion, @ptrToInt(self) - used_header_size);
-    }
-
-    fn get_data(self: *@This()) u64
-    {
-        return @ptrToInt(self) + used_header_size;
-    }
-
-    fn get_next(self: *@This()) ?*HeapRegion
-    {
-        return @intToPtr(?*HeapRegion, @ptrToInt(self) + self.u1.next);
-    }
-
-    fn get_previous(self: *@This()) ?*HeapRegion
-    {
-        if (self.previous != 0)
-        {
-            return @intToPtr(?*HeapRegion, @ptrToInt(self) - self.previous);
-        }
-        else
-        {
-            return null;
-        }
-    }
-};
 
 pub const Heap = struct
 {
@@ -1651,26 +1587,73 @@ pub const Heap = struct
         }
     }
 
-    // @TODO: this may be relying on C undefined behavior and might be causing different results than expected
-    // @TODO: make this a zig function
-    extern fn heap_calculate_index(size: u64) callconv(.C) u64;
-    comptime
-    {
-        asm(
-        \\.intel_syntax noprefix
-        \\.global heap_calculate_index
-        \\heap_calculate_index:
-        \\bsr eax, edi
-        \\xor eax, -32
-        \\add eax, 33
-        \\add rax, -5
-        \\ret
-        );
-    }
-
     const large_allocation_threshold = 32768;
 };
 
+pub const HeapRegion = extern struct
+{
+    u1: extern union
+    {
+        next: u16,
+        size: u16,
+    },
+
+    previous: u16,
+    offset: u16,
+    used: u16,
+
+    u2: extern union
+    {
+        allocation_size: u64,
+        region_list_next: ?*HeapRegion,
+    },
+
+    region_list_reference: ?*?*@This(),
+
+    const used_header_size = @sizeOf(HeapRegion) - @sizeOf(?*?*HeapRegion);
+    const free_header_size = @sizeOf(HeapRegion);
+    const used_magic = 0xabcd;
+
+    fn remove_free(self: *@This()) void
+    {
+        if (self.region_list_reference == null or self.used != 0) panic_raw("heap panic\n");
+
+        self.region_list_reference.?.* = self.u2.region_list_next;
+
+        if (self.u2.region_list_next) |region_list_next|
+        {
+            region_list_next.region_list_reference = self.region_list_reference;
+        }
+        self.region_list_reference = null;
+    }
+
+    fn get_header(self: *@This()) ?*HeapRegion
+    {
+        return @intToPtr(?*HeapRegion, @ptrToInt(self) - used_header_size);
+    }
+
+    fn get_data(self: *@This()) u64
+    {
+        return @ptrToInt(self) + used_header_size;
+    }
+
+    fn get_next(self: *@This()) ?*HeapRegion
+    {
+        return @intToPtr(?*HeapRegion, @ptrToInt(self) + self.u1.next);
+    }
+
+    fn get_previous(self: *@This()) ?*HeapRegion
+    {
+        if (self.previous != 0)
+        {
+            return @intToPtr(?*HeapRegion, @ptrToInt(self) - self.previous);
+        }
+        else
+        {
+            return null;
+        }
+    }
+};
 
 pub fn fault_range(address: u64, byte_count: u64, flags: HandlePageFaultFlags) bool
 {

@@ -1373,48 +1373,14 @@ extern "C"
 }
 
 struct Pool {
-    void *Add(size_t _elementSize) { 		// Aligned to the size of a pointer.
-        KMutexAcquire(&mutex);
-        EsDefer(KMutexRelease(&mutex));
-
-        if (elementSize && _elementSize != elementSize) KernelPanic("Pool::Add - Pool element size mismatch.\n");
-        elementSize = _elementSize;
-
-        void *address;
-
-        if (cacheEntries) {
-            address = cache[--cacheEntries];
-            EsMemoryZero(address, elementSize);
-        } else {
-            address = EsHeapAllocate(elementSize, true, K_FIXED);
-        }
-
-        return address;
-
-    }
-    void Remove(void *address) {
-
-        KMutexAcquire(&mutex);
-        EsDefer(KMutexRelease(&mutex));
-
-        if (!address) return;
-
-#if 1
-        if (cacheEntries == POOL_CACHE_COUNT) {
-            EsHeapFree(address, elementSize, K_FIXED);
-        } else {
-            cache[cacheEntries++] = address;
-        }
-#else
-        EsHeapFree(address, elementSize);
-#endif
-    }
-
 	size_t elementSize;
 	void *cache[POOL_CACHE_COUNT];
 	size_t cacheEntries;
 	KMutex mutex;
 };
+
+extern "C" void *PoolAdd(Pool* pool, size_t _elementSize); 		// Aligned to the size of a pointer
+extern "C" void PoolRemove(Pool* pool, void *address);
 
 struct KEvent { // Waiting and notifying. Can wait on multiple at once. Can be set and reset with interrupts disabled.
 	volatile bool autoReset; // This should be first field in the structure, so that the type of KEvent can be easily declared with {autoReset}.
@@ -1468,14 +1434,13 @@ struct HeapRegion {
 #define FREE_HEAP_REGION_HEADER_SIZE (sizeof(HeapRegion))
 };
 
-static uintptr_t HeapCalculateIndex(uintptr_t size) {
+extern "C" uintptr_t HeapCalculateIndex(uintptr_t size) {
 	int x = __builtin_clz(size);
 	uintptr_t msb = sizeof(unsigned int) * 8 - x - 1;
 	return msb - 4;
 }
 
 #ifdef MEMORY_LEAK_DETECTOR
-extern "C" uint64_t ProcessorGetRBP();
 
 struct MemoryLeakDetectorEntry {
 	void *address;
@@ -1511,7 +1476,6 @@ struct EsHeap {
 #define HEAP_PANIC(n, x, y) EsPanic("Heap panic (%d/%x/%x).\n", n, x, y)
 
 #ifdef KERNEL
-EsHeap heapCore, heapFixed;
 #define HEAP_ACQUIRE_MUTEX(a) KMutexAcquire(&(a))
 #define HEAP_RELEASE_MUTEX(a) KMutexRelease(&(a))
 #define HEAP_ALLOCATE_CALL(x) MMStandardAllocate(_heap == &heapCore ? coreMMSpace : kernelMMSpace, x, MM_REGION_FIXED)
@@ -3636,50 +3600,49 @@ struct HandleTableL1 {
 };
 
 struct HandleTable {
-	HandleTableL1 l1r;
-	KMutex lock;
-	struct Process *process;
-	bool destroyed;
-	uint32_t handleCount;
+    HandleTableL1 l1r;
+    KMutex lock;
+    struct Process *process;
+    bool destroyed;
+    uint32_t handleCount;
 
-	// Be careful putting handles in the handle table!
-	// The process will be able to immediately close it.
-	// If this fails, the handle is closed and ES_INVALID_HANDLE is returned.
-	EsHandle OpenHandle(void *_object, uint32_t _flags, KernelObjectType _type, EsHandle at = ES_INVALID_HANDLE);
+    // Be careful putting handles in the handle table!
+    // The process will be able to immediately close it.
+    // If this fails, the handle is closed and ES_INVALID_HANDLE is returned.
+    EsHandle OpenHandle(void *_object, uint32_t _flags, KernelObjectType _type, EsHandle at = ES_INVALID_HANDLE);
 
-	bool CloseHandle(EsHandle handle);
-	void ModifyFlags(EsHandle handle, uint32_t newFlags);
+    bool CloseHandle(EsHandle handle);
+    void ModifyFlags(EsHandle handle, uint32_t newFlags);
 
-	// Resolve the handle if it is valid.
-	// The initial value of type is used as a mask of expected object types for the handle.
+    // Resolve the handle if it is valid.
+    // The initial value of type is used as a mask of expected object types for the handle.
 #define RESOLVE_HANDLE_FAILED (0)
 #define RESOLVE_HANDLE_NO_CLOSE (1)
 #define RESOLVE_HANDLE_NORMAL (2)
-	uint8_t ResolveHandle(Handle *outHandle, EsHandle inHandle, KernelObjectType typeMask); 
+    uint8_t ResolveHandle(Handle *outHandle, EsHandle inHandle, KernelObjectType typeMask); 
 
     void Destroy() {
-	KMutexAcquire(&lock);
-	EsDefer(KMutexRelease(&lock));
+        KMutexAcquire(&lock);
+        EsDefer(KMutexRelease(&lock));
 
-	if (destroyed) {
-		return;
-	}
+        if (destroyed) {
+            return;
+        }
 
-	destroyed = true;
-	HandleTableL1 *l1 = &l1r;
+        destroyed = true;
+        HandleTableL1 *l1 = &l1r;
 
-	for (uintptr_t i = 0; i < HANDLE_TABLE_L1_ENTRIES; i++) {
-		if (!l1->u[i]) continue;
+        for (uintptr_t i = 0; i < HANDLE_TABLE_L1_ENTRIES; i++) {
+            if (!l1->u[i]) continue;
 
-		for (uintptr_t k = 0; k < HANDLE_TABLE_L2_ENTRIES; k++) {
-			Handle *handle = &l1->t[i]->t[k];
-			if (handle->object) CloseHandleToObject(handle->object, handle->type, handle->flags);
-		}
+            for (uintptr_t k = 0; k < HANDLE_TABLE_L2_ENTRIES; k++) {
+                Handle *handle = &l1->t[i]->t[k];
+                if (handle->object) CloseHandleToObject(handle->object, handle->type, handle->flags);
+            }
 
-		EsHeapFree(l1->t[i], 0, K_FIXED);
-	}
-}
-
+            EsHeapFree(l1->t[i], 0, K_FIXED);
+        }
+    }
 };
 
 struct Process {
@@ -3754,6 +3717,7 @@ struct KTimer {
 	KAsyncTaskCallback callback;
 	EsGeneric argument;
 };
+
 extern "C"
 {
     void KTimerSet(KTimer *timer, uint64_t triggerInMs, KAsyncTaskCallback callback = nullptr, EsGeneric argument = 0);
@@ -3951,7 +3915,6 @@ extern "C"
     }
 }
 
-
 struct MMArchVAS {
 	// NOTE Must be first in the structure. See ProcessorSetAddressSpace and ArchSwitchContext.
 	uintptr_t cr3;
@@ -4104,7 +4067,7 @@ extern "C" Thread* ThreadSpawn(const char *cName, uintptr_t startAddress, uintpt
 		return nullptr;
 	}
 
-	Thread *thread = (Thread *) scheduler.threadPool.Add(sizeof(Thread));
+	Thread *thread = (Thread *) PoolAdd(&scheduler.threadPool, sizeof(Thread));
 	if (!thread) return nullptr;
 	KernelLog(LOG_INFO, "Scheduler", "spawn thread", "Created thread, %x to start at %x\n", thread, startAddress);
 
@@ -4206,7 +4169,7 @@ extern "C" Thread* ThreadSpawn(const char *cName, uintptr_t startAddress, uintpt
 	fail:;
 	if (stack) MMFree(process->vmm, (void *) stack);
 	if (kernelStack) MMFree(kernelMMSpace, (void *) kernelStack);
-	scheduler.threadPool.Remove(thread);
+	PoolRemove(&scheduler.threadPool, thread);
 	return nullptr;
 }
 
@@ -6359,7 +6322,7 @@ void ThreadRemove(Thread *thread) {
 	}
 #endif
 
-	scheduler.threadPool.Remove(thread);
+	PoolRemove(&scheduler.threadPool, thread);
 }
 
 KMutex objectHandleCountChange;
@@ -6959,7 +6922,7 @@ void ProcessRemove(Process *process) {
 
 	// Free the process.
 	MMSpaceCloseReference(process->vmm);
-	scheduler.processPool.Remove(process); 
+	PoolRemove(&scheduler.processPool, process); 
 }
 
 bool OpenHandleToObject(void *object, KernelObjectType type, uint32_t flags = 0) {
@@ -8447,7 +8410,7 @@ void MMSpaceCloseReference(MMSpace *space) {
 	KRegisterAsyncTask(&space->removeAsyncTask, [] (KAsyncTask *task) { 
 		MMSpace *space = EsContainerOf(MMSpace, removeAsyncTask, task);
 		MMArchFinalizeVAS(space);
-		scheduler.mmSpacePool.Remove(space);
+		PoolRemove(&scheduler.mmSpacePool, space);
 	});
 }
 
@@ -9250,16 +9213,16 @@ void ArchInitialise() {
 Process *ProcessSpawn(ProcessType processType) {
 	if (scheduler.shutdown) return nullptr;
 
-	Process *process = processType == PROCESS_KERNEL ? kernelProcess : (Process *) scheduler.processPool.Add(sizeof(Process));
+	Process *process = processType == PROCESS_KERNEL ? kernelProcess : (Process *) PoolAdd(&scheduler.processPool, sizeof(Process));
 
 	if (!process) {
 		return nullptr;
 	}
 
-	process->vmm = processType == PROCESS_KERNEL ? kernelMMSpace : (MMSpace *) scheduler.mmSpacePool.Add(sizeof(MMSpace));
+	process->vmm = processType == PROCESS_KERNEL ? kernelMMSpace : (MMSpace *) PoolAdd(&scheduler.mmSpacePool, sizeof(MMSpace));
 
 	if (!process->vmm) {
-		scheduler.processPool.Remove(process);
+		PoolRemove(&scheduler.processPool, process);
 		return nullptr;
 	}
 
@@ -14877,9 +14840,4 @@ extern "C" void CreateMainThread()
 extern "C" void start_desktop_process()
 {
     process_start_with_something(desktopProcess);
-}
-
-extern "C" uint64_t GetSize()
-{
-    return sizeof(Scheduler);
 }
