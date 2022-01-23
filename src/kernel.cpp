@@ -4183,196 +4183,196 @@ bool KEventWait(KEvent *_this, uint64_t timeoutMs) {
 	//}
 //}
 
-#ifdef DEBUG_BUILD
-bool _KMutexAcquire(KMutex *mutex, const char *cMutexString, const char *cFile, int line) {
-#else
-bool KMutexAcquire(KMutex *mutex) {
-#endif
-	if (scheduler.panic) return false;
+//#ifdef DEBUG_BUILD
+//bool _KMutexAcquire(KMutex *mutex, const char *cMutexString, const char *cFile, int line) {
+//#else
+//bool KMutexAcquire(KMutex *mutex) {
+//#endif
+	//if (scheduler.panic) return false;
 
-	Thread *currentThread = GetCurrentThread();
-	bool hasThread = currentThread;
+	//Thread *currentThread = GetCurrentThread();
+	//bool hasThread = currentThread;
 
-	if (!currentThread) {
-		currentThread = (Thread *) 1;
-	} else {
-		if (currentThread->terminatableState == THREAD_TERMINATABLE) {
-			KernelPanic("KMutex::Acquire - Thread is terminatable.\n");
-		}
-	}
+	//if (!currentThread) {
+		//currentThread = (Thread *) 1;
+	//} else {
+		//if (currentThread->terminatableState == THREAD_TERMINATABLE) {
+			//KernelPanic("KMutex::Acquire - Thread is terminatable.\n");
+		//}
+	//}
 
-	if (hasThread && mutex->owner && mutex->owner == currentThread) {
-#ifdef DEBUG_BUILD
-		KernelPanic("KMutex::Acquire - Attempt to acquire mutex (%x) at %x owned by current thread (%x) acquired at %x.\n", 
-				mutex, __builtin_return_address(0), currentThread, mutex->acquireAddress);
-#else
-		KernelPanic("KMutex::Acquire - Attempt to acquire mutex (%x) at %x owned by current thread (%x).\n", 
-				mutex, __builtin_return_address(0), currentThread);
-#endif
-	}
+	//if (hasThread && mutex->owner && mutex->owner == currentThread) {
+//#ifdef DEBUG_BUILD
+		//KernelPanic("KMutex::Acquire - Attempt to acquire mutex (%x) at %x owned by current thread (%x) acquired at %x.\n", 
+				//mutex, __builtin_return_address(0), currentThread, mutex->acquireAddress);
+//#else
+		//KernelPanic("KMutex::Acquire - Attempt to acquire mutex (%x) at %x owned by current thread (%x).\n", 
+				//mutex, __builtin_return_address(0), currentThread);
+//#endif
+	//}
 
-	if (!ProcessorAreInterruptsEnabled()) {
-		KernelPanic("KMutex::Acquire - Trying to acquire a mutex while interrupts are disabled.\n");
-	}
+	//if (!ProcessorAreInterruptsEnabled()) {
+		//KernelPanic("KMutex::Acquire - Trying to acquire a mutex while interrupts are disabled.\n");
+	//}
 
-	while (true) {
-		KSpinlockAcquire(&scheduler.dispatchSpinlock);
-		Thread *old = mutex->owner;
-		if (!old) mutex->owner = currentThread;
-		KSpinlockRelease(&scheduler.dispatchSpinlock);
-		if (!old) break;
+	//while (true) {
+		//KSpinlockAcquire(&scheduler.dispatchSpinlock);
+		//Thread *old = mutex->owner;
+		//if (!old) mutex->owner = currentThread;
+		//KSpinlockRelease(&scheduler.dispatchSpinlock);
+		//if (!old) break;
 
-		__sync_synchronize();
+		//__sync_synchronize();
 
-		if (GetLocalStorage() && GetLocalStorage()->schedulerReady) {
-			if (currentThread->state != THREAD_ACTIVE) {
-				KernelPanic("KWaitMutex - Attempting to wait on a mutex in a non-active thread.\n");
-			}
+		//if (GetLocalStorage() && GetLocalStorage()->schedulerReady) {
+			//if (currentThread->state != THREAD_ACTIVE) {
+				//KernelPanic("KWaitMutex - Attempting to wait on a mutex in a non-active thread.\n");
+			//}
 
-			currentThread->blocking.mutex = mutex;
-			__sync_synchronize();
+			//currentThread->blocking.mutex = mutex;
+			//__sync_synchronize();
 
-			// Instead of spinning on the lock, 
-			// let's tell the scheduler to not schedule this thread
-			// until it's released.
-			currentThread->state = THREAD_WAITING_MUTEX;
+			//// Instead of spinning on the lock, 
+			//// let's tell the scheduler to not schedule this thread
+			//// until it's released.
+			//currentThread->state = THREAD_WAITING_MUTEX;
 
-			KSpinlockAcquire(&scheduler.dispatchSpinlock);
-			// Is the owner of this mutex executing?
-			// If not, there's no point in spinning on it.
-			bool spin = mutex && mutex->owner && mutex->owner->executing;
-			KSpinlockRelease(&scheduler.dispatchSpinlock);
+			//KSpinlockAcquire(&scheduler.dispatchSpinlock);
+			//// Is the owner of this mutex executing?
+			//// If not, there's no point in spinning on it.
+			//bool spin = mutex && mutex->owner && mutex->owner->executing;
+			//KSpinlockRelease(&scheduler.dispatchSpinlock);
 
-			if (!spin && currentThread->blocking.mutex->owner) {
-				ProcessorFakeTimerInterrupt();
-			}
+			//if (!spin && currentThread->blocking.mutex->owner) {
+				//ProcessorFakeTimerInterrupt();
+			//}
 
-			// Early exit if this is a user request to block the thread and the thread is terminating.
-			while ((!currentThread->terminating || currentThread->terminatableState != THREAD_USER_BLOCK_REQUEST) && mutex->owner) {
-				currentThread->state = THREAD_WAITING_MUTEX;
-			}
+			//// Early exit if this is a user request to block the thread and the thread is terminating.
+			//while ((!currentThread->terminating || currentThread->terminatableState != THREAD_USER_BLOCK_REQUEST) && mutex->owner) {
+				//currentThread->state = THREAD_WAITING_MUTEX;
+			//}
 
-			currentThread->state = THREAD_ACTIVE;
+			//currentThread->state = THREAD_ACTIVE;
 
-			if (currentThread->terminating && currentThread->terminatableState == THREAD_USER_BLOCK_REQUEST) {
-				// We didn't acquire the mutex because the thread is terminating.
-				return false;
-			}
-		}
-	}
+			//if (currentThread->terminating && currentThread->terminatableState == THREAD_USER_BLOCK_REQUEST) {
+				//// We didn't acquire the mutex because the thread is terminating.
+				//return false;
+			//}
+		//}
+	//}
 
-	__sync_synchronize();
+	//__sync_synchronize();
 
-	if (mutex->owner != currentThread) {
-		KernelPanic("KMutex::Acquire - Invalid owner thread (%x, expected %x).\n", mutex->owner, currentThread);
-	}
+	//if (mutex->owner != currentThread) {
+		//KernelPanic("KMutex::Acquire - Invalid owner thread (%x, expected %x).\n", mutex->owner, currentThread);
+	//}
 
-#ifdef DEBUG_BUILD
-	mutex->acquireAddress = (uintptr_t) __builtin_return_address(0);
-	KMutexAssertLocked(mutex);
+//#ifdef DEBUG_BUILD
+	//mutex->acquireAddress = (uintptr_t) __builtin_return_address(0);
+	//KMutexAssertLocked(mutex);
 
-	if (!mutex->id) {
-		static uintptr_t nextMutexID;
-		mutex->id = __sync_fetch_and_add(&nextMutexID, 1);
-	}
+	//if (!mutex->id) {
+		//static uintptr_t nextMutexID;
+		//mutex->id = __sync_fetch_and_add(&nextMutexID, 1);
+	//}
 
-	if (currentThread && scheduler.threadEventLog) {
-		uintptr_t position = __sync_fetch_and_add(&scheduler.threadEventLogPosition, 1);
+	//if (currentThread && scheduler.threadEventLog) {
+		//uintptr_t position = __sync_fetch_and_add(&scheduler.threadEventLogPosition, 1);
 
-		if (position < scheduler.threadEventLogAllocated) {
-			EsThreadEventLogEntry *entry = scheduler.threadEventLog + position;
-			entry->event = ES_THREAD_EVENT_MUTEX_ACQUIRE;
-			entry->objectID = mutex->id;
-			entry->threadID = currentThread->id;
-			entry->line = line;
-			entry->fileBytes = EsCStringLength(cFile);
-			if (entry->fileBytes > sizeof(entry->file)) entry->fileBytes = sizeof(entry->file);
-			entry->expressionBytes = EsCStringLength(cMutexString);
-			if (entry->expressionBytes > sizeof(entry->expression)) entry->expressionBytes = sizeof(entry->expression);
-			EsMemoryCopy(entry->file, cFile, entry->fileBytes);
-			EsMemoryCopy(entry->expression, cMutexString, entry->expressionBytes);
-		}
-	}
-#endif
+		//if (position < scheduler.threadEventLogAllocated) {
+			//EsThreadEventLogEntry *entry = scheduler.threadEventLog + position;
+			//entry->event = ES_THREAD_EVENT_MUTEX_ACQUIRE;
+			//entry->objectID = mutex->id;
+			//entry->threadID = currentThread->id;
+			//entry->line = line;
+			//entry->fileBytes = EsCStringLength(cFile);
+			//if (entry->fileBytes > sizeof(entry->file)) entry->fileBytes = sizeof(entry->file);
+			//entry->expressionBytes = EsCStringLength(cMutexString);
+			//if (entry->expressionBytes > sizeof(entry->expression)) entry->expressionBytes = sizeof(entry->expression);
+			//EsMemoryCopy(entry->file, cFile, entry->fileBytes);
+			//EsMemoryCopy(entry->expression, cMutexString, entry->expressionBytes);
+		//}
+	//}
+//#endif
 
-	return true;
-}
+	//return true;
+//}
 
-#ifdef DEBUG_BUILD
-void _KMutexRelease(KMutex *mutex, const char *cMutexString, const char *cFile, int line) {
-#else
-void KMutexRelease(KMutex *mutex) {
-#endif
-	if (scheduler.panic) return;
+//#ifdef DEBUG_BUILD
+//void _KMutexRelease(KMutex *mutex, const char *cMutexString, const char *cFile, int line) {
+//#else
+//void KMutexRelease(KMutex *mutex) {
+//#endif
+	//if (scheduler.panic) return;
 
-	KMutexAssertLocked(mutex);
-	Thread *currentThread = GetCurrentThread();
-	KSpinlockAcquire(&scheduler.dispatchSpinlock);
+	//KMutexAssertLocked(mutex);
+	//Thread *currentThread = GetCurrentThread();
+	//KSpinlockAcquire(&scheduler.dispatchSpinlock);
 
-#ifdef DEBUG_BUILD
-	// EsPrint("$%x:%x:0\n", owner, id);
-#endif
+//#ifdef DEBUG_BUILD
+	//// EsPrint("$%x:%x:0\n", owner, id);
+//#endif
 
-	if (currentThread) {
-		Thread *temp = __sync_val_compare_and_swap(&mutex->owner, currentThread, nullptr);
-		if (currentThread != temp) KernelPanic("KMutex::Release - Invalid owner thread (%x, expected %x).\n", temp, currentThread);
-	} else mutex->owner = nullptr;
+	//if (currentThread) {
+		//Thread *temp = __sync_val_compare_and_swap(&mutex->owner, currentThread, nullptr);
+		//if (currentThread != temp) KernelPanic("KMutex::Release - Invalid owner thread (%x, expected %x).\n", temp, currentThread);
+	//} else mutex->owner = nullptr;
 
-	volatile bool preempt = mutex->blockedThreads.count;
+	//volatile bool preempt = mutex->blockedThreads.count;
 
-	if (scheduler.started) {
-		// NOTE We unblock all waiting threads, because of how blockedThreadPriorities works.
-		scheduler.NotifyObject(&mutex->blockedThreads, true, currentThread); 
-	}
+	//if (scheduler.started) {
+		//// NOTE We unblock all waiting threads, because of how blockedThreadPriorities works.
+		//scheduler.NotifyObject(&mutex->blockedThreads, true, currentThread); 
+	//}
 
-	KSpinlockRelease(&scheduler.dispatchSpinlock);
-	__sync_synchronize();
+	//KSpinlockRelease(&scheduler.dispatchSpinlock);
+	//__sync_synchronize();
 
-#ifdef DEBUG_BUILD
-	mutex->releaseAddress = (uintptr_t) __builtin_return_address(0);
+//#ifdef DEBUG_BUILD
+	//mutex->releaseAddress = (uintptr_t) __builtin_return_address(0);
 
-	if (currentThread && scheduler.threadEventLog) {
-		uintptr_t position = __sync_fetch_and_add(&scheduler.threadEventLogPosition, 1);
+	//if (currentThread && scheduler.threadEventLog) {
+		//uintptr_t position = __sync_fetch_and_add(&scheduler.threadEventLogPosition, 1);
 
-		if (position < scheduler.threadEventLogAllocated) {
-			EsThreadEventLogEntry *entry = scheduler.threadEventLog + position;
-			entry->event = ES_THREAD_EVENT_MUTEX_RELEASE;
-			entry->objectID = mutex->id;
-			entry->threadID = currentThread->id;
-			entry->line = line;
-			entry->fileBytes = EsCStringLength(cFile);
-			if (entry->fileBytes > sizeof(entry->file)) entry->fileBytes = sizeof(entry->file);
-			entry->expressionBytes = EsCStringLength(cMutexString);
-			if (entry->expressionBytes > sizeof(entry->expression)) entry->expressionBytes = sizeof(entry->expression);
-			EsMemoryCopy(entry->file, cFile, entry->fileBytes);
-			EsMemoryCopy(entry->expression, cMutexString, entry->expressionBytes);
-		}
-	}
-#endif
+		//if (position < scheduler.threadEventLogAllocated) {
+			//EsThreadEventLogEntry *entry = scheduler.threadEventLog + position;
+			//entry->event = ES_THREAD_EVENT_MUTEX_RELEASE;
+			//entry->objectID = mutex->id;
+			//entry->threadID = currentThread->id;
+			//entry->line = line;
+			//entry->fileBytes = EsCStringLength(cFile);
+			//if (entry->fileBytes > sizeof(entry->file)) entry->fileBytes = sizeof(entry->file);
+			//entry->expressionBytes = EsCStringLength(cMutexString);
+			//if (entry->expressionBytes > sizeof(entry->expression)) entry->expressionBytes = sizeof(entry->expression);
+			//EsMemoryCopy(entry->file, cFile, entry->fileBytes);
+			//EsMemoryCopy(entry->expression, cMutexString, entry->expressionBytes);
+		//}
+	//}
+//#endif
 
-	if (preempt) ProcessorFakeTimerInterrupt();
-}
+	//if (preempt) ProcessorFakeTimerInterrupt();
+//}
 
-void KMutexAssertLocked(KMutex *mutex) {
-	Thread *currentThread = GetCurrentThread();
+//void KMutexAssertLocked(KMutex *mutex) {
+	//Thread *currentThread = GetCurrentThread();
 
-	if (!currentThread) {
-		currentThread = (Thread *) 1;
-	}
+	//if (!currentThread) {
+		//currentThread = (Thread *) 1;
+	//}
 
-	if (mutex->owner != currentThread) {
-#ifdef DEBUG_BUILD
-		KernelPanic("KMutex::AssertLocked - Mutex not correctly acquired\n"
-				"currentThread = %x, owner = %x\nthis = %x\nReturn %x/%x\nLast used from %x->%x\n", 
-				currentThread, mutex->owner, mutex, __builtin_return_address(0), __builtin_return_address(1), 
-				mutex->acquireAddress, mutex->releaseAddress);
-#else
-		KernelPanic("KMutex::AssertLocked - Mutex not correctly acquired\n"
-				"currentThread = %x, owner = %x\nthis = %x\nReturn %x\n", 
-				currentThread, mutex->owner, mutex, __builtin_return_address(0));
-#endif
-	}
-}
+	//if (mutex->owner != currentThread) {
+//#ifdef DEBUG_BUILD
+		//KernelPanic("KMutex::AssertLocked - Mutex not correctly acquired\n"
+				//"currentThread = %x, owner = %x\nthis = %x\nReturn %x/%x\nLast used from %x->%x\n", 
+				//currentThread, mutex->owner, mutex, __builtin_return_address(0), __builtin_return_address(1), 
+				//mutex->acquireAddress, mutex->releaseAddress);
+//#else
+		//KernelPanic("KMutex::AssertLocked - Mutex not correctly acquired\n"
+				//"currentThread = %x, owner = %x\nthis = %x\nReturn %x\n", 
+				//currentThread, mutex->owner, mutex, __builtin_return_address(0));
+//#endif
+	//}
+//}
 
 struct MMArchVAS {
 	// NOTE Must be first in the structure. See ProcessorSetAddressSpace and ArchSwitchContext.

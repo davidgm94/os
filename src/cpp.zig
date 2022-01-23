@@ -32,19 +32,19 @@ export var simdSSSE3Support: u32 linksection(".data") = 1;
 
 export var global_descriptor_table: GDT align(0x10) linksection(".data") = GDT
 {
-        .null_entry = GDT.Entry.new(0, 0, 0, 0),
-        .code_entry = GDT.Entry.new(0xffff, 0, 0xcf9a, 0),
-        .data_entry = GDT.Entry.new(0xffff, 0, 0xcf92, 0),
-        .code_entry16 = GDT.Entry.new(0xffff, 0, 0x0f9a, 0),
-        .data_entry16 = GDT.Entry.new(0xffff, 0, 0x0f92, 0),
-        .user_code = GDT.Entry.new(0xffff, 0, 0xcffa, 0),
-        .user_data = GDT.Entry.new(0xffff, 0, 0xcff2, 0),
-        .tss = TSS { .foo1 = 0x68, .foo2 = 0, .foo3 = 0xe9, .foo4 = 0, .foo5 = 0 },
-        .code_entry64 = GDT.Entry.new(0xffff, 0, 0xaf9a, 0),
-        .data_entry64 = GDT.Entry.new(0xffff, 0, 0xaf92, 0),
-        .user_code64 = GDT.Entry.new(0xffff, 0, 0xaffa, 0),
-        .user_data64 = GDT.Entry.new(0xffff, 0, 0xaff2, 0),
-        .user_code64c = GDT.Entry.new(0xffff, 0, 0xaffa, 0),
+    .null_entry = GDT.Entry.new(0, 0, 0, 0),
+    .code_entry = GDT.Entry.new(0xffff, 0, 0xcf9a, 0),
+    .data_entry = GDT.Entry.new(0xffff, 0, 0xcf92, 0),
+    .code_entry16 = GDT.Entry.new(0xffff, 0, 0x0f9a, 0),
+    .data_entry16 = GDT.Entry.new(0xffff, 0, 0x0f92, 0),
+    .user_code = GDT.Entry.new(0xffff, 0, 0xcffa, 0),
+    .user_data = GDT.Entry.new(0xffff, 0, 0xcff2, 0),
+    .tss = TSS { .foo1 = 0x68, .foo2 = 0, .foo3 = 0xe9, .foo4 = 0, .foo5 = 0 },
+    .code_entry64 = GDT.Entry.new(0xffff, 0, 0xaf9a, 0),
+    .data_entry64 = GDT.Entry.new(0xffff, 0, 0xaf92, 0),
+    .user_code64 = GDT.Entry.new(0xffff, 0, 0xaffa, 0),
+    .user_data64 = GDT.Entry.new(0xffff, 0, 0xaff2, 0),
+    .user_code64c = GDT.Entry.new(0xffff, 0, 0xaffa, 0),
 };
 export var gdt_descriptor2 = GDT.Descriptor
 {
@@ -68,26 +68,16 @@ pub fn Volatile(comptime T: type) type
     {
         value: T,
 
-        pub fn read_volatile(self: *const @This()) callconv(.Inline) T
+        pub fn read_volatile(self: *volatile const @This()) callconv(.Inline) T
         {
-            return @ptrCast(*const volatile T, &self.value).*;
+            return self.value;
         }
 
-        pub fn write_volatile(self: *@This(), value: T) callconv(.Inline) void
+        pub fn write_volatile(self: *volatile @This(), value: T) callconv(.Inline) void
         {
-            @ptrCast(*volatile T, &self.value).* = value;
+            self.value = value;
         }
 
-        /// Only supported for integer types
-        pub fn atomic_fetch_add(self: *@This(), value: T) callconv(.Inline) T
-        {
-            return @atomicRmw(T, &self.value, .Add, value, .SeqCst);
-        }
-        pub fn atomic_fetch_sub(self: *@This(), value: T) callconv(.Inline) T
-        {
-            return @atomicRmw(T, &self.value, .Sub, value, .SeqCst);
-        }
-        
         pub fn increment(self: *@This()) void
         {
             self.write_volatile(self.read_volatile() + 1);
@@ -97,10 +87,75 @@ pub fn Volatile(comptime T: type) type
         {
             self.write_volatile(self.read_volatile() - 1);
         }
+        
+        /// Only supported for integer types
+        pub fn atomic_fetch_add(self: *@This(), value: T) callconv(.Inline) T
+        {
+            return @atomicRmw(T, &self.value, .Add, value, .SeqCst);
+        }
+        pub fn atomic_fetch_sub(self: *@This(), value: T) callconv(.Inline) T
+        {
+            return @atomicRmw(T, &self.value, .Sub, value, .SeqCst);
+        }
 
         pub fn atomic_compare_and_swap(self: *@This(), expected_value: T, new_value: T) ?T
         {
             return @cmpxchgStrong(@TypeOf(self.value), &self.value, expected_value, new_value, .SeqCst, .SeqCst);
+        }
+    };
+}
+
+fn UnalignedVolatilePointer(comptime T: type) type
+{
+    return VolatilePointerExtended(T, 1);
+}
+
+fn VolatilePointer(comptime T: type) type
+{
+    return VolatilePointerExtended(T, null);
+}
+
+fn VolatilePointerExtended(comptime T: type, comptime alignment: ?comptime_int) type
+{
+    return extern struct
+    {
+        ptr: ?PtrType,
+
+        const PtrType = *volatile align(if (alignment) |alignment_nn| alignment_nn else @alignOf(T)) T;
+
+        fn equal(self: *volatile @This(), other: ?PtrType) bool
+        {
+            return self.ptr == other;
+        }
+
+        fn dereference(self: *volatile @This()) T
+        {
+            return self.ptr.?.*;
+        }
+
+        fn overwrite(self: *volatile @This(), ptr: ?PtrType) void
+        {
+            self.ptr = ptr;
+        }
+
+        fn access(self: *volatile @This()) PtrType
+        {
+            return self.ptr.?;
+        }
+
+        fn get(self: *volatile @This()) ?PtrType
+        {
+            return self.ptr;
+        }
+
+        fn is_null(self: *volatile @This()) bool
+        {
+            return self.ptr == null;
+        }
+
+        fn atomic_compare_and_swap(self: *volatile @This(), expected_value: ?PtrType, new_value: ?PtrType) ??PtrType
+        {
+            return @cmpxchgStrong(?PtrType, @ptrCast(*?PtrType, &self.ptr), expected_value, new_value, .SeqCst, .SeqCst);
         }
     };
 }
@@ -1081,16 +1136,16 @@ pub const Thread = extern struct
 
     blocking: extern union
     {
-        mutex: ?*volatile Mutex,
+        mutex: VolatilePointer(Mutex),
         writer: struct
         {
-            lock: ?*volatile WriterLock,
+            lock: VolatilePointer(WriterLock),
             type: bool,
         },
         event: struct
         {
             items: ?[*]volatile LinkedList(Thread).Item,
-            array: [max_wait_count]*volatile Event,
+            array: [max_wait_count]VolatilePointer(Event),
             count: u64,
         },
     },
@@ -1098,9 +1153,11 @@ pub const Thread = extern struct
     killed_event: Event,
     kill_async_task: AsyncTask,
 
-    temporary_address_space: ?*volatile AddressSpace,
+    temporary_address_space: VolatilePointer(AddressSpace),
     interrupt_context: *InterruptContext,
     last_known_execution_address: u64, // @TODO: for debugging
+
+    name: [*:0]u8,
 
     pub const Priority = enum(i8)
     {
@@ -1446,14 +1503,14 @@ pub const Timer = extern struct
 
 pub const Mutex = extern struct
 {
-    owner: ?*align(1) volatile Thread,
+    owner: UnalignedVolatilePointer(Thread),
     blocked_threads: LinkedList(Thread),
 
     pub fn acquire(self: *@This()) bool
     {
         if (scheduler.panic.read_volatile()) return false;
 
-        const current_thread = blk:
+        var current_thread = blk:
         {
             const thread_address = addr_block:
             {
@@ -1464,7 +1521,7 @@ pub const Mutex = extern struct
                         KernelPanic("thread is terminatable\n");
                     }
 
-                    if (self.owner != null and self.owner == current_thread)
+                    if (!self.owner.is_null() and self.owner.equal(current_thread))
                     {
                         KernelPanic("Attempt to acquire a mutex owned by current thread already acquired\n");
                     }
@@ -1477,16 +1534,21 @@ pub const Mutex = extern struct
                 }
             };
 
-            break :blk @intToPtr(*align(1) Thread, thread_address);
+            break :blk UnalignedVolatilePointer(Thread) { .ptr = @intToPtr(*volatile align(1) Thread, thread_address) };
         };
+
+        if (!ProcessorAreInterruptsEnabled())
+        {
+            KernelPanic("trying to acquire a mutex with interrupts disabled");
+        }
 
         while (true)
         {
             scheduler.dispatch_spinlock.acquire();
-            if (self.owner == null) self.owner = current_thread;
+            const old = self.owner.get();
+            if (old == null) self.owner.overwrite(current_thread.get());
             scheduler.dispatch_spinlock.release();
-
-            if (self.owner == null) break;
+            if (old == null) break;
 
             @fence(.SeqCst);
 
@@ -1494,20 +1556,20 @@ pub const Mutex = extern struct
             {
                 if (local_storage.scheduler_ready)
                 {
-                    if (current_thread.state.read_volatile() != .active)
+                    if (current_thread.access().state.read_volatile() != .active)
                     {
                         KernelPanic("Attempting to wait on a mutex in a non-active thread\n");
                     }
 
-                    current_thread.blocking.mutex = self;
+                    current_thread.access().blocking.mutex.overwrite(self);
                     @fence(.SeqCst);
 
-                    current_thread.state.write_volatile(.waiting_mutex);
+                    current_thread.access().state.write_volatile(.waiting_mutex);
 
                     scheduler.dispatch_spinlock.acquire();
                     const spin = blk:
                     {
-                        if (self.owner) |owner|
+                        if (self.owner.get()) |owner|
                         {
                             const boolean = owner.executing;
                             break :blk boolean.read_volatile();
@@ -1517,19 +1579,19 @@ pub const Mutex = extern struct
 
                     scheduler.dispatch_spinlock.release();
 
-                    if (!spin and current_thread.blocking.mutex.?.owner != null)
+                    if (!spin and !current_thread.access().blocking.mutex.access().owner.is_null())
                     {
                         ProcessorFakeTimerInterrupt();
                     }
 
-                    while ((!current_thread.terminating.read_volatile() or current_thread.terminatable_state.read_volatile() != .user_block_request) and self.owner != null)
+                    while ((!current_thread.access().terminating.read_volatile() or current_thread.access().terminatable_state.read_volatile() != .user_block_request) and !self.owner.is_null())
                     {
-                        current_thread.state.write_volatile(.waiting_mutex);
+                        current_thread.access().state.write_volatile(.waiting_mutex);
                     }
 
-                    current_thread.state.write_volatile(.active);
+                    current_thread.access().state.write_volatile(.active);
 
-                    if (current_thread.terminating.read_volatile() and current_thread.terminatable_state.read_volatile() == .user_block_request)
+                    if (current_thread.access().terminating.read_volatile() and current_thread.access().terminatable_state.read_volatile() == .user_block_request)
                     {
                         // mutex was not acquired because the thread is terminating
                         return false;
@@ -1540,7 +1602,7 @@ pub const Mutex = extern struct
 
         @fence(.SeqCst);
 
-        if (self.owner != current_thread)
+        if (self.owner.ptr != current_thread.ptr)
         {
             KernelPanic("Invalid owner thread\n");
         }
@@ -1558,12 +1620,12 @@ pub const Mutex = extern struct
 
         if (maybe_current_thread) |current_thread|
         {
-            if (@cmpxchgStrong(@TypeOf(self.owner), &self.owner, current_thread, null, .SeqCst, .SeqCst) != null)
+            if (self.owner.atomic_compare_and_swap(current_thread, null) != null)
             {
                 KernelPanic("Invalid owner thread\n");
             }
         }
-        else self.owner = null;
+        else self.owner.overwrite(null);
 
         const preempt = self.blocked_threads.count != 0;
         if (scheduler.started.read_volatile())
@@ -1591,30 +1653,95 @@ pub const Mutex = extern struct
             }
         };
 
-        if (self.owner != current_thread)
+        if (!self.owner.equal(current_thread))
         {
             KernelPanic("Mutex not correctly acquired\n");
         }
     }
 };
+
+export fn KMutexAcquire(mutex: *Mutex) callconv(.C) bool
+{
+    return mutex.acquire();
+}
+export fn KMutexRelease(mutex: *Mutex) callconv(.C) void
+{
+    mutex.release();
+}
+export fn KMutexAssertLocked(mutex: *Mutex) callconv(.C) void
+{
+    mutex.assert_locked();
+}
+
+const Error = i64;
+const ObjectCacheItem = SimpleList;
+pub const Node = extern struct
+{
+    driver_node: u64,
+    handle_count: Volatile(u64),
+    directory_entry: u64,
+    filesystem: u64,
+    id: u64,
+    writer_lock: WriterLock,
+    node_error: i64,
+    flags: Volatile(u32),
+    cache_item: ObjectCacheItem,
+};
+
+pub const ProcessCreateData = extern struct
+{
+    system_data: u64,
+    subsystem_data: u64,
+    user_data: u64,
+    subsystem_ID: u8,
+};
+
+pub const FatalError = enum(u32)
+{
+    abort,
+    incorrect_file_acces,
+    incorrect_node_type,
+    insufficient_permissions,
+    invalid_buffer,
+    invalid_handle,
+    invalid_memory_region,
+    out_of_range,
+    process_exception,
+    recursive_batch,
+    unknown_syscall,
+};
+
+pub const CrashReason = extern struct
+{
+    error_code: FatalError,
+    during_system_call: i32,
+};
+
 pub const Process = extern struct
 {
     // @TODO: maybe turn into a pointer
-    address_space: AddressSpace,
+    address_space: *AddressSpace,
     message_queue: MessageQueue,
     handle_table: HandleTable,
 
     threads: LinkedList(Thread),
     threads_mutex: Mutex,
 
+    executable_node: ?*Node,
+    executable_name: [32]u8,
+    data: ProcessCreateData,
     permissions: Process.Permission,
+    creation_flags: u32,
     type: Process.Type,
+
     id: u64,
     handle_count: Volatile(u64),
     all_item: LinkedList(Process).Item,
 
     crash_mutex: Mutex,
-    //...
+    crash_reason: CrashReason,
+    crashed: bool,
+
     all_threads_terminated: bool,
     block_shutdown: bool,
     prevent_new_threads: bool,
