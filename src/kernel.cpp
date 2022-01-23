@@ -1306,12 +1306,15 @@ struct KWriterLock { // One writer or many readers.
 #define K_LOCK_EXCLUSIVE (true)
 #define K_LOCK_SHARED (false)
 
-bool KWriterLockTake(KWriterLock *lock, bool write, bool poll = false);
-void KWriterLockReturn(KWriterLock *lock, bool write);
-void KWriterLockConvertExclusiveToShared(KWriterLock *lock);
-void KWriterLockAssertExclusive(KWriterLock *lock);
-void KWriterLockAssertShared(KWriterLock *lock);
-void KWriterLockAssertLocked(KWriterLock *lock);
+extern "C"
+{
+    bool KWriterLockTake(KWriterLock *lock, bool write, bool poll = false);
+    void KWriterLockReturn(KWriterLock *lock, bool write);
+    void KWriterLockConvertExclusiveToShared(KWriterLock *lock);
+    void KWriterLockAssertExclusive(KWriterLock *lock);
+    void KWriterLockAssertShared(KWriterLock *lock);
+    void KWriterLockAssertLocked(KWriterLock *lock);
+}
 
 struct KMutex { // Mutual exclusion. Thread-owned.
 	struct Thread *volatile owner;
@@ -3908,6 +3911,10 @@ struct Scheduler {
 #endif
 };
 extern Scheduler scheduler;
+extern "C" void SchedulerNotifyObject(LinkedList<Thread> *blockedThreads, bool unblockAll, Thread *previousMutexOwner = nullptr)
+{
+    scheduler.NotifyObject(blockedThreads, unblockAll, previousMutexOwner);
+}
 
 void KTimerSet(KTimer *timer, uint64_t triggerInMs, KAsyncTaskCallback _callback, EsGeneric _argument) {
 	KSpinlockAcquire(&scheduler.activeTimersSpinlock);
@@ -4498,130 +4505,130 @@ void MMUnpinRegion(MMSpace *space, MMRegion *region) {
 	KMutexRelease(&space->reserveMutex);
 }
 
-void KWriterLockAssertLocked(KWriterLock *lock) {
-	if (lock->state == 0) {
-		KernelPanic("KWriterLock::AssertLocked - Unlocked.\n");
-	}
-}
+//void KWriterLockAssertLocked(KWriterLock *lock) {
+	//if (lock->state == 0) {
+		//KernelPanic("KWriterLock::AssertLocked - Unlocked.\n");
+	//}
+//}
 
-void KWriterLockAssertShared(KWriterLock *lock) {
-	if (lock->state == 0) {
-		KernelPanic("KWriterLock::AssertShared - Unlocked.\n");
-	} else if (lock->state < 0) {
-		KernelPanic("KWriterLock::AssertShared - In exclusive mode.\n");
-	}
-}
+//void KWriterLockAssertShared(KWriterLock *lock) {
+	//if (lock->state == 0) {
+		//KernelPanic("KWriterLock::AssertShared - Unlocked.\n");
+	//} else if (lock->state < 0) {
+		//KernelPanic("KWriterLock::AssertShared - In exclusive mode.\n");
+	//}
+//}
 
-void KWriterLockAssertExclusive(KWriterLock *lock) {
-	if (lock->state == 0) {
-		KernelPanic("KWriterLock::AssertExclusive - Unlocked.\n");
-	} else if (lock->state > 0) {
-		KernelPanic("KWriterLock::AssertExclusive - In shared mode, with %d readers.\n", lock->state);
-	}
-}
+//void KWriterLockAssertExclusive(KWriterLock *lock) {
+	//if (lock->state == 0) {
+		//KernelPanic("KWriterLock::AssertExclusive - Unlocked.\n");
+	//} else if (lock->state > 0) {
+		//KernelPanic("KWriterLock::AssertExclusive - In shared mode, with %d readers.\n", lock->state);
+	//}
+//}
 
-void KWriterLockReturn(KWriterLock *lock, bool write) {
-	KSpinlockAcquire(&scheduler.dispatchSpinlock);
+//void KWriterLockReturn(KWriterLock *lock, bool write) {
+	//KSpinlockAcquire(&scheduler.dispatchSpinlock);
 
-	if (lock->state == -1) {
-		if (!write) {
-			KernelPanic("KWriterLock::Return - Attempting to return shared access to an exclusively owned lock.\n");
-		}
+	//if (lock->state == -1) {
+		//if (!write) {
+			//KernelPanic("KWriterLock::Return - Attempting to return shared access to an exclusively owned lock.\n");
+		//}
 
-		lock->state = 0;
-	} else if (lock->state == 0) {
-		KernelPanic("KWriterLock::Return - Attempting to return access to an unowned lock.\n");
-	} else {
-		if (write) {
-			KernelPanic("KWriterLock::Return - Attempting to return exclusive access to an shared lock.\n");
-		}
+		//lock->state = 0;
+	//} else if (lock->state == 0) {
+		//KernelPanic("KWriterLock::Return - Attempting to return access to an unowned lock.\n");
+	//} else {
+		//if (write) {
+			//KernelPanic("KWriterLock::Return - Attempting to return exclusive access to an shared lock.\n");
+		//}
 
-		lock->state--;
-	}
+		//lock->state--;
+	//}
 
-	if (!lock->state) {
-		scheduler.NotifyObject(&lock->blockedThreads, true);
-	}
+	//if (!lock->state) {
+		//scheduler.NotifyObject(&lock->blockedThreads, true);
+	//}
 
-	KSpinlockRelease(&scheduler.dispatchSpinlock);
-}
+	//KSpinlockRelease(&scheduler.dispatchSpinlock);
+//}
 
-bool KWriterLockTake(KWriterLock *lock, bool write, bool poll) {
-	// TODO Preventing exclusive access starvation.
-	// TODO Do this without taking the scheduler's lock?
+//bool KWriterLockTake(KWriterLock *lock, bool write, bool poll) {
+	//// TODO Preventing exclusive access starvation.
+	//// TODO Do this without taking the scheduler's lock?
 
-	bool done = false;
+	//bool done = false;
 
-	Thread *thread = GetCurrentThread();
+	//Thread *thread = GetCurrentThread();
 
-	if (thread) {
-		thread->blocking.writerLock = lock;
-		thread->blocking.writerLockType = write;
-		__sync_synchronize();
-	}
+	//if (thread) {
+		//thread->blocking.writerLock = lock;
+		//thread->blocking.writerLockType = write;
+		//__sync_synchronize();
+	//}
 
-	while (true) {
-		KSpinlockAcquire(&scheduler.dispatchSpinlock);
+	//while (true) {
+		//KSpinlockAcquire(&scheduler.dispatchSpinlock);
 
-		if (write) {
-			if (lock->state == 0) {
-				lock->state = -1;
-				done = true;
-#ifdef DEBUG_BUILD
-				lock->exclusiveOwner = thread;
-#endif
-			}
-		} else {
-			if (lock->state >= 0) {
-				lock->state++;
-				done = true;
-			}
-		}
+		//if (write) {
+			//if (lock->state == 0) {
+				//lock->state = -1;
+				//done = true;
+//#ifdef DEBUG_BUILD
+				//lock->exclusiveOwner = thread;
+//#endif
+			//}
+		//} else {
+			//if (lock->state >= 0) {
+				//lock->state++;
+				//done = true;
+			//}
+		//}
 
-		KSpinlockRelease(&scheduler.dispatchSpinlock);
+		//KSpinlockRelease(&scheduler.dispatchSpinlock);
 
-		if (poll || done) {
-			break;
-		} else {
-			if (!thread) {
-				KernelPanic("KWriterLock::Take - Scheduler not ready yet.\n");
-			}
+		//if (poll || done) {
+			//break;
+		//} else {
+			//if (!thread) {
+				//KernelPanic("KWriterLock::Take - Scheduler not ready yet.\n");
+			//}
 
-			thread->state = THREAD_WAITING_WRITER_LOCK;
-			ProcessorFakeTimerInterrupt();
-			thread->state = THREAD_ACTIVE;
-		}
-	}
+			//thread->state = THREAD_WAITING_WRITER_LOCK;
+			//ProcessorFakeTimerInterrupt();
+			//thread->state = THREAD_ACTIVE;
+		//}
+	//}
 
-	return done;
-}
+	//return done;
+//}
 
-void KWriterLockTakeMultiple(KWriterLock **locks, size_t lockCount, bool write) {
-	uintptr_t i = 0, taken = 0;
+//void KWriterLockTakeMultiple(KWriterLock **locks, size_t lockCount, bool write) {
+	//uintptr_t i = 0, taken = 0;
 
-	while (taken != lockCount) {
-		if (KWriterLockTake(locks[i], write, taken)) {
-			taken++, i++;
-			if (i == lockCount) i = 0;
-		} else {
-			intptr_t j = i - 1;
+	//while (taken != lockCount) {
+		//if (KWriterLockTake(locks[i], write, taken)) {
+			//taken++, i++;
+			//if (i == lockCount) i = 0;
+		//} else {
+			//intptr_t j = i - 1;
 
-			while (taken) {
-				if (j == -1) j = lockCount - 1;
-				KWriterLockReturn(locks[j], write);
-				j--, taken--;
-			}
-		}
-	}
-}
+			//while (taken) {
+				//if (j == -1) j = lockCount - 1;
+				//KWriterLockReturn(locks[j], write);
+				//j--, taken--;
+			//}
+		//}
+	//}
+//}
 
-void KWriterLockConvertExclusiveToShared(KWriterLock *lock) {
-	KSpinlockAcquire(&scheduler.dispatchSpinlock);
-	KWriterLockAssertExclusive(lock);
-	lock->state = 1;
-	scheduler.NotifyObject(&lock->blockedThreads, true);
-	KSpinlockRelease(&scheduler.dispatchSpinlock);
-}
+//void KWriterLockConvertExclusiveToShared(KWriterLock *lock) {
+	//KSpinlockAcquire(&scheduler.dispatchSpinlock);
+	//KWriterLockAssertExclusive(lock);
+	//lock->state = 1;
+	//scheduler.NotifyObject(&lock->blockedThreads, true);
+	//KSpinlockRelease(&scheduler.dispatchSpinlock);
+//}
 
 #define ES_SHARED_MEMORY_NAME_MAX_LENGTH (32)
 struct MMSharedRegion {

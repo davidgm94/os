@@ -927,6 +927,7 @@ pub fn build(b: *Builder) !void
                 \\b KernelInitialise
                 \\b KernelPanic
                 \\b KernelMain
+                \\b TODO
                 \\target remote localhost:1234
                 \\c
                 ,

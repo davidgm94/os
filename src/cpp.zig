@@ -257,7 +257,7 @@ const idt_entry_count = 0x1000 / @sizeOf(IDTEntry);
 
 comptime { assert(@sizeOf(IDTEntry) == 0x10); }
 
-fn TODO() noreturn
+export fn TODO() noreturn
 {
     KernelPanic("unimplemented");
 }
@@ -2942,7 +2942,7 @@ pub const WriterLock = extern struct
 
         if (self.state.read_volatile() == 0)
         {
-            scheduler.notify_object(&self.blocked_threads, true);
+            SchedulerNotifyObject(&self.blocked_threads, true, null);
         }
 
         scheduler.dispatch_spinlock.release();
@@ -2967,9 +2967,45 @@ pub const WriterLock = extern struct
         if (self.state.read_volatile() == 0) KernelPanic("unlocked");
     }
 
+    pub fn convert_exclusive_to_shared(self: *@This()) void
+    {
+        scheduler.dispatch_spinlock.acquire();
+        self.assert_exclusive();
+        self.state.write_volatile(1);
+        SchedulerNotifyObject(&self.blocked_threads, true, null);
+        scheduler.dispatch_spinlock.release();
+    }
+
     pub const shared = false;
     pub const exclusive = true;
 };
+extern fn SchedulerNotifyObject(blocked_threads: *LinkedList(Thread), unblock_all: bool, previous_mutex_owner: ?*Thread) callconv(.C) void;
+
+export fn KWriterLockTake(lock: *WriterLock, write: bool, poll: bool) callconv(.C) bool
+{
+    return lock.take_extended(write, poll);
+}
+export fn KWriterLockReturn(lock: *WriterLock, write: bool) callconv(.C) void
+{
+    lock.return_lock(write);
+}
+export fn KWriterLockConvertExclusiveToShared(lock: *WriterLock) callconv(.C) void
+{
+    lock.convert_exclusive_to_shared();
+}
+export fn KWriterLockAssertExclusive(lock: *WriterLock) callconv(.C) void
+{
+    lock.assert_exclusive();
+}
+export fn KWriterLockAssertShared(lock: *WriterLock) callconv(.C) void
+{
+    lock.assert_shared();
+}
+export fn KWriterLockAssertLocked(lock: *WriterLock) callconv(.C) void
+{
+    lock.assert_locked();
+}
+
 pub const AsyncTask = extern struct
 {
     item: SimpleList,
