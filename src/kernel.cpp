@@ -3910,10 +3910,42 @@ struct Scheduler {
 	volatile size_t threadEventLogAllocated;
 #endif
 };
+
 extern Scheduler scheduler;
-extern "C" void SchedulerNotifyObject(LinkedList<Thread> *blockedThreads, bool unblockAll, Thread *previousMutexOwner = nullptr)
+extern "C"
 {
-    scheduler.NotifyObject(blockedThreads, unblockAll, previousMutexOwner);
+    void SchedulerYield(InterruptContext *context)
+    {
+        scheduler.Yield(context);
+    }
+    void SchedulerCreateProcessorThreads(CPULocalStorage *local)
+    {
+        scheduler.CreateProcessorThreads(local);
+    }
+    void SchedulerAddActiveThread(Thread *thread, bool start) // Add an active thread into the queue.
+    {
+        scheduler.AddActiveThread(thread, start);
+    }
+    void SchedulerMaybeUpdateActiveList(Thread *thread) // After changing the priority of a thread, call this to move it to the correct active thread queue if needed.
+    {
+        scheduler.MaybeUpdateActiveList(thread);
+    }
+    void SchedulerNotifyObject(LinkedList<Thread> *blockedThreads, bool unblockAll, Thread *previousMutexOwner = nullptr)
+    {
+        scheduler.NotifyObject(blockedThreads, unblockAll, previousMutexOwner);
+    }
+    void SchedulerUnblockThread(Thread *unblockedThread, Thread *previousMutexOwner = nullptr)
+    {
+        scheduler.UnblockThread(unblockedThread, previousMutexOwner);
+    }
+    Thread * SchedulerPickThread(CPULocalStorage *local) // Pick the next thread to execute.
+    {
+        return scheduler.PickThread(local);
+    }
+    int8_t SchedulerGetThreadEffectivePriority(Thread *thread)
+    {
+        return scheduler.GetThreadEffectivePriority(thread);
+    }
 }
 
 void KTimerSet(KTimer *timer, uint64_t triggerInMs, KAsyncTaskCallback _callback, EsGeneric _argument) {

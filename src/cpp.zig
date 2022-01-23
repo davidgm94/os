@@ -1071,6 +1071,14 @@ const Scheduler = extern struct
     shutdown: Volatile(bool),
     time_ms: u64,
 };
+extern fn SchedulerYield(context: *InterruptContext) callconv(.C) void;
+extern fn SchedulerCreateProcessorThreads(local: *LocalStorage) callconv(.C) void;
+extern fn SchedulerAddActiveThread(thread: *Thread, start: bool) callconv(.C) void;
+extern fn SchedulerMaybeUpdateActiveList(thread: *Thread) callconv(.C) void;
+extern fn SchedulerNotifyObject(blocked_threads: *LinkedList(Thread), unblock_all: bool, previous_mutex_owner: ?*Thread) callconv(.C) void;
+extern fn SchedulerUnblockThread(thread: *Thread, previous_mutex_owner: ?*Thread) callconv(.C) void;
+extern fn SchedulerPickThread(local: *LocalStorage) callconv(.C) ?*Thread;
+extern fn SchedulerGetThreadEffectivePriority(thread: *Thread) callconv(.C) i8;
 
 const LocalStorage = extern struct
 {
@@ -2979,7 +2987,6 @@ pub const WriterLock = extern struct
     pub const shared = false;
     pub const exclusive = true;
 };
-extern fn SchedulerNotifyObject(blocked_threads: *LinkedList(Thread), unblock_all: bool, previous_mutex_owner: ?*Thread) callconv(.C) void;
 
 export fn KWriterLockTake(lock: *WriterLock, write: bool, poll: bool) callconv(.C) bool
 {
