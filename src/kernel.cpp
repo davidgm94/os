@@ -1420,10 +1420,14 @@ struct KEvent { // Waiting and notifying. Can wait on multiple at once. Can be s
 	volatile size_t handles;
 };
 
-bool KEventSet(KEvent *event, bool maybeAlreadySet = false);
-void KEventReset(KEvent *event); 
-bool KEventPoll(KEvent *event); // TODO Remove this! Currently it is only used by KAudioFillBuffersFromMixer.
-bool KEventWait(KEvent *event, uint64_t timeoutMs = ES_WAIT_NO_TIMEOUT); // See KEventWaitMultiple to wait for multiple events. Returns false if the wait timed out.
+extern "C"
+{
+    bool KEventSet(KEvent *event, bool maybeAlreadySet = false);
+    void KEventReset(KEvent *event); 
+    bool KEventPoll(KEvent *event); // TODO Remove this! Currently it is only used by KAudioFillBuffersFromMixer.
+    bool KEventWait(KEvent *event, uint64_t timeoutMs = ES_WAIT_NO_TIMEOUT); // See KEventWaitMultiple to wait for multiple events. Returns false if the wait timed out.
+    uintptr_t KEventWaitMultiple(KEvent **events, size_t count);
+}
 
 #ifdef DEBUG_BUILD
 #define MAYBE_VALIDATE_HEAP() HeapValidate(&heap)
@@ -3961,115 +3965,115 @@ void KTimerRemove(KTimer *timer) {
 	KSpinlockRelease(&scheduler.activeTimersSpinlock);
 }
 
-bool KEventSet(KEvent *event, bool maybeAlreadySet) {
-	if (event->state && !maybeAlreadySet) {
-		KernelLog(LOG_ERROR, "Synchronisation", "event already set", "KEventSet - Attempt to set a event that had already been set\n");
-	}
+//bool KEventSet(KEvent *event, bool maybeAlreadySet) {
+	//if (event->state && !maybeAlreadySet) {
+		//KernelLog(LOG_ERROR, "Synchronisation", "event already set", "KEventSet - Attempt to set a event that had already been set\n");
+	//}
 
-	KSpinlockAcquire(&scheduler.dispatchSpinlock);
-	volatile bool unblockedThreads = false;
+	//KSpinlockAcquire(&scheduler.dispatchSpinlock);
+	//volatile bool unblockedThreads = false;
 
-	if (!event->state) {
-		event->state = true;
+	//if (!event->state) {
+		//event->state = true;
 
-		if (scheduler.started) {
-			if (event->blockedThreads.count) {
-				unblockedThreads = true;
-			}
+		//if (scheduler.started) {
+			//if (event->blockedThreads.count) {
+				//unblockedThreads = true;
+			//}
 
-			// If this is a manually reset event, unblock all the waiting threads.
-			scheduler.NotifyObject(&event->blockedThreads, !event->autoReset);
-		}
-	}
+			//// If this is a manually reset event, unblock all the waiting threads.
+			//scheduler.NotifyObject(&event->blockedThreads, !event->autoReset);
+		//}
+	//}
 
-	KSpinlockRelease(&scheduler.dispatchSpinlock);
-	return unblockedThreads;
-}
+	//KSpinlockRelease(&scheduler.dispatchSpinlock);
+	//return unblockedThreads;
+//}
 
-void KEventReset(KEvent *event) {
-	if (event->blockedThreads.firstItem && event->state) {
-		// TODO Is it possible for this to happen?
-		KernelLog(LOG_ERROR, "Synchronisation", "reset event with threads blocking", 
-				"KEvent::Reset - Attempt to reset a event while threads are blocking on the event\n");
-	}
+//void KEventReset(KEvent *event) {
+	//if (event->blockedThreads.firstItem && event->state) {
+		//// TODO Is it possible for this to happen?
+		//KernelLog(LOG_ERROR, "Synchronisation", "reset event with threads blocking", 
+				//"KEvent::Reset - Attempt to reset a event while threads are blocking on the event\n");
+	//}
 
-	event->state = false;
-}
+	//event->state = false;
+//}
 
-bool KEventPoll(KEvent *event) {
-	if (event->autoReset) {
-		return __sync_val_compare_and_swap(&event->state, true, false);
-	} else {
-		return event->state;
-	}
-}
+//bool KEventPoll(KEvent *event) {
+	//if (event->autoReset) {
+		//return __sync_val_compare_and_swap(&event->state, true, false);
+	//} else {
+		//return event->state;
+	//}
+//}
 
-uintptr_t KEventWaitMultiple(KEvent **events, size_t count) {
-	if (count > ES_MAX_WAIT_COUNT) {
-		KernelPanic("KEventWaitMultiple - count (%d) > ES_MAX_WAIT_COUNT (%d)\n", count, ES_MAX_WAIT_COUNT);
-	} else if (!count) {
-		KernelPanic("KEventWaitMultiple - Count is 0.\n");
-	} else if (!ProcessorAreInterruptsEnabled()) {
-		KernelPanic("KEventWaitMultiple - Interrupts disabled.\n");
-	}
+//uintptr_t KEventWaitMultiple(KEvent **events, size_t count) {
+	//if (count > ES_MAX_WAIT_COUNT) {
+		//KernelPanic("KEventWaitMultiple - count (%d) > ES_MAX_WAIT_COUNT (%d)\n", count, ES_MAX_WAIT_COUNT);
+	//} else if (!count) {
+		//KernelPanic("KEventWaitMultiple - Count is 0.\n");
+	//} else if (!ProcessorAreInterruptsEnabled()) {
+		//KernelPanic("KEventWaitMultiple - Interrupts disabled.\n");
+	//}
 
-	Thread *thread = GetCurrentThread();
-	thread->blocking.eventCount = count;
+	//Thread *thread = GetCurrentThread();
+	//thread->blocking.eventCount = count;
 
-	LinkedItem<Thread> eventItems[count]; // Max size 16 * 32 = 512.
-	EsMemoryZero(eventItems, count * sizeof(LinkedItem<Thread>));
-	thread->blocking.eventItems = eventItems;
-	EsDefer(thread->blocking.eventItems = nullptr);
+	//LinkedItem<Thread> eventItems[count]; // Max size 16 * 32 = 512.
+	//EsMemoryZero(eventItems, count * sizeof(LinkedItem<Thread>));
+	//thread->blocking.eventItems = eventItems;
+	//EsDefer(thread->blocking.eventItems = nullptr);
 
-	for (uintptr_t i = 0; i < count; i++) {
-		eventItems[i].thisItem = thread;
-		thread->blocking.events[i] = events[i];
-	}
+	//for (uintptr_t i = 0; i < count; i++) {
+		//eventItems[i].thisItem = thread;
+		//thread->blocking.events[i] = events[i];
+	//}
 
-	while (!thread->terminating || thread->terminatableState != THREAD_USER_BLOCK_REQUEST) {
-		thread->state = THREAD_WAITING_EVENT;
+	//while (!thread->terminating || thread->terminatableState != THREAD_USER_BLOCK_REQUEST) {
+		//thread->state = THREAD_WAITING_EVENT;
 
-		for (uintptr_t i = 0; i < count; i++) {
-			if (events[i]->autoReset) {
-				if (events[i]->state) {
-					thread->state = THREAD_ACTIVE;
+		//for (uintptr_t i = 0; i < count; i++) {
+			//if (events[i]->autoReset) {
+				//if (events[i]->state) {
+					//thread->state = THREAD_ACTIVE;
 
-					if (__sync_val_compare_and_swap(&events[i]->state, true, false)) {
-						return i;
-					}
+					//if (__sync_val_compare_and_swap(&events[i]->state, true, false)) {
+						//return i;
+					//}
 
-					thread->state = THREAD_WAITING_EVENT;
-				}
-			} else {
-				if (events[i]->state) {
-					thread->state = THREAD_ACTIVE;
-					return i;
-				}
-			}
-		}
+					//thread->state = THREAD_WAITING_EVENT;
+				//}
+			//} else {
+				//if (events[i]->state) {
+					//thread->state = THREAD_ACTIVE;
+					//return i;
+				//}
+			//}
+		//}
 
-		ProcessorFakeTimerInterrupt();
-	}
+		//ProcessorFakeTimerInterrupt();
+	//}
 
-	return -1; // Exited from termination.
-}
+	//return -1; // Exited from termination.
+//}
 
-bool KEventWait(KEvent *_this, uint64_t timeoutMs) {
-	KEvent *events[2];
-	events[0] = _this;
+//bool KEventWait(KEvent *_this, uint64_t timeoutMs) {
+	//KEvent *events[2];
+	//events[0] = _this;
 
-	if (timeoutMs == (uint64_t) ES_WAIT_NO_TIMEOUT) {
-		int index = KEventWaitMultiple(events, 1);
-		return index == 0;
-	} else {
-		KTimer timer = {};
-		KTimerSet(&timer, timeoutMs);
-		events[1] = &timer.event;
-		int index = KEventWaitMultiple(events, 2);
-		KTimerRemove(&timer);
-		return index == 0;
-	}
-}
+	//if (timeoutMs == (uint64_t) ES_WAIT_NO_TIMEOUT) {
+		//int index = KEventWaitMultiple(events, 1);
+		//return index == 0;
+	//} else {
+		//KTimer timer = {};
+		//KTimerSet(&timer, timeoutMs);
+		//events[1] = &timer.event;
+		//int index = KEventWaitMultiple(events, 2);
+		//KTimerRemove(&timer);
+		//return index == 0;
+	//}
+//}
 
 //void KSpinlockAcquire(KSpinlock *spinlock) {
 	//if (scheduler.panic) return;

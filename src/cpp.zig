@@ -62,6 +62,16 @@ extern fn ProcessorFakeTimerInterrupt() callconv(.C) void;
 extern fn GetLocalStorage() callconv(.C) ?*LocalStorage;
 extern fn GetCurrentThread() callconv(.C) ?*Thread;
 
+fn zero(comptime T: type, ptr: *T) void
+{
+    std.mem.set(u8, @ptrCast([*]u8, ptr), 0);
+}
+
+fn zero_many(comptime T: type, ptr: [*]T) void
+{
+    std.mem.set(u8, @ptrCast([*]u8, ptr), 0);
+}
+
 pub fn Volatile(comptime T: type) type
 {
     return extern struct
@@ -965,7 +975,7 @@ pub const Spinlock = extern struct
             local_storage.spinlock_count += 1;
         }
 
-        _ = @cmpxchgStrong(@TypeOf(self.state.value), &self.state.value, 0, 1, .SeqCst, .SeqCst);
+        _ = self.state.atomic_compare_and_swap(0, 1);
         @fence(.SeqCst);
         self.interrupts_enabled.write_volatile(interrupts_enabled);
 
@@ -1204,17 +1214,15 @@ pub fn LinkedList(comptime T: type) type
 {
     return extern struct
     {
-        const Self = @This();
-
         first: ?*Item,
         last: ?*Item,
         count: u64,
 
         pub const Item = extern struct
         {
-            previous: ?*Item,
-            next: ?*Item,
-            list: ?*Self,
+            previous: ?*@This(),
+            next: ?*@This(),
+            list: ?*LinkedList(T),
             value: ?*T,
 
             pub fn remove_from_list(self: *@This()) void
@@ -2654,7 +2662,21 @@ pub const Event = extern struct
 
     pub fn poll(self: *@This()) bool
     {
-        _ = self; TODO();
+        if (self.auto_reset.read_volatile())
+        {
+            if (self.state.atomic_compare_and_swap(@boolToInt(true), @boolToInt(false))) |value|
+            {
+                return value != 0;
+            }
+            else
+            {
+                return true;
+            }
+        }
+        else
+        {
+            return self.state.read_volatile() != 0;
+        }
     }
 
     pub fn wait(self: *@This()) bool
@@ -2669,7 +2691,7 @@ pub const Event = extern struct
 
         if (timeout_ms == wait_no_timeout)
         {
-            const index = wait_multiple(events[0..1]);
+            const index = wait_multiple(&events, 1);
             return index == 0;
         }
         else
@@ -2678,14 +2700,15 @@ pub const Event = extern struct
             std.mem.set(u8, @ptrCast([*]u8, &timer)[0..@sizeOf(Timer)], 0);
             timer.set(timeout_ms);
             events[1] = &timer.event;
-            const index = wait_multiple(events[0..2]);
+            const index = wait_multiple(&events, 2);
             timer.remove();
             return index == 0;
         }
     }
 
-    fn wait_multiple(events: []*Event) u64
+    fn wait_multiple(event_ptr: [*]*Event, event_len: u64) u64
     {
+        var events = event_ptr[0..event_len];
         if (events.len > max_wait_count) KernelPanic("count too high")
         else if (events.len == 0) KernelPanic("count 0")
         else if (!ProcessorAreInterruptsEnabled()) KernelPanic("timer with interrupts disabled");
@@ -2693,7 +2716,8 @@ pub const Event = extern struct
         const thread = GetCurrentThread().?;
         thread.blocking.event.count = events.len;
 
-        var event_items = zeroes([512]LinkedList(Thread).Item);
+        var event_items: [512]LinkedList(Thread).Item = undefined;
+        std.mem.set(u8, @ptrCast([*]u8, &event_items)[0..@sizeOf(@TypeOf(event_items))], 0);
         thread.blocking.event.items = &event_items;
         defer thread.blocking.event.items = null;
 
@@ -2741,6 +2765,31 @@ pub const Event = extern struct
         return std.math.maxInt(u64);
     }
 };
+
+export fn KEventSet(event: *Event, maybe_already_set: bool) callconv(.C) bool
+{
+    return event.set(maybe_already_set);
+}
+
+export fn KEventReset(event: *Event) callconv(.C) void
+{
+    event.reset();
+}
+
+export fn KEventPoll(event: *Event) callconv(.C) bool
+{
+    return event.poll();
+}
+
+export fn KEventWait(event: *Event, timeout_ms: u64) callconv(.C) bool
+{
+    return event.wait_extended(timeout_ms);
+}
+
+export fn KEventWaitMultiple(events: [*]*Event, count: u64) callconv(.C) u64
+{
+    return Event.wait_multiple(events, count);
+}
 
 pub const CPU = extern struct
 {
@@ -3097,6 +3146,7 @@ pub fn AVLTree(comptime T: type) type
     {
         root: ?*Item,
         modcheck: bool,
+        long_keys: bool, // @ABICompatibility @Delete
 
         const Tree = @This();
         const Key = u64;
