@@ -131,6 +131,7 @@ const Kernel = struct
         kernel.red_zone = false;
         kernel.code_model = .kernel;
         kernel.disable_stack_probing = true;
+        kernel.disable_sanitize_c = true;
         kernel.link_function_sections = false;
         kernel.setMainPkgPath("src");
         kernel.setLinkerScriptPath(FileSource.relative(Kernel.linker_script_path));

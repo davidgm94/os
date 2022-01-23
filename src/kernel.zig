@@ -933,12 +933,12 @@ pub fn Pool(comptime T: type) type
     };
 }
 
-pub const Range = struct
+pub const Range = extern struct
 {
     from: u64,
     to: u64,
 
-    pub const Set = struct
+    pub const Set = extern struct
     {
         ranges: Array(Range, .core),
         contiguous: u64,
@@ -1093,6 +1093,7 @@ const HeapType = enum
     core,
     fixed,
 };
+
 pub fn Array(comptime T: type, comptime heap_type: HeapType) type
 {
     return struct

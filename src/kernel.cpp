@@ -1,23 +1,19 @@
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wc99-designator"
-#define DEBUG_BUILD
 #define ES_BITS_64
 #define ES_ARCH_X86_64
 #define KERNEL
 #define TREE_VALIDATE
 #define K_ARCH_STACK_GROWS_DOWN
-#define DEBUG_BUILD
 #define COM_OUTPUT
 
 #include <stdint.h>
 #include <stddef.h>
 #include <stdarg.h>
 
-
 #include <mmintrin.h>
 #include <xmmintrin.h>
 #include <emmintrin.h>
-
 
 #define ES_PTR64_MS32(x) ((uint32_t) ((uintptr_t) (x) >> 32))
 #define ES_PTR64_LS32(x) ((uint32_t) ((uintptr_t) (x) & 0xFFFFFFFF))
@@ -58,7 +54,6 @@ enum KernelObjectType : uint32_t {
 	KERNEL_OBJECT_DEVICE		= 0x00008000, // A device.
 };
 
-
 #define ES_MEMORY_MAP_OBJECT_ALL (0) // Set size to this to map the entire object.
 #define ES_MEMORY_MAP_OBJECT_READ_WRITE    (1 << 0)
 #define ES_MEMORY_MAP_OBJECT_READ_ONLY     (1 << 1)
@@ -68,8 +63,6 @@ enum KernelObjectType : uint32_t {
 
 #define ES_SUBSYSTEM_ID_NATIVE (0)
 #define ES_SUBSYSTEM_ID_POSIX (1)
-
-
 
 #define ES_PERMISSION_NETWORKING				(1 << 0)
 #define ES_PERMISSION_PROCESS_CREATE			(1 << 1)
@@ -83,13 +76,11 @@ enum KernelObjectType : uint32_t {
 #define ES_PERMISSION_ALL				((_EsLongConstant) (-1))
 #define ES_PERMISSION_INHERIT				((_EsLongConstant) (1) << 63)
 
-
 #define EsLiteral(x) (char *) x, EsCStringLength((char *) x)
 #define EsAssert(x) do { if (!(x)) { EsAssertionFailure(__FILE__, __LINE__); } } while (0)
 #define EsCRTassert EsAssert
 
 #define ES_MEMORY_MOVE_BACKWARDS -
-
 
 struct EsHeap;
 #define K_CORE (&heapCore)
@@ -108,8 +99,6 @@ extern MMSpace _kernelMMSpace, _coreMMSpace;
 #define CC_ACCESS_WRITE_BACK         (1 << 3) // Wait for the write to complete before returning.
 #define CC_ACCESS_PRECISE            (1 << 4) // Do not write back bytes not touched by this write. (Usually modified tracking is to page granularity.) Requires WRITE_BACK.
 #define CC_ACCESS_USER_BUFFER_MAPPED (1 << 5) // Set if the user buffer is memory-mapped to mirror this or another cache.
-
-
 
 void EsMemoryFill(void *from, void *to, uint8_t byte)
 {
@@ -150,6 +139,7 @@ int EsMemoryCompare(const void *a, const void *b, size_t bytes) {
 
 	return 0;
 }
+
 void EsMemoryZero(void *destination, size_t bytes) {
 	// TODO Prevent this from being optimised out in the kernel.
 
@@ -190,7 +180,6 @@ void *EsCRTmemcpy(void *dest, const void *src, size_t n) {
 	return dest;
 }
 
-
 size_t EsCRTstrlen(const char *s) {
 	size_t n = 0;
 	while (s[n]) n++;
@@ -209,14 +198,11 @@ char *EsCRTstrcpy(char *dest, const char *src) {
 #define ES_THREAD_EVENT_MUTEX_ACQUIRE (1)
 #define ES_THREAD_EVENT_MUTEX_RELEASE (2)
 
-
 enum KLogLevel {
 	LOG_VERBOSE,
 	LOG_INFO,
 	LOG_ERROR,
 };
-
-
 
 struct ConstantBuffer {
 	volatile size_t handles;
@@ -272,13 +258,10 @@ int EsStringCompareRaw(const char *s1, ptrdiff_t length1, const char *s2, ptrdif
 #define _ES_NODE_DIRECTORY_WRITE		(0x040000)
 #define _ES_NODE_NO_WRITE_BASE		(0x080000)
 
-
 #define NODE_INCREMENT_HANDLE_COUNT(node) \
 	node->handles++; \
 	node->fileSystem->totalHandleCount++; \
 	fs.totalHandleCount++;
-
-
 
 #define ES_ERROR_BUFFER_TOO_SMALL		(-2)
 #define ES_ERROR_UNKNOWN 			(-7)
@@ -339,7 +322,6 @@ void CloseHandleToObject(void *object, KernelObjectType type, uint32_t flags = 0
 void *MMStandardAllocate(MMSpace *space, size_t bytes, uint32_t flags, void *baseAddress = nullptr, bool commitAll = true);
 bool MMFree(MMSpace *space, void *address, size_t expectedSize = 0, bool userOnly = false);
 
-
 #define K_USER_BUFFER // Used to mark pointers that (might) point to non-kernel memory.
 
 // Interval between write behinds. (Assuming no low memory conditions are in effect.)
@@ -396,7 +378,6 @@ bool MMFree(MMSpace *space, void *address, size_t expectedSize = 0, bool userOnl
 #define PHYSICAL_MEMORY_MANIPULATION_REGION_PAGES (16)
 #define POOL_CACHE_COUNT                          (16)
 
-
 #define ES_SUCCESS (-1)
 
 #define ES_WAIT_NO_TIMEOUT            (-1)
@@ -413,8 +394,6 @@ bool MMFree(MMSpace *space, void *address, size_t expectedSize = 0, bool userOnl
 #define ES_NODE_FAIL_IF_NOT_FOUND	(0x002000)
 #define ES_NODE_PREVENT_RESIZE		(0x004000)
 #define ES_NODE_CREATE_DIRECTORIES	(0x008000)  // Create the directories leading to the file, if they don't already exist.
-
-
 
 #define NODE_MAX_ACCESSORS (16777216)
 
@@ -524,7 +503,6 @@ extern "C"
     void ThreadSetTemporaryAddressSpace(MMSpace *space);
     void ProcessKill(Process* process);
 
-
     // From module.h: 
     // uintptr_t MMArchTranslateAddress(MMSpace *space, uintptr_t virtualAddress, bool writeAccess); 
     // uint32_t KPCIReadConfig(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset, int size);
@@ -566,7 +544,6 @@ void EsMemoryCopyReverse(void *_destination, void *_source, size_t bytes) {
 		bytes -= 1;
 	}
 }
-
 
 void EsMemoryMove(void *_start, void *_end, intptr_t amount, bool zeroEmptySpace) {
 	// TODO Prevent this from being optimised out in the kernel.
@@ -621,8 +598,6 @@ union EsGeneric {
 #define ES_FILE_WRITE_SHARED		(0x4) // Read-write. The file can still be opened for writing. This will fail if the file is already opened for exclusive writing.
 #define ES_FILE_WRITE 			(0x8) // Read-write. The file will not openable for writing. This will fail if the file is already opened for writing.
 
-
-
 #define MM_REGION_FIXED              (0x01) // A region where all the physical pages are allocated up-front, and cannot be removed from the working set.
 #define MM_REGION_NOT_CACHEABLE      (0x02) // Do not cache the pages in the region.
 #define MM_REGION_NO_COMMIT_TRACKING (0x04) // Page committing is manually tracked.
@@ -632,7 +607,6 @@ union EsGeneric {
 #define MM_REGION_EXECUTABLE         (0x40) 
 #define MM_REGION_USER               (0x80) // The application created it, and is therefore allowed to modify it.
 // Limited by region type flags.
-
 
 #define K_PAGE_BITS (12)
 #define K_PAGE_SIZE (0x1000)
@@ -655,13 +629,11 @@ union EsGeneric {
 #define _ES_C_PREPROCESSOR_JOIN(x, y) x ## y
 #define ES_C_PREPROCESSOR_JOIN(x, y) _ES_C_PREPROCESSOR_JOIN(x, y)
 
-
 template <typename F> struct _EsDefer4 { F f; _EsDefer4(F f) : f(f) {} ~_EsDefer4() { f(); } };
 template <typename F> _EsDefer4<F> _EsDeferFunction(F f) { return _EsDefer4<F>(f); }
 #define EsDEFER_3(x) ES_C_PREPROCESSOR_JOIN(x, __COUNTER__)
 #define _EsDefer5(code) auto EsDEFER_3(_defer_) = _EsDeferFunction([&](){code;})
 #define EsDefer(code) _EsDefer5(code)
-
 
 #define EsPanic KernelPanic
 
@@ -1321,7 +1293,6 @@ void TreeRemove(AVLTree<T> *tree, AVLItem<T> *item) {
 	TreeValidate(tree->root, false, tree);
 }
 
-
 struct Thread;
 
 struct KWriterLock { // One writer or many readers.
@@ -1341,7 +1312,6 @@ void KWriterLockConvertExclusiveToShared(KWriterLock *lock);
 void KWriterLockAssertExclusive(KWriterLock *lock);
 void KWriterLockAssertShared(KWriterLock *lock);
 void KWriterLockAssertLocked(KWriterLock *lock);
-
 
 struct KMutex { // Mutual exclusion. Thread-owned.
 	struct Thread *volatile owner;
@@ -1381,7 +1351,6 @@ struct CPULocalStorage {
 	struct ArchCPU *archCPU;               // The architecture layer's data for the CPU.
 	SimpleList asyncTaskList;              // The list of AsyncTasks to be processed.
 };
-
 
 struct KSpinlock { // Mutual exclusion. CPU-owned. Disables interrupts. The only synchronisation primitive that can be acquired with interrupts disabled.
 	volatile uint8_t state, ownerCPU;
@@ -2199,7 +2168,6 @@ enum EsSyscallType
 	//ES_SYSCALL_COUNT,
 //};
 
-
 // MMArchMapPage.
 #define MM_MAP_PAGE_NOT_CACHEABLE 		(1 << 0)
 #define MM_MAP_PAGE_USER 			(1 << 1)
@@ -2238,24 +2206,14 @@ enum EsSyscallType
 
 #define MM_SHARED_ENTRY_PRESENT 		(1)
 
-
 #define MM_PHYSICAL_ALLOCATE_CAN_FAIL		(1 << 0)	// Don't panic if the allocation fails.
 #define MM_PHYSICAL_ALLOCATE_COMMIT_NOW 	(1 << 1)	// Commit (fixed) the allocated pages.
 #define MM_PHYSICAL_ALLOCATE_ZEROED		(1 << 2)	// Zero the pages.
 #define MM_PHYSICAL_ALLOCATE_LOCK_ACQUIRED	(1 << 3)	// The page frame mutex is already acquired.
 
-
-
-
-
 #define MM_HANDLE_PAGE_FAULT_WRITE 		(1 << 0)
 #define MM_HANDLE_PAGE_FAULT_LOCK_ACQUIRED	(1 << 1)
 #define MM_HANDLE_PAGE_FAULT_FOR_SUPERVISOR	(1 << 2)
-
-
-
-
-
 
 enum EsDeviceType {
 	ES_DEVICE_OTHER,
@@ -2395,7 +2353,6 @@ void _ArrayFree(void **array, size_t itemSize, EsHeap *heap) {
 	EsHeapFree(ArrayHeader(*array), sizeof(_ArrayHeader) + itemSize * ArrayHeader(*array)->allocated, heap);
 	*array = nullptr;
 }
-
 
 template <class T, EsHeap *heap>
 struct Array
@@ -2819,7 +2776,6 @@ struct Handle;
 struct Scheduler;
 struct MessageQueue;
 
-
 struct EsThreadEventLogEntry {
 	char file[31];
 	uint8_t fileBytes;
@@ -3225,7 +3181,6 @@ enum EsMessageType {
 	ES_MSG_USER_END				= 0xBFFF,
 };
 
-
 struct EsFileStore {
 #define FILE_STORE_HANDLE        (1)
 #define FILE_STORE_PATH          (2)
@@ -3247,8 +3202,6 @@ struct EsFileStore {
 	};
 };
 
-
-
 struct EsBuffer {
 	union { const uint8_t *in; uint8_t *out; };
 	size_t position, bytes;
@@ -3256,7 +3209,6 @@ struct EsBuffer {
 	EsFileStore *fileStore;
 	bool error, canGrow;
 };
-
 
 struct EsMessageMouseMotion {
 	int newPositionX;
@@ -3351,8 +3303,6 @@ struct EsMessageCreateItem {
 	EsListViewIndex index;
 	EsElement *item;
 };
-
-
 
 struct EsMessageGetContent {
 	EsListViewIndex index;
@@ -3522,7 +3472,6 @@ struct EsMessageUser {
 
 struct EsStyle;
 struct EsPainter;
-
 
 enum EsCursorStyle {
 	ES_CURSOR_NORMAL,
@@ -3954,7 +3903,7 @@ struct Scheduler {
 	volatile size_t threadEventLogAllocated;
 #endif
 };
-Scheduler scheduler;
+extern Scheduler scheduler;
 
 void KTimerSet(KTimer *timer, uint64_t triggerInMs, KAsyncTaskCallback _callback, EsGeneric _argument) {
 	KSpinlockAcquire(&scheduler.activeTimersSpinlock);
@@ -4011,8 +3960,6 @@ void KTimerRemove(KTimer *timer) {
 
 	KSpinlockRelease(&scheduler.activeTimersSpinlock);
 }
-
-
 
 bool KEventSet(KEvent *event, bool maybeAlreadySet) {
 	if (event->state && !maybeAlreadySet) {
@@ -4107,7 +4054,6 @@ uintptr_t KEventWaitMultiple(KEvent **events, size_t count) {
 	return -1; // Exited from termination.
 }
 
-
 bool KEventWait(KEvent *_this, uint64_t timeoutMs) {
 	KEvent *events[2];
 	events[0] = _this;
@@ -4125,117 +4071,117 @@ bool KEventWait(KEvent *_this, uint64_t timeoutMs) {
 	}
 }
 
-void KSpinlockAcquire(KSpinlock *spinlock) {
-	if (scheduler.panic) return;
+//void KSpinlockAcquire(KSpinlock *spinlock) {
+	//if (scheduler.panic) return;
 
-	bool _interruptsEnabled = ProcessorAreInterruptsEnabled();
-	ProcessorDisableInterrupts();
+	//bool _interruptsEnabled = ProcessorAreInterruptsEnabled();
+	//ProcessorDisableInterrupts();
 
-	CPULocalStorage *storage = GetLocalStorage();
+	//CPULocalStorage *storage = GetLocalStorage();
 
-#ifdef DEBUG_BUILD
-	if (storage && storage->currentThread && spinlock->owner && spinlock->owner == storage->currentThread) {
-		KernelPanic("KSpinlock::Acquire - Attempt to acquire a spinlock owned by the current thread (%x/%x, CPU: %d/%d).\nAcquired at %x.\n", 
-				storage->currentThread, spinlock->owner, storage->processorID, spinlock->ownerCPU, spinlock->acquireAddress);
-	}
-#endif
+//#ifdef DEBUG_BUILD
+	//if (storage && storage->currentThread && spinlock->owner && spinlock->owner == storage->currentThread) {
+		//KernelPanic("KSpinlock::Acquire - Attempt to acquire a spinlock owned by the current thread (%x/%x, CPU: %d/%d).\nAcquired at %x.\n", 
+				//storage->currentThread, spinlock->owner, storage->processorID, spinlock->ownerCPU, spinlock->acquireAddress);
+	//}
+//#endif
 
-	if (storage) {
-		storage->spinlockCount++;
-	}
+	//if (storage) {
+		//storage->spinlockCount++;
+	//}
 
-	while (__sync_val_compare_and_swap(&spinlock->state, 0, 1));
-	__sync_synchronize();
+	//while (__sync_val_compare_and_swap(&spinlock->state, 0, 1));
+	//__sync_synchronize();
 
-	spinlock->interruptsEnabled = _interruptsEnabled;
+	//spinlock->interruptsEnabled = _interruptsEnabled;
 
-	if (storage) {
-#ifdef DEBUG_BUILD
-		spinlock->owner = storage->currentThread;
-#endif
-		spinlock->ownerCPU = storage->processorID;
-	} else {
-		// Because spinlocks can be accessed very early on in initialisation there may not be
-		// a CPULocalStorage available for the current processor. Therefore, just set this field to nullptr.
+	//if (storage) {
+//#ifdef DEBUG_BUILD
+		//spinlock->owner = storage->currentThread;
+//#endif
+		//spinlock->ownerCPU = storage->processorID;
+	//} else {
+		//// Because spinlocks can be accessed very early on in initialisation there may not be
+		//// a CPULocalStorage available for the current processor. Therefore, just set this field to nullptr.
 
-#ifdef DEBUG_BUILD
-		spinlock->owner = nullptr;
-#endif
-	}
+//#ifdef DEBUG_BUILD
+		//spinlock->owner = nullptr;
+//#endif
+	//}
 
-#ifdef DEBUG_BUILD
-	spinlock->acquireAddress = (uintptr_t) __builtin_return_address(0);
-#endif
-}
+//#ifdef DEBUG_BUILD
+	//spinlock->acquireAddress = (uintptr_t) __builtin_return_address(0);
+//#endif
+//}
 
-void KSpinlockReleaseForced(KSpinlock *spinlock) {
-	if (scheduler.panic) return;
+//void KSpinlockReleaseForced(KSpinlock *spinlock) {
+	//if (scheduler.panic) return;
 
-	CPULocalStorage *storage = GetLocalStorage();
+	//CPULocalStorage *storage = GetLocalStorage();
 
-	if (storage) {
-		storage->spinlockCount--;
-	}
+	//if (storage) {
+		//storage->spinlockCount--;
+	//}
 
-	volatile bool wereInterruptsEnabled = spinlock->interruptsEnabled;
+	//volatile bool wereInterruptsEnabled = spinlock->interruptsEnabled;
 
-#ifdef DEBUG_BUILD
-	spinlock->owner = nullptr;
-#endif
-	__sync_synchronize();
-	spinlock->state = 0;
+//#ifdef DEBUG_BUILD
+	//spinlock->owner = nullptr;
+//#endif
+	//__sync_synchronize();
+	//spinlock->state = 0;
 
-	if (wereInterruptsEnabled) ProcessorEnableInterrupts();
+	//if (wereInterruptsEnabled) ProcessorEnableInterrupts();
 
-#ifdef DEBUG_BUILD
-	spinlock->releaseAddress = (uintptr_t) __builtin_return_address(0);
-#endif
-}
+//#ifdef DEBUG_BUILD
+	//spinlock->releaseAddress = (uintptr_t) __builtin_return_address(0);
+//#endif
+//}
 
-void KSpinlockRelease(KSpinlock *spinlock) {
-	if (scheduler.panic) return;
+//void KSpinlockRelease(KSpinlock *spinlock) {
+	//if (scheduler.panic) return;
 
-	CPULocalStorage *storage = GetLocalStorage();
+	//CPULocalStorage *storage = GetLocalStorage();
 
-	if (storage) {
-		storage->spinlockCount--;
-	}
+	//if (storage) {
+		//storage->spinlockCount--;
+	//}
 
-    KSpinlockAssertLocked(spinlock);
+    //KSpinlockAssertLocked(spinlock);
 	
-	volatile bool wereInterruptsEnabled = spinlock->interruptsEnabled;
+	//volatile bool wereInterruptsEnabled = spinlock->interruptsEnabled;
 
-#ifdef DEBUG_BUILD
-	spinlock->owner = nullptr;
-#endif
-	__sync_synchronize();
-	spinlock->state = 0;
+//#ifdef DEBUG_BUILD
+	//spinlock->owner = nullptr;
+//#endif
+	//__sync_synchronize();
+	//spinlock->state = 0;
 
-	if (wereInterruptsEnabled) ProcessorEnableInterrupts();
+	//if (wereInterruptsEnabled) ProcessorEnableInterrupts();
 
-#ifdef DEBUG_BUILD
-	spinlock->releaseAddress = (uintptr_t) __builtin_return_address(0);
-#endif
-}
+//#ifdef DEBUG_BUILD
+	//spinlock->releaseAddress = (uintptr_t) __builtin_return_address(0);
+//#endif
+//}
 
-void KSpinlockAssertLocked(KSpinlock *spinlock) {
-	if (scheduler.panic) return;
+//void KSpinlockAssertLocked(KSpinlock *spinlock) {
+	//if (scheduler.panic) return;
 
-#ifdef DEBUG_BUILD
-	CPULocalStorage *storage = GetLocalStorage();
+//#ifdef DEBUG_BUILD
+	//CPULocalStorage *storage = GetLocalStorage();
 
-	if (!spinlock->state || ProcessorAreInterruptsEnabled() 
-			|| (storage && spinlock->owner != storage->currentThread)) {
-#else
-	if (!spinlock->state || ProcessorAreInterruptsEnabled()) {
-#endif
-		KernelPanic("KSpinlock::AssertLocked - KSpinlock not correctly acquired\n"
-				"Return address = %x.\n"
-				"state = %d, ProcessorAreInterruptsEnabled() = %d, this = %x\n",
-				__builtin_return_address(0), spinlock->state, 
-				ProcessorAreInterruptsEnabled(), spinlock);
-	}
-}
+	//if (!spinlock->state || ProcessorAreInterruptsEnabled() 
+			//|| (storage && spinlock->owner != storage->currentThread)) {
+//#else
+	//if (!spinlock->state || ProcessorAreInterruptsEnabled()) {
+//#endif
+		//KernelPanic("KSpinlock::AssertLocked - KSpinlock not correctly acquired\n"
+				//"Return address = %x.\n"
+				//"state = %d, ProcessorAreInterruptsEnabled() = %d, this = %x\n",
+				//__builtin_return_address(0), spinlock->state, 
+				//ProcessorAreInterruptsEnabled(), spinlock);
+	//}
+//}
 
 #ifdef DEBUG_BUILD
 bool _KMutexAcquire(KMutex *mutex, const char *cMutexString, const char *cFile, int line) {
@@ -4428,9 +4374,6 @@ void KMutexAssertLocked(KMutex *mutex) {
 	}
 }
 
-
-
-
 struct MMArchVAS {
 	// NOTE Must be first in the structure. See ProcessorSetAddressSpace and ArchSwitchContext.
 	uintptr_t cr3;
@@ -4550,7 +4493,6 @@ void MMUnpinRegion(MMSpace *space, MMRegion *region) {
 	KWriterLockReturn(&region->data.pin, K_LOCK_SHARED);
 	KMutexRelease(&space->reserveMutex);
 }
-
 
 void KWriterLockAssertLocked(KWriterLock *lock) {
 	if (lock->state == 0) {
@@ -4677,7 +4619,6 @@ void KWriterLockConvertExclusiveToShared(KWriterLock *lock) {
 	KSpinlockRelease(&scheduler.dispatchSpinlock);
 }
 
-
 #define ES_SHARED_MEMORY_NAME_MAX_LENGTH (32)
 struct MMSharedRegion {
 	size_t sizeBytes;
@@ -4687,8 +4628,6 @@ struct MMSharedRegion {
 };
 
 bool OpenHandleToObject(void *object, KernelObjectType type, uint32_t flags);
-
-
 
 Thread *ThreadSpawn(const char *cName, uintptr_t startAddress, uintptr_t argument1 = 0, uint32_t flags = ES_FLAGS_DEFAULT, Process *process = nullptr, uintptr_t argument2 = 0)
 {
@@ -4818,44 +4757,17 @@ Thread *ThreadSpawn(const char *cName, uintptr_t startAddress, uintptr_t argumen
 	return nullptr;
 }
 
-bool KThreadCreate(const char *cName, void (*startAddress)(uintptr_t), uintptr_t argument) {
+bool KThreadCreate(const char *cName, void (*startAddress)(uintptr_t), uintptr_t argument = 0) {
 	return ThreadSpawn(cName, (uintptr_t) startAddress, argument) ? true : false;
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-bool KThreadCreate(const char *cName, void (*startAddress)(uintptr_t), uintptr_t argument = 0);
 Process *ProcessSpawn(ProcessType processType);
 
 struct InterruptContext;
 struct CPULocalStorage;
 
-
-
-
-
-
 #define ES_WAIT_NO_TIMEOUT            (-1)
 #define ES_MAX_WAIT_COUNT             (8)
-
-
-
-
-
-
-struct CPULocalStorage;
-
 
 struct MMPageFrame {
 	volatile enum : uint8_t {
@@ -5105,11 +5017,6 @@ bool MMPhysicalAllocateAndMap(size_t sizeBytes, size_t alignmentBytes, size_t ma
 		uint64_t caching, uint8_t **virtualAddress, uintptr_t *physicalAddress);
 void MMPhysicalFreeAndUnmap(void *virtualAddress, uintptr_t physicalAddress);
 
-
-
-
-
-
 struct PMM {
 	MMPageFrame *pageFrames;
 	bool pageFrameDatabaseInitialised;
@@ -5299,7 +5206,6 @@ bool MMDecommitRange(MMSpace *space, MMRegion *region, uintptr_t pageOffset, siz
 
 	return true;
 }
-
 
 uintptr_t MMArchTranslateAddress(MMSpace *, uintptr_t virtualAddress, bool writeAccess =false);
 
@@ -5651,7 +5557,6 @@ void CCActiveSectionReturnToLists(CCActiveSection *section, bool writeBack) {
 		CCWriteSection(section);
 	}
 }
-
 
 EsError CCSpaceAccess(CCSpace *cache, K_USER_BUFFER void *_buffer, EsFileOffset offset, EsFileOffset count, uint32_t flags, 
         MMSpace *mapSpace = nullptr, unsigned mapFlags = ES_FLAGS_DEFAULT) {
@@ -6177,7 +6082,6 @@ copy:;
 
 }
 
-
 bool MMHandlePageFault(MMSpace *space, uintptr_t address, unsigned faultFlags) {
 	// EsPrint("HandlePageFault: %x/%x/%x\n", space, address, faultFlags);
 
@@ -6343,12 +6247,6 @@ bool MMHandlePageFault(MMSpace *space, uintptr_t address, unsigned faultFlags) {
 	}
 }
 
-
-
-
-
-
-
 struct KDMASegment
 {
     uintptr_t physicalAddress;
@@ -6401,7 +6299,6 @@ struct KDMABuffer {
         return { physical_address, transfer_byte_count, is_last };
     }
 };
-
 
 struct KWorkGroup {
 	inline void Initialise() {
@@ -6475,8 +6372,6 @@ struct KBlockDevice : KDevice {
 	KMutex detectFileSystemMutex;
 };
 
-
-
 struct KFileSystem : KDevice {
 	KBlockDevice *block; // Gives the sector size and count.
 
@@ -6531,7 +6426,6 @@ struct KFileSystem : KDevice {
 		      cachedNodes; // Nodes with no handles or directory entries.
 };
 
-
 struct {
 	KWriterLock fileSystemsLock;
 
@@ -6548,7 +6442,6 @@ struct {
 } fs = {
 	.fileSystemUnmounted = { .autoReset = true },
 };
-
 
 void MMObjectCacheInsert(MMObjectCache *cache, MMObjectCacheItem *item) {
 	KSpinlockAcquire(&cache->lock);
@@ -6598,7 +6491,6 @@ void KDeviceOpenHandle(KDevice *device) {
 	KMutexRelease(&deviceTreeMutex);
 }
 
-
 void DeviceDestroy(KDevice *device) {
 	device->children.Free();
 	if (device->destroy) device->destroy(device);
@@ -6642,14 +6534,6 @@ void FSUnmountFileSystem(uintptr_t argument) {
 	__sync_fetch_and_sub(&fs.fileSystemsUnmounting, 1);
 	KEventSet(&fs.fileSystemUnmounted, true);
 }
-
-
-
-
-
-
-
-
 
 void CCSpaceFlush(CCSpace *cache) {
 	while (true) {
@@ -6695,7 +6579,6 @@ void CCSpaceFlush(CCSpace *cache) {
 		}
 	}
 }
-
 
 void MMUpdateAvailablePageCount(bool increase) {
 	if (MM_AVAILABLE_PAGES() >= MM_CRITICAL_AVAILABLE_PAGES_THRESHOLD) {
@@ -7030,10 +6913,6 @@ void ThreadRemove(Thread *thread) {
 
 KMutex objectHandleCountChange;
 
-
-
-
-
 bool MMCommit(uint64_t bytes, bool fixed) {
 	if (bytes & (K_PAGE_SIZE - 1)) KernelPanic("MMCommit - Expected multiple of K_PAGE_SIZE bytes.\n");
 	int64_t pagesNeeded = bytes / K_PAGE_SIZE;
@@ -7165,7 +7044,6 @@ struct EmbeddedWindow {
 	bool closed;
 };
 
-
 struct EsPoint {
 	int32_t x;
 	int32_t y;
@@ -7201,7 +7079,6 @@ struct Surface : EsPaintTarget {
 
 #define ES_GAME_CONTROLLER_MAX_COUNT (16)
 
-
 struct Pipe {
 #define PIPE_READER (1)
 #define PIPE_WRITER (2)
@@ -7216,7 +7093,6 @@ struct Pipe {
 
 	size_t Access(void *buffer, size_t bytes, bool write, bool userBlockRequest);
 };
-
 
 struct EsAnalogInput {
 	uint8_t x, y, z;
@@ -7368,7 +7244,6 @@ struct NetTask {
 	uint8_t step;
 	bool completed;
 };
-
 
 struct KMACAddress {
 	uint8_t d[6];
@@ -7636,7 +7511,6 @@ void ProcessRemove(Process *process) {
 	scheduler.processPool.Remove(process); 
 }
 
-
 bool OpenHandleToObject(void *object, KernelObjectType type, uint32_t flags = 0) {
     bool hadNoHandles = false, failed = false;
 
@@ -7738,8 +7612,6 @@ bool OpenHandleToObject(void *object, KernelObjectType type, uint32_t flags = 0)
 
 	return !failed;
 }
-
-
 
 void MMUnreserve(MMSpace *space, MMRegion *remove, bool unmapPages, bool guardRegion = false) {
 	// EsPrint("unreserve: %x, %x, %d, %d\n", remove->baseAddress, remove->flags, unmapPages, guardRegion);
@@ -7931,7 +7803,6 @@ bool MMFree(MMSpace *space, void *address, size_t expectedSize, bool userOnly) {
 	return true;
 }
 
-
 void ThreadKill(KAsyncTask *task) {
 	Thread *thread = EsContainerOf(Thread, killAsyncTask, task);
 	ThreadSetTemporaryAddressSpace(thread->process->vmm);
@@ -7961,7 +7832,6 @@ void ThreadKill(KAsyncTask *task) {
 	CloseHandleToObject(thread->process, KERNEL_OBJECT_PROCESS);
 	CloseHandleToObject(thread, KERNEL_OBJECT_THREAD);
 }
-
 
 void KRegisterAsyncTask(KAsyncTask *task, KAsyncTaskCallback callback) {
 	KSpinlockAcquire(&scheduler.asyncTaskSpinlock);
@@ -8059,7 +7929,6 @@ void thread_exit(Thread *thread) {
 	if (yield) ProcessorFakeTimerInterrupt(); // Process the asynchronous task.
 }
 
-
 void KThreadTerminate() {
 	thread_exit(GetCurrentThread());
 }
@@ -8092,7 +7961,6 @@ void ThreadSetTemporaryAddressSpace(MMSpace *space) {
 	MMSpaceCloseReference(oldSpace);
 }
 
-
 void MMSpaceDestroy(MMSpace *space) {
 	LinkedItem<MMRegion> *item = space->usedRegionsNonGuard.firstItem;
 
@@ -8112,7 +7980,6 @@ void MMSpaceDestroy(MMSpace *space) {
 
 	MMArchFreeVAS(space);
 }
-
 
 void DesktopSendMessage(_EsMessageWithObject *message) {
     (void)message;
@@ -8389,7 +8256,6 @@ MMRegion *MMFindAndPinRegion(MMSpace *space, uintptr_t address, uintptr_t size) 
 	return region;
 }
 
-
 bool MMCommitRange(MMSpace *space, MMRegion *region, uintptr_t pageOffset, size_t pageCount) {
 	KMutexAssertLocked(&space->reserveMutex);
 
@@ -8479,7 +8345,6 @@ void MMPhysicalInsertFreePagesEnd() {
 	MMUpdateAvailablePageCount(true);
 }
 
-
 #define CC_SECTION_BYTES                          (ClampIntptr(0, 1024L * 1024 * 1024, pmm.commitFixedLimit * K_PAGE_SIZE / 4))
 
 inline intptr_t ClampIntptr(intptr_t low, intptr_t high, intptr_t integer) {
@@ -8548,8 +8413,6 @@ void CCWriteBehindThread() {
 	}
 }
 
-
-
 void CCInitialise() {
 	activeSectionManager.sectionCount = CC_SECTION_BYTES / CC_ACTIVE_SECTION_SIZE;
 	activeSectionManager.sections = (CCActiveSection *) EsHeapAllocate(activeSectionManager.sectionCount * sizeof(CCActiveSection), true, K_FIXED);
@@ -8570,7 +8433,6 @@ void CCInitialise() {
 	activeSectionManager.writeBackThread = ThreadSpawn("CCWriteBehind", (uintptr_t) CCWriteBehindThread, 0, ES_FLAGS_DEFAULT);
 	activeSectionManager.writeBackThread->isPageGenerator = true;
 }
-
 
 void PMZero(uintptr_t *pages, size_t pageCount, bool contiguous) {
 	KMutexAcquire(&pmm.pmManipulationLock);
@@ -9070,8 +8932,6 @@ void MMInitialise() {
 		TreeInsert(&kernelMMSpace->freeRegionsSize, &region->itemSize, region, MakeShortKey(region->pageCount), AVL_DUPLICATE_KEYS_ALLOW);
 	}
 
-
-
 	{
 		// Initialise physical memory management.
 
@@ -9146,7 +9006,6 @@ void MMSpaceCloseReference(MMSpace *space) {
 #define SIGNATURE_MADT (0x43495041)
 #define SIGNATURE_FADT (0x50434146)
 #define SIGNATURE_HPET (0x54455048)
-
 
 struct RootSystemDescriptorPointer {
 	uint64_t signature;
@@ -9253,14 +9112,9 @@ void ACPICheckTable(const ACPIDescriptorTable *table) {
 			table->oemRevision, 4, &table->creatorID, table->creatorRevision);
 }
 
-
-
-
 void *ACPIMapPhysicalMemory(uintptr_t physicalAddress, size_t length) {
 	return MMMapPhysical(kernelMMSpace, physicalAddress, length, MM_REGION_NOT_CACHEABLE);
 }
-
-
 
 void *ACPIGetRSDP() {
 	return acpi.rsdp;
@@ -9271,7 +9125,6 @@ uint8_t ACPIGetCenturyRegisterIndex() {
 }
 
 uintptr_t GetBootloaderInformationOffset();
-
 
 uintptr_t ArchFindRootSystemDescriptorPointer() {
 	uint64_t uefiRSDP = *((uint64_t *) (LOW_MEMORY_MAP_START + GetBootloaderInformationOffset() + 0x7FE8));
@@ -9315,7 +9168,6 @@ uintptr_t ArchFindRootSystemDescriptorPointer() {
 
 	return 0;
 }
-
 
 void ACPIParseTables() {
 	acpi.rsdp = (RootSystemDescriptorPointer *) MMMapPhysical(kernelMMSpace, ArchFindRootSystemDescriptorPointer(), 16384, ES_FLAGS_DEFAULT);
@@ -9494,7 +9346,6 @@ void ACPIParseTables() {
 	}
 }
 
-
 size_t KGetCPUCount() {
 	return acpi.processorCount;
 }
@@ -9544,7 +9395,6 @@ InterruptContext *ArchInitialiseThread(uintptr_t kernelStack, uintptr_t kernelSt
 
 	return context;
 }
-
 
 struct MSIHandler {
 	KIRQHandler callback;
@@ -9699,7 +9549,6 @@ void TLBShootdownCallback() {
 	}
 }
 
-
 uint8_t pciIRQLines[0x100 /* slots */][4 /* pins */];
 
 MSIHandler msiHandlers[INTERRUPT_VECTOR_MSI_COUNT];
@@ -9722,7 +9571,6 @@ uintptr_t bootloaderInformationOffset;
 uintptr_t GetBootloaderInformationOffset() {
 	return bootloaderInformationOffset;
 }
-
 
 // Recursive page table mapping in slot 0x1FE, so that the top 2GB are available for mcmodel kernel.
 #define PAGE_TABLE_L4 ((volatile uint64_t *) 0xFFFFFF7FBFDFE000)
@@ -9766,11 +9614,7 @@ void MMArchFreeVAS(MMSpace* space)
 	MMDecommit(space->data.pageTablesCommitted * K_PAGE_SIZE, true);
 }
 
-
-
-
 uint8_t coreL1Commit[(0xFFFF800200000000 - 0xFFFF800100000000) >> (/* ENTRIES_PER_PAGE_TABLE_BITS */ 9 + K_PAGE_BITS + 3)];
-
 
 #define IO_PIC_1_COMMAND		(0x0020)
 #define IO_PIC_1_DATA			(0x0021)
@@ -9812,7 +9656,6 @@ uint8_t coreL1Commit[(0xFFFF800200000000 - 0xFFFF800100000000) >> (/* ENTRIES_PE
 #define IO_COM_1			(0x03F8) // To 0x03FF.
 #define IO_PCI_CONFIG 			(0x0CF8)
 #define IO_PCI_DATA   			(0x0CFC)
-
 
 int8_t Scheduler::GetThreadEffectivePriority(Thread *thread) {
 	KSpinlockAssertLocked(&dispatchSpinlock);
@@ -9871,7 +9714,6 @@ void EsSpinlockRelease(EsSpinlock *spinlock) {
 	__sync_synchronize();
 }
 
-
 struct RNGState {
 	uint64_t s[4];
 	EsSpinlock lock;
@@ -9894,7 +9736,6 @@ void EsRandomAddEntropy(uint64_t x) {
 	EsSpinlockRelease(&rngState.lock);
 }
 
-
 uint64_t timeStampTicksPerMs;
 
 struct NewProcessorStorage {
@@ -9914,7 +9755,6 @@ NewProcessorStorage AllocateNewProcessorStorage(ArchCPU *archCPU) {
 	archCPU->kernelProcessorID = storage.local->processorID;
 	return storage;
 }
-
 
 void ArchInitialise() {
 	ACPIParseTables();
@@ -10008,7 +9848,6 @@ Thread *Scheduler::PickThread(CPULocalStorage *local) {
 	return local->idleThread;
 }
 
-
 void Scheduler::MaybeUpdateActiveList(Thread *thread) {
 	// TODO Is this correct with regards to paused threads?
 
@@ -10049,7 +9888,6 @@ void Scheduler::MaybeUpdateActiveList(Thread *thread) {
 	activeThreads[effectivePriority].InsertStart(&thread->item);
 }
 
-
 uint64_t ArchGetTimeFromPITMs() {
 	// TODO This isn't working on real hardware, but EarlyDelay1Ms is?
 
@@ -10076,8 +9914,6 @@ uint64_t ArchGetTimeFromPITMs() {
 		return cumulative * 1000 / 1193182;
 	}
 }
-
-
 
 uint64_t ArchGetTimeMs() {
 	// Update the time stamp counter synchronization value.
@@ -10304,7 +10140,6 @@ void ThreadPause(Thread *thread, bool resume) {
 	KSpinlockRelease(&scheduler.dispatchSpinlock);
 }
 
-
 void ProcessPause(Process *process, bool resume) {
 	KMutexAcquire(&process->threadsMutex);
 	LinkedItem<Thread> *thread = process->threads.firstItem;
@@ -10317,7 +10152,6 @@ void ProcessPause(Process *process, bool resume) {
 
 	KMutexRelease(&process->threadsMutex);
 }
-
 
 void ProcessCrash(Process *process, EsCrashReason *crashReason) {
 	if (process == kernelProcess) {
@@ -10360,7 +10194,6 @@ void ProcessCrash(Process *process, EsCrashReason *crashReason) {
 	ProcessPause(GetCurrentThread()->process, false);
 }
 
-
 void MMPhysicalInsertFreePagesNext(uintptr_t page) {
 	MMPageFrame *frame = pmm.pageFrames + page;
 	frame->state = MMPageFrame::FREE;
@@ -10393,7 +10226,6 @@ uint64_t MMArchPopulatePageFrameDatabase() {
 	return commitLimit;
 }
 
-
 uintptr_t MMArchGetPhysicalMemoryHighest() {
 	return physicalMemoryHighest;
 }
@@ -10419,8 +10251,6 @@ void MMArchInitialise() {
 	KMutexRelease(&coreMMSpace->reserveMutex);
 #endif
 }
-
-
 
 bool MMArchCommitPageTables(MMSpace *space, MMRegion *region) {
 	KMutexAssertLocked(&space->reserveMutex);
@@ -10485,7 +10315,6 @@ bool MMArchCommitPageTables(MMSpace *space, MMRegion *region) {
 	return true;
 }
 
-
 uintptr_t MMArchEarlyAllocatePage() {
 	uintptr_t i = physicalMemoryRegionsIndex;
 
@@ -10508,7 +10337,6 @@ uintptr_t MMArchEarlyAllocatePage() {
 	return returnValue;
 }
 
-
 void PCProcessMemoryMap() {
 	physicalMemoryRegions = (PhysicalMemoryRegion *) (LOW_MEMORY_MAP_START + 0x60000 + bootloaderInformationOffset);
 
@@ -10525,7 +10353,6 @@ void PCProcessMemoryMap() {
 
 	physicalMemoryOriginalPagesCount = physicalMemoryRegions[physicalMemoryRegionsCount].pageCount;
 }
-
 
 void ProcessorOut8Delayed(uint16_t port, uint8_t value) {
 	ProcessorOut8(port, value);
@@ -10839,7 +10666,6 @@ bool PostContextSwitch(InterruptContext *context, MMSpace *oldAddressSpace) {
         MMArchSafeCopy(currentThread->timerAdjustAddress, (uintptr_t)&local->currentThread->timerAdjustTicks, sizeof(uintptr_t));
     }
 
-
 #ifdef ES_ARCH_X86_32
 	if (context->fromRing0) {
 		// Returning to a kernel thread; we need to fix the stack.
@@ -10890,7 +10716,6 @@ void Scheduler::CreateProcessorThreads(CPULocalStorage *local) {
 	}
 }
 
-
 void SetupProcessor2(NewProcessorStorage *storage) {
 	// Setup the local interrupts for the current processor.
 		
@@ -10931,9 +10756,7 @@ void SetupProcessor2(NewProcessorStorage *storage) {
 #endif
 }
 
-
 bool debugKeyPressed;
-
 
 void DriversDumpStateRecurse(KDevice *device) {
 	if (device->dumpState) {
@@ -11041,7 +10864,6 @@ typedef void (*FormatCallback)(int character, void *data);
 }
 
 #define ES_STRING_FORMAT_SIMPLE		(1 << 0)
-
 
 #define DEFINE_INTERFACE_STRING(name, text) static const char *interfaceString_ ## name = text;
 #define INTERFACE_STRING(name) interfaceString_ ## name, -1
@@ -11417,8 +11239,6 @@ DEFINE_INTERFACE_STRING(InstallerFailedResources, "The installation could not co
 DEFINE_INTERFACE_STRING(InstallerNotSupported, "Your computer does not meet the minimum system requirements to install " SYSTEM_BRAND_SHORT ". Remove the installer, and restart your computer.");
 
 // TODO System Monitor.
-
-
 
 void _FormatInteger(FormatCallback callback, void *callbackData, long value, int pad = 0, bool simple = false) {
 	char buffer[32];
@@ -11859,9 +11679,6 @@ void _StringFormat(FormatCallback callback, void *callbackData, const char *form
 	}
 }
 
-
-
-
 void StartDebugOutput() {
 	if (graphics.target && graphics.target->debugClearScreen && graphics.target->debugPutBlock && !printToDebugger) {
 		debugRows = (graphics.height - 1) / VGA_FONT_HEIGHT;
@@ -11914,7 +11731,6 @@ void DebugWriteCharacter(uintptr_t character) {
 		debugCurrentColumn = 4;
 	}
 }
-
 
 static void TerminalCallback(int character, void *) {
 	if (!character) return;
@@ -11986,8 +11802,6 @@ void EsPrint(const char *format, ...) {
 	va_end(arguments);
 }
 
-
-
 void MMArchInvalidatePages(uintptr_t virtualAddressStart, uintptr_t pageCount) {
 	// This must be done with spinlock acquired, otherwise this processor could change.
 
@@ -12003,7 +11817,6 @@ void MMArchInvalidatePages(uintptr_t virtualAddressStart, uintptr_t pageCount) {
 	ArchCallFunctionOnAllProcessors(TLBShootdownCallback, true);
 	KSpinlockRelease(&ipiLock);
 }
-
 
 bool MMUnmapFilePage(uintptr_t frameNumber) {
 	KMutexAssertLocked(&pmm.pageFrameMutex);
@@ -12042,8 +11855,6 @@ bool MMUnmapFilePage(uintptr_t frameNumber) {
 	pmm.countActivePages--;
 	return true;
 }
-
-
 
 void MMArchUnmapPages(MMSpace *space, uintptr_t virtualAddressStart, uintptr_t pageCount, unsigned flags, size_t unmapMaximum, uintptr_t *resumePosition) {
 	// We can't let anyone use the unmapped pages until they've been invalidated on all processors.
@@ -12267,8 +12078,6 @@ void KernelPanic(const char *format, ...) {
 
 		debugCurrentRow = debugCurrentColumn = 0;
 #endif
-
-
 		EsPrint("0 - view log\n1 - reset\n2 - view pmem\n3 - view vmem\n4 - stack trace\n");
 
 		int key = KWaitKey();
@@ -12399,7 +12208,6 @@ void __KernelLog(const char *format, ...) {
 	va_end(arguments);
 }
 
-
 void KernelLog(KLogLevel level, const char *subsystem, const char *event, const char *format, ...) {
 	if (level == LOG_VERBOSE) return;
 	(void) event;
@@ -12459,9 +12267,7 @@ uint8_t HandleTable::ResolveHandle(Handle *outHandle, EsHandle inHandle, KernelO
 	return RESOLVE_HANDLE_FAILED;
 }
 
-
 #define SYSCALL(_name_) uintptr_t _name_(uintptr_t argument0, uintptr_t argument1, uintptr_t argument2, uintptr_t argument3, Thread* currentThread, Process* currentProcess, MMSpace* currentVMM, uintptr_t *userStackPointer, bool *fatalError)
-
 
 typedef SYSCALL(SyscallFunction);
 SYSCALL(syscall_process_exit);
@@ -12749,7 +12555,6 @@ void InterruptHandler(InterruptContext *context) {
 				if ((context->errorCode & (1 << 3))) {
 					goto fault;
 				}
-
 
 				if (local && local->spinlockCount && ((context->cr2 >= 0xFFFF900000000000 && context->cr2 < 0xFFFFF00000000000) 
 							|| context->cr2 < 0x8000000000000000)) {
@@ -13067,7 +12872,6 @@ typedef int16_t  s16;
 typedef int32_t  s32;
 typedef int64_t  s64;
 
-
 uint32_t arch_pci_read_config(u8 bus, u8 device, u8 function, u8 offset, u32 size = 32) {
 	KSpinlockAcquire(&pciConfigSpinlock);
 	EsDefer(KSpinlockRelease(&pciConfigSpinlock));
@@ -13091,7 +12895,6 @@ void arch_pci_write_config(uint8_t bus, uint8_t device, uint8_t function, uint8_
 	else KernelPanic("PCIController::WriteConfig - Invalid size %d.\n", size);
 }
 
-
 #define PCI_BUS_DO_NOT_SCAN 0
 #define PCI_BUS_SCAN_NEXT 1
 #define PCI_BUS_SCANNED 2
@@ -13106,7 +12909,6 @@ void arch_pci_write_config(uint8_t bus, uint8_t device, uint8_t function, uint8_
 #define K_PCI_FEATURE_BUSMASTERING_DMA 		(1 <<  9)
 #define K_PCI_FEATURE_MEMORY_SPACE_ACCESS 	(1 << 10)
 #define K_PCI_FEATURE_IO_PORT_ACCESS		(1 << 11)
-
 
 #define PCI_DEVICE_MAX 1000
 struct PCIDevice
@@ -13641,7 +13443,6 @@ typedef EsError (*DeviceAccessCallbackFunction)(BlockDeviceAccessRequest request
 MBRPartition mbr_partitions[4];
 struct PartitionDevice* partitions[16];
 u64 mbr_partition_count = 0;
-
 
 struct PartitionDevice* PartitionDeviceCreate(BlockDevice* parent, EsFileOffset offset, EsFileOffset sector_count, u32 flags, const char* model, size_t model_bytes);
 
@@ -14528,7 +14329,6 @@ struct AHCIDriver
                 KernelPanic("Too many PRDT entries\n");
             }
 
-
             KDMASegment segment = buffer->next_segment();
 
             prdt[0 + 4 * PRDT_entry_count] = ES_PTR64_LS32(segment.physicalAddress);
@@ -14851,7 +14651,6 @@ void svga_driver_init()
 
 #define ES_POINT(x, y) ((EsPoint) { (int32_t) (x), (int32_t) (y) })
 
-
 inline int Width(EsRectangle rectangle) {
 	return rectangle.r - rectangle.l;
 }
@@ -14891,7 +14690,6 @@ struct EsPainter {
 #define ES_DRAW_BITMAP_OPAQUE (0xFFFF)
 #define ES_DRAW_BITMAP_XOR    (0xFFFE)
 #define ES_DRAW_BITMAP_BLEND  (0)
-
 
 void EsDrawClear(EsPainter *painter, EsRectangle bounds) {
 	EsPaintTarget *target = painter->target;
@@ -14968,7 +14766,6 @@ void BlendPixel(uint32_t *destinationPixel, uint32_t modified, bool fullAlpha) {
 	uint32_t result = a | (0x0000FF00 & ((g1 + g2) >> 8)) | (0x00FF00FF & ((r1 + r2) >> 8));
 	*destinationPixel = result;
 }
-
 
 void _DrawBlock(uintptr_t stride, void *bits, EsRectangle bounds, uint32_t color, bool fullAlpha) {
 	stride /= 4;
@@ -15286,7 +15083,6 @@ void GraphicsUpdateScreen(K_USER_BUFFER void *bits, EsRectangle *bounds, uintptr
 	sourceSurface->Copy(&windowManager.cursorSwap, ES_POINT(cursorBounds.l, cursorBounds.t), ES_RECT_4(0, Width(cursorBounds), 0, Height(cursorBounds)), true);
 }
 
-
 void drivers_init()
 {
     pci_driver.init();
@@ -15525,7 +15321,6 @@ struct EsProcessStartupInformation {
 	EsProcessCreateData data;
 };
 
-
 #define ES_PROCESS_CREATE_PAUSED (1 << 0)
 
 void process_load_desktop_executable()
@@ -15625,6 +15420,7 @@ void start_desktop_process()
 {
     process_start_with_something(desktopProcess);
 }
+
 KEvent shutdownEvent;
 
 extern "C" void KernelMain(uintptr_t _)
