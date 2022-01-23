@@ -53,7 +53,10 @@ export var gdt_descriptor2 = GDT.Descriptor
 };
 
 export var scheduler: Scheduler = undefined;
-extern var kernelProcess: *Process;
+export var _kernelProcess: Process = undefined;
+export var _desktopProcess: Process = undefined;
+export var kernelProcess: *Process = undefined;
+export var desktopProcess: *Process = undefined;
 
 extern fn ProcessorAreInterruptsEnabled() callconv(.C) bool;
 extern fn ProcessorEnableInterrupts() callconv(.C) void;
@@ -332,7 +335,7 @@ export fn install_interrupt_handlers() callconv(.C) void
             8, 10, 11, 12, 13, 14, 17 => true,
             else => false,
         };
-        var handler_address = @ptrToInt(InterruptHandler(interrupt_number, has_error_code_pushed).routine);
+        var handler_address = @ptrToInt(InterruptHandlerMaker(interrupt_number, has_error_code_pushed).routine);
 
         _idt_data[interrupt_number].foo1 = @truncate(u16, handler_address);
         _idt_data[interrupt_number].foo2 = 0x48;
@@ -344,7 +347,7 @@ export fn install_interrupt_handlers() callconv(.C) void
     }
 }
 
-fn InterruptHandler(comptime number: u64, comptime has_error_code: bool) type
+fn InterruptHandlerMaker(comptime number: u64, comptime has_error_code: bool) type
 {
     return struct
     {
@@ -366,9 +369,9 @@ fn InterruptHandler(comptime number: u64, comptime has_error_code: bool) type
 
             asm volatile(
                 \\.intel_syntax noprefix
-                \\
+                
                 \\cld
-                \\
+               
                 \\push rax
                 \\push rbx
                 \\push rcx
@@ -384,19 +387,19 @@ fn InterruptHandler(comptime number: u64, comptime has_error_code: bool) type
                 \\push r13
                 \\push r14
                 \\push r15
-                \\
+                
                 \\mov rax, cr8
                 \\push rax
-                \\
+               
                 \\mov rax, 0x123456789ABCDEF
                 \\push rax
-                \\
+                
                 \\mov rbx, rsp
                 \\and rsp, ~0xf
                 \\fxsave [rsp - 512]
                 \\mov rsp, rbx
                 \\sub rsp, 512 + 16
-                \\
+
                 \\xor rax, rax
                 \\mov ax, ds
                 \\push rax
@@ -405,14 +408,14 @@ fn InterruptHandler(comptime number: u64, comptime has_error_code: bool) type
                 \\mov es, ax
                 \\mov rax, cr2
                 \\push rax
-                \\
+
                 \\mov rdi, rsp
                 \\mov rbx, rsp
                 \\and rsp, ~0xf
                 \\call InterruptHandler
                 \\mov rsp, rbx
                 \\xor rax, rax
-                \\
+
                 \\jmp ReturnFromInterruptHandler
             );
 
@@ -1651,7 +1654,7 @@ pub const Mutex = extern struct
         const preempt = self.blocked_threads.count != 0;
         if (scheduler.started.read_volatile())
         {
-            TODO();
+            SchedulerNotifyObject(&self.blocked_threads, true, maybe_current_thread);
         }
 
         scheduler.dispatch_spinlock.release();
@@ -1780,8 +1783,8 @@ pub const Process = extern struct
     pub const Type = enum(u32)
     {
         normal,
-        desktop,
         kernel,
+        desktop,
     };
 
     pub const Permission = Bitflag(enum(u64)
@@ -1935,10 +1938,13 @@ pub const Process = extern struct
     //}
 };
 
+extern fn ProcessSpawn(process_type: Process.Type) callconv(.C) ?*Process;
+
 pub fn Pool(comptime T: type) type
 {
     return extern struct
     {
+        element_size: u64, // @ABICompatibility @Delete
         cache_entries: [cache_count]?*T,
         cache_entry_count: u64,
         mutex: Mutex,
@@ -2661,7 +2667,8 @@ pub const Event = extern struct
 
             if (scheduler.started.read_volatile())
             {
-                TODO();
+                if (self.blocked_threads.count != 0) unblocked_threads.write_volatile(true);
+                SchedulerNotifyObject(&self.blocked_threads, !self.auto_reset.read_volatile(), null);
             }
         }
 
@@ -3719,3 +3726,43 @@ pub const Range = extern struct
         contiguous: u64,
     };
 };
+
+extern fn drivers_init() callconv(.C) void;
+extern fn start_desktop_process() callconv(.C) void;
+
+export var shutdownEvent: Event = undefined;
+
+export fn KernelMain(_: u64) callconv(.C) void
+{
+    desktopProcess = ProcessSpawn(.desktop).?;
+    drivers_init();
+
+    start_desktop_process();
+    _ = shutdownEvent.wait();
+}
+
+extern fn MMInitialise() callconv(.C) void;
+extern fn ArchInitialise() callconv(.C) void;
+extern fn CreateMainThread() callconv(.C) void;
+export fn KThreadCreate(name: [*:0]const u8, entry: fn (u64) callconv(.C) void, argument: u64) callconv(.C) bool
+{
+    return ThreadSpawn(name, @ptrToInt(entry), argument, 0, null, 0) != null;
+}
+extern fn ThreadSpawn(name: [*:0]const u8, start_address: u64, argument1: u64, flags: u32, process: ?*Process, argument2: u64) callconv(.C) ?*Thread;
+
+export fn KernelInitialise() callconv(.C) void
+{
+    kernelProcess = &_kernelProcess;
+    desktopProcess = &_desktopProcess;
+    kernelProcess = ProcessSpawn(.kernel).?;
+    MMInitialise();
+    // Currently it felt impossible to pass arguments to this function
+    CreateMainThread();
+    ArchInitialise();
+    scheduler.started.write_volatile(true);
+}
+
+export fn get_size() callconv(.C) u64
+{
+    return @sizeOf(Scheduler);
+}
