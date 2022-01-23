@@ -885,6 +885,7 @@ pub const user_space_size = 0xF00000000000 - 0x100000000000;
 pub const low_memory_map_start = 0xFFFFFE0000000000;
 pub const low_memory_limit = 0x100000000; // The first 4GB is mapped here.
 
+const idt_entry_count = 0x1000 / @sizeOf(IDTEntry);
 
 export var _stack: [0x4000]u8 align(0x1000) linksection(".bss") = zeroes([0x4000]u8);
 export var _idt_data: [idt_entry_count]IDTEntry align(0x1000) linksection(".bss") = zeroes([idt_entry_count]IDTEntry);
@@ -904,7 +905,6 @@ const IDTEntry = packed struct
     foo4: u16,
     masked_handler: u64,
 };
-const idt_entry_count = 0x1000 / @sizeOf(IDTEntry);
 
 comptime { assert(@sizeOf(IDTEntry) == 0x10); }
 
@@ -999,7 +999,7 @@ export fn _start() callconv(.Naked) noreturn
         \\call CPU_setup_1
         \\
         \\and rsp, ~0xf
-        \\call KernelInitialise
+        \\call init
 
         \\jmp CPU_ready
     );
@@ -1269,6 +1269,83 @@ export fn install_interrupt_handlers() callconv(.C) void
         handler_address >>= 16;
         _idt_data[interrupt_number].masked_handler = handler_address;
     }
+}
+
+fn InterruptHandler(comptime number: u64, comptime has_error_code: bool) type
+{
+    return struct
+    {
+        fn routine() callconv(.Naked) noreturn
+        {
+            @setRuntimeSafety(false);
+
+            if (comptime !has_error_code)
+            {
+                asm volatile(
+                \\.intel_syntax noprefix
+                \\push 0
+                );
+            }
+
+            asm volatile(
+                ".intel_syntax noprefix\npush " ++ std.fmt.comptimePrint("{}", .{number})
+                );
+
+            asm volatile(
+                \\.intel_syntax noprefix
+                \\
+                \\cld
+                \\
+                \\push rax
+                \\push rbx
+                \\push rcx
+                \\push rdx
+                \\push rsi
+                \\push rdi
+                \\push rbp
+                \\push r8
+                \\push r9
+                \\push r10
+                \\push r11
+                \\push r12
+                \\push r13
+                \\push r14
+                \\push r15
+                \\
+                \\mov rax, cr8
+                \\push rax
+                \\
+                \\mov rax, 0x123456789ABCDEF
+                \\push rax
+                \\
+                \\mov rbx, rsp
+                \\and rsp, ~0xf
+                \\fxsave [rsp - 512]
+                \\mov rsp, rbx
+                \\sub rsp, 512 + 16
+                \\
+                \\xor rax, rax
+                \\mov ax, ds
+                \\push rax
+                \\mov ax, 0x10
+                \\mov ds, ax
+                \\mov es, ax
+                \\mov rax, cr2
+                \\push rax
+                \\
+                \\mov rdi, rsp
+                \\mov rbx, rsp
+                \\and rsp, ~0xf
+                \\call interrupt_handler
+                \\mov rsp, rbx
+                \\xor rax, rax
+                \\
+                \\jmp return_from_interrupt_handler
+            );
+
+            unreachable;
+        }
+    };
 }
 
 pub export fn return_from_interrupt_handler() callconv(.Naked) void
@@ -1674,82 +1751,6 @@ pub const Interrupt = struct
     }
 };
 
-fn InterruptHandler(comptime number: u64, comptime has_error_code: bool) type
-{
-    return struct
-    {
-        fn routine() callconv(.Naked) noreturn
-        {
-            @setRuntimeSafety(false);
-
-            if (comptime !has_error_code)
-            {
-                asm volatile(
-                \\.intel_syntax noprefix
-                \\push 0
-                );
-            }
-
-            asm volatile(
-                ".intel_syntax noprefix\npush " ++ std.fmt.comptimePrint("{}", .{number})
-                );
-
-            asm volatile(
-                \\.intel_syntax noprefix
-                \\
-                \\cld
-                \\
-                \\push rax
-                \\push rbx
-                \\push rcx
-                \\push rdx
-                \\push rsi
-                \\push rdi
-                \\push rbp
-                \\push r8
-                \\push r9
-                \\push r10
-                \\push r11
-                \\push r12
-                \\push r13
-                \\push r14
-                \\push r15
-                \\
-                \\mov rax, cr8
-                \\push rax
-                \\
-                \\mov rax, 0x123456789ABCDEF
-                \\push rax
-                \\
-                \\mov rbx, rsp
-                \\and rsp, ~0xf
-                \\fxsave [rsp - 512]
-                \\mov rsp, rbx
-                \\sub rsp, 512 + 16
-                \\
-                \\xor rax, rax
-                \\mov ax, ds
-                \\push rax
-                \\mov ax, 0x10
-                \\mov ds, ax
-                \\mov es, ax
-                \\mov rax, cr2
-                \\push rax
-                \\
-                \\mov rdi, rsp
-                \\mov rbx, rsp
-                \\and rsp, ~0xf
-                \\call interrupt_handler
-                \\mov rsp, rbx
-                \\xor rax, rax
-                \\
-                \\jmp return_from_interrupt_handler
-            );
-
-            unreachable;
-        }
-    };
-}
 
 pub const PhysicalMemory = struct
 {
@@ -1826,7 +1827,6 @@ const NewProcessorStorage = extern struct
         return storage;
     }
 };
-
 const GDT = packed struct
 {
     null_entry: Entry,

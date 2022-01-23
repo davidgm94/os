@@ -1,4 +1,3 @@
-
 const std = @import("std");
 const assert = std.debug.assert;
 const zeroes = std.mem.zeroes;
@@ -333,11 +332,6 @@ fn InterruptHandler(comptime number: u64, comptime has_error_code: bool) type
     };
 }
 
-export fn syscall_entry() callconv(.Naked) noreturn
-{
-    unreachable;
-}
-
 export var timeStampCounterSynchronizationValue = Volatile(u64) { .value = 0 };
 
 comptime
@@ -466,7 +460,7 @@ comptime
         \\mov edx,0x005B0048
         \\wrmsr
         \\add ecx,1
-        \\mov rdx, OFFSET syscall_entry
+        \\mov rdx, OFFSET SyscallEntry
         \\mov rax,rdx
         \\shr rdx,32
         \\wrmsr
@@ -832,5 +826,44 @@ comptime
         \\sti
         \\hlt
         \\jmp ProcessorIdle
+
+        \\.global SyscallEntry
+        \\SyscallEntry:
+        \\mov rsp, qword ptr gs:8
+        \\sti
+        \\mov ax,0x50
+        \\mov ds,ax
+        \\mov es,ax
+        \\push rcx
+        \\push r11
+        \\push r12
+        \\mov rax,rsp
+        \\push rbx
+        \\push rax
+        \\mov rbx,rsp
+        \\and rsp,~0xF
+        \\call Syscall
+        \\mov rsp,rbx
+        \\cli
+        \\add rsp,8
+        \\push rax
+        \\mov ax,0x63
+        \\mov ds,ax
+        \\mov es,ax
+        \\pop rax
+        \\pop rbx
+        \\pop r12
+        \\pop r11
+        \\pop rcx 
+        \\.byte 0x48 
+        \\sysret
     );
+}
+
+var panic_buffer: [0x4000]u8 = undefined;
+extern fn KernelPanic(format: [*:0]const u8, ...) callconv(.C) noreturn;
+pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace) noreturn
+{
+    _ = stack_trace;
+    KernelPanic(@ptrCast([*:0]const u8, message.ptr));
 }

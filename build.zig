@@ -797,7 +797,7 @@ const qemu_base_command_str = &[_][]const u8
     "-M", "q35", "-cpu", "Haswell",
     "-m", "4096",
     //"-serial", "stdio",
-    //"-d", "int,cpu_reset,in_asm",
+    "-d", "int,cpu_reset,in_asm",
     //"-D", "logging.txt",
     //"-d", "guest_errors,int,cpu,cpu_reset,in_asm"
 };
@@ -821,14 +821,16 @@ const Debug = struct
     const Self = @This();
     step: Step,
     b: *Builder,
+    gdb_script: []const u8,
 
-    fn create(b: *Builder, image_step: *Step) *Self
+    fn create(b: *Builder, image_step: *Step, comptime gdb_script: []const u8, comptime kernel: bool) *Self
     {
         var self = b.allocator.create(Self) catch @panic("out of memory");
         self.* = Self
         {
-            .step = Step.init(.custom, "debug", b.allocator, Self.build),
+            .step = Step.init(.custom, if (kernel) "debug" else "debug_desktop", b.allocator, Self.build),
             .b = b,
+            .gdb_script = gdb_script,
         };
 
         self.step.dependOn(image_step);
@@ -839,34 +841,9 @@ const Debug = struct
     fn build(given_step: *Step) !void
     {
         const self = @fieldParentPtr(Self, "step", given_step);
-        const gdb_script = comptimePrint(comptime
-                \\set disassembly-flavor intel
-                \\symbol-file {s}
-                \\b _start
-                \\b panic
-                \\b KernelInitialise
-                \\b KernelPanic
-                \\b KernelMain
-                \\b kernel.panic
-                \\b kernel.panic_raw
-                \\b kernel.TODO
-                \\b kernel.main_thread
-                \\b main_thread
-                \\b init
-                \\target remote localhost:1234
-                \\c
-                ,
-        .{
-            comptime switch (kernel_version)
-            {
-                .CPP => Kernel.cpp.elf_path,
-                .Rust => Kernel.rust.elf_path,
-                .Zig => Kernel.zig.elf_path,
-            }
-        });
         
         const gdb_script_path = "zig-cache/gdb_script";
-        try std.fs.cwd().writeFile(gdb_script_path, gdb_script);
+        try std.fs.cwd().writeFile(gdb_script_path, self.gdb_script);
         const first_pid = try std.os.fork();
         if (first_pid == 0)
         {
@@ -939,8 +916,48 @@ pub fn build(b: *Builder) !void
 
     // "debug" step
     {
-        const debug_step = Debug.create(b, image_step);
+        const gdb_script = comptime blk:
+        {
+            break :blk comptimePrint(
+                \\set disassembly-flavor intel
+                \\symbol-file {s}
+                \\b _start
+                \\b panic
+                \\b KernelInitialise
+                \\b KernelPanic
+                \\b KernelMain
+                \\target remote localhost:1234
+                \\c
+                ,
+                .{
+                    switch (kernel_version)
+                    {
+                        .CPP => Kernel.cpp.elf_path,
+                        .Rust => Kernel.rust.elf_path,
+                        .Zig => Kernel.zig.elf_path,
+                    }
+                });
+        };
+        const debug_step = Debug.create(b, image_step, gdb_script, true);
         const debug_step_named = b.step("debug", "The debugger GF and QEMU are launched in order to debug the kernel"); 
+        debug_step_named.dependOn(&debug_step.step);
+    }
+
+    //"debug_desktop" step
+    {
+        const gdb_script = 
+                \\set disassembly-flavor intel
+                ++ "\nsymbol-file " ++ Desktop.out_elf_path ++ "\n" ++
+                \\b _start
+                \\b panic
+                \\b KernelInitialise
+                \\b KernelPanic
+                \\b KernelMain
+                \\target remote localhost:1234
+                \\c
+        ;
+        const debug_step = Debug.create(b, image_step, gdb_script, false);
+        const debug_step_named = b.step("debug_desktop", "The debugger GF and QEMU are launched in order to debug the desktop"); 
         debug_step_named.dependOn(&debug_step.step);
     }
 
