@@ -885,7 +885,6 @@ pub const user_space_size = 0xF00000000000 - 0x100000000000;
 pub const low_memory_map_start = 0xFFFFFE0000000000;
 pub const low_memory_limit = 0x100000000; // The first 4GB is mapped here.
 
-const idt_entry_count = 0x1000 / @sizeOf(IDTEntry);
 
 export var _stack: [0x4000]u8 align(0x1000) linksection(".bss") = zeroes([0x4000]u8);
 export var _idt_data: [idt_entry_count]IDTEntry align(0x1000) linksection(".bss") = zeroes([idt_entry_count]IDTEntry);
@@ -905,6 +904,7 @@ const IDTEntry = packed struct
     foo4: u16,
     masked_handler: u64,
 };
+const idt_entry_count = 0x1000 / @sizeOf(IDTEntry);
 
 comptime { assert(@sizeOf(IDTEntry) == 0x10); }
 
@@ -999,7 +999,7 @@ export fn _start() callconv(.Naked) noreturn
         \\call CPU_setup_1
         \\
         \\and rsp, ~0xf
-        \\call init
+        \\call KernelInitialise
 
         \\jmp CPU_ready
     );
@@ -1826,6 +1826,7 @@ const NewProcessorStorage = extern struct
         return storage;
     }
 };
+
 const GDT = packed struct
 {
     null_entry: Entry,

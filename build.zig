@@ -181,11 +181,11 @@ const Kernel = struct
     {
         fn build(b: *Builder) void
         {
-            const kernel = build_kernel_common(b, null, cpp.elf_name);
+            const kernel = build_kernel_common(b, "src/cpp.zig", cpp.elf_name);
 
             kernel.addCSourceFiles(c_source_files, common_c_flags);
 
-            NASM.build_object(b, kernel, "src/x86_64.S", "zig-cache/kernel_x86.o");
+            //NASM.build_object(b, kernel, "src/x86_64.S", "zig-cache/kernel_x86.o");
 
             b.default_step.dependOn(&kernel.step);
         }
@@ -797,8 +797,8 @@ const qemu_base_command_str = &[_][]const u8
     "-M", "q35", "-cpu", "Haswell",
     "-m", "4096",
     //"-serial", "stdio",
-    "-d", "int,cpu_reset,in_asm",
-    "-D", "logging.txt",
+    //"-d", "int,cpu_reset,in_asm",
+    //"-D", "logging.txt",
     //"-d", "guest_errors,int,cpu,cpu_reset,in_asm"
 };
 
@@ -890,7 +890,7 @@ const Debug = struct
 };
 
 const loader = Loader.BIOS;
-const kernel_version = Kernel.Version.Zig;
+const kernel_version = Kernel.Version.CPP;
 const final_image = switch (loader)
 {
     .BIOS => BIOS.Image.final_path,

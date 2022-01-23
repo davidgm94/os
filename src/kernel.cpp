@@ -7,6 +7,7 @@
 #define TREE_VALIDATE
 #define K_ARCH_STACK_GROWS_DOWN
 #define DEBUG_BUILD
+#define COM_OUTPUT
 
 #include <stdint.h>
 #include <stddef.h>
