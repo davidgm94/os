@@ -1071,6 +1071,7 @@ const Scheduler = extern struct
     shutdown: Volatile(bool),
     time_ms: u64,
 };
+
 extern fn SchedulerYield(context: *InterruptContext) callconv(.C) void;
 extern fn SchedulerCreateProcessorThreads(local: *LocalStorage) callconv(.C) void;
 extern fn SchedulerAddActiveThread(thread: *Thread, start: bool) callconv(.C) void;
@@ -1516,6 +1517,16 @@ pub const Timer = extern struct
         scheduler.active_timers_spinlock.release();
     }
 };
+
+export fn KTimerSet(timer: *Timer, trigger_in_ms: u64, callback: ?AsyncTask.Callback, argument: u64) callconv(.C) void
+{
+    timer.set_extended(trigger_in_ms, callback, argument);
+}
+
+export fn KTimerRemove(timer: *Timer) callconv(.C) void
+{
+    timer.remove();
+}
 
 pub const Mutex = extern struct
 {

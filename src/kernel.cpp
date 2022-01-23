@@ -3754,9 +3754,12 @@ struct KTimer {
 	KAsyncTaskCallback callback;
 	EsGeneric argument;
 };
+extern "C"
+{
+    void KTimerSet(KTimer *timer, uint64_t triggerInMs, KAsyncTaskCallback callback = nullptr, EsGeneric argument = 0);
+    void KTimerRemove(KTimer *timer); // Timers with callbacks cannot be removed (it'd race with async task delivery).
+}
 
-void KTimerSet(KTimer *timer, uint64_t triggerInMs, KAsyncTaskCallback callback = nullptr, EsGeneric argument = 0);
-void KTimerRemove(KTimer *timer); // Timers with callbacks cannot be removed (it'd race with async task delivery).
 struct Scheduler {
 	void Yield(InterruptContext *context);
 	void CreateProcessorThreads(CPULocalStorage *local);
@@ -3948,61 +3951,61 @@ extern "C"
     }
 }
 
-void KTimerSet(KTimer *timer, uint64_t triggerInMs, KAsyncTaskCallback _callback, EsGeneric _argument) {
-	KSpinlockAcquire(&scheduler.activeTimersSpinlock);
+//void KTimerSet(KTimer *timer, uint64_t triggerInMs, KAsyncTaskCallback _callback, EsGeneric _argument) {
+	//KSpinlockAcquire(&scheduler.activeTimersSpinlock);
 
-	// Reset the timer state.
+	//// Reset the timer state.
 
-	if (timer->item.list) {
-		scheduler.activeTimers.Remove(&timer->item);
-	}
+	//if (timer->item.list) {
+		//scheduler.activeTimers.Remove(&timer->item);
+	//}
 
-	KEventReset(&timer->event);
+	//KEventReset(&timer->event);
 
-	// Set the timer information.
+	//// Set the timer information.
 
-	timer->triggerTimeMs = triggerInMs + scheduler.timeMs;
-	timer->callback = _callback;
-	timer->argument = _argument;
-	timer->item.thisItem = timer;
+	//timer->triggerTimeMs = triggerInMs + scheduler.timeMs;
+	//timer->callback = _callback;
+	//timer->argument = _argument;
+	//timer->item.thisItem = timer;
 
-	// Add the timer to the list of active timers, keeping the list sorted by trigger time.
+	//// Add the timer to the list of active timers, keeping the list sorted by trigger time.
 
-	LinkedItem<KTimer> *_timer = scheduler.activeTimers.firstItem;
+	//LinkedItem<KTimer> *_timer = scheduler.activeTimers.firstItem;
 
-	while (_timer) {
-		KTimer *timer2 = _timer->thisItem;
-		LinkedItem<KTimer> *next = _timer->nextItem;
+	//while (_timer) {
+		//KTimer *timer2 = _timer->thisItem;
+		//LinkedItem<KTimer> *next = _timer->nextItem;
 
-		if (timer2->triggerTimeMs > timer->triggerTimeMs) {
-			break; // Insert before this timer.
-		}
+		//if (timer2->triggerTimeMs > timer->triggerTimeMs) {
+			//break; // Insert before this timer.
+		//}
 
-		_timer = next;
-	}
+		//_timer = next;
+	//}
 
-	if (_timer) {
-		scheduler.activeTimers.InsertBefore(&timer->item, _timer);
-	} else {
-		scheduler.activeTimers.InsertEnd(&timer->item);
-	}
+	//if (_timer) {
+		//scheduler.activeTimers.InsertBefore(&timer->item, _timer);
+	//} else {
+		//scheduler.activeTimers.InsertEnd(&timer->item);
+	//}
 
-	KSpinlockRelease(&scheduler.activeTimersSpinlock);
-}
+	//KSpinlockRelease(&scheduler.activeTimersSpinlock);
+//}
 
-void KTimerRemove(KTimer *timer) {
-	KSpinlockAcquire(&scheduler.activeTimersSpinlock);
+//void KTimerRemove(KTimer *timer) {
+	//KSpinlockAcquire(&scheduler.activeTimersSpinlock);
 
-	if (timer->callback) {
-		KernelPanic("KTimer::Remove - Timers with callbacks cannot be removed.\n");
-	}
+	//if (timer->callback) {
+		//KernelPanic("KTimer::Remove - Timers with callbacks cannot be removed.\n");
+	//}
 
-	if (timer->item.list) {
-		scheduler.activeTimers.Remove(&timer->item);
-	}
+	//if (timer->item.list) {
+		//scheduler.activeTimers.Remove(&timer->item);
+	//}
 
-	KSpinlockRelease(&scheduler.activeTimersSpinlock);
-}
+	//KSpinlockRelease(&scheduler.activeTimersSpinlock);
+//}
 
 //bool KEventSet(KEvent *event, bool maybeAlreadySet) {
 	//if (event->state && !maybeAlreadySet) {
