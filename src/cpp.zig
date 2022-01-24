@@ -4151,6 +4151,142 @@ pub const Range = extern struct
     };
 };
 
+export fn EsMemoryFill(from: u64, to: u64, byte: u8) callconv(.C) void
+{
+    assert(from != 0);
+    assert(to != 0);
+
+    var a = @intToPtr(*u8, from);
+    var b = @intToPtr(*u8, to);
+    while (a != b)
+    {
+        a.* = byte;
+        a = @intToPtr(*u8, @ptrToInt(a) + 1);
+    }
+}
+
+export fn EsMemorySumBytes(source: [*]u8, byte_count: u64) callconv(.C) u8
+{
+    if (byte_count == 0) return 0;
+
+    var slice = source[0..byte_count];
+    var total: u64 = 0;
+    for (slice) |byte|
+    {
+        total += byte;
+    }
+
+    return @truncate(u8, total);
+}
+
+export fn EsMemoryCompare(a: u64, b: u64, byte_count: u64) callconv(.C) i32
+{
+    if (byte_count == 0) return 0;
+
+    assert(a != 0);
+    assert(b != 0);
+
+    const a_slice = @intToPtr([*]u8, a)[0..byte_count];
+    const b_slice = @intToPtr([*]u8, b)[0..byte_count];
+
+    for (a_slice) |a_byte, i|
+    {
+        const b_byte = b_slice[i];
+
+        if (a_byte < b_byte) return -1
+        else if (a_byte > b_byte) return 1;
+    }
+
+    return 0;
+}
+
+export fn EsMemoryZero(dst: u64, byte_count: u64) callconv(.C) void
+{
+    if (byte_count == 0) return;
+
+    var slice = @intToPtr([*]u8, dst)[0..byte_count];
+    std.mem.set(u8, slice, 0);
+}
+
+export fn EsMemoryCopy(dst: u64, src: u64, byte_count: u64) callconv(.C) void
+{
+    if (byte_count == 0) return;
+
+    const dst_slice = @intToPtr([*]u8, dst)[0..byte_count];
+    const src_slice = @intToPtr([*]const u8, src)[0..byte_count];
+    std.mem.copy(u8, dst_slice, src_slice);
+}
+
+export fn EsCRTmemcpy(dst: u64, src: u64, byte_count: u64) callconv(.C) u64
+{
+    EsMemoryCopy(dst, src, byte_count);
+    return dst;
+}
+
+export fn EsCRTstrlen(str: [*:0]const u8) callconv(.C) u64
+{
+    var i: u64 = 0;
+    while (str[i] != 0)
+    {
+        i += 1;
+    }
+
+    return i;
+}
+
+export fn EsCRTstrcpy(dst: [*:0]u8, src: [*:0]const u8) callconv(.C) [*:0]u8
+{
+    const string_length = EsCRTstrlen(src);
+    return @intToPtr([*:0]u8, EsCRTmemcpy(@ptrToInt(dst), @ptrToInt(src), string_length + 1));
+}
+
+export fn EsMemoryCopyReverse(destination: u64, source: u64, byte_count: u64) callconv(.C) void
+{
+    if (byte_count == 0) return;
+
+    assert(destination != 0);
+    assert(source != 0);
+
+    var dst = &(@intToPtr([*]u8, destination)[0..byte_count][byte_count - 1]);
+    var src = &(@intToPtr([*]u8, source)[0..byte_count][byte_count - 1]);
+
+    var bytes: u64 = byte_count;
+    while (bytes >= 1)
+    {
+        dst.* = src.*;
+        src = @intToPtr(*u8, @ptrToInt(src) - 1);
+        dst = @intToPtr(*u8, @ptrToInt(dst) - 1);
+        bytes -= 1;
+    }
+}
+
+const EsGeneric = u64;
+
+export fn EsMemoryMove(start_address: u64, end_address: u64, amount: i64, zero_empty_space: bool) callconv(.C) void
+{
+    if (end_address < start_address) return;
+
+    if (amount > 0)
+    {
+        const amount_u = @intCast(u64, amount);
+        EsMemoryCopyReverse(start_address + amount_u, start_address, end_address - start_address);
+
+        if (zero_empty_space) EsMemoryZero(start_address, amount_u);
+    }
+    else if (amount < 0)
+    {
+        const amount_u = @intCast(u64, std.math.absInt(amount) catch unreachable);
+        EsMemoryCopy(start_address - amount_u, start_address, end_address - start_address);
+        if (zero_empty_space) EsMemoryZero(end_address - amount_u, amount_u);
+    }
+}
+
+export fn EsAssertionFailure(file: [*:0]const u8, line: i32) callconv(.C) void
+{
+    _ = file; _ = line;
+    KernelPanic("Assertion failure called");
+}
+
 extern fn drivers_init() callconv(.C) void;
 extern fn start_desktop_process() callconv(.C) void;
 

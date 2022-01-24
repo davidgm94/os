@@ -100,97 +100,6 @@ extern MMSpace _kernelMMSpace, _coreMMSpace;
 #define CC_ACCESS_PRECISE            (1 << 4) // Do not write back bytes not touched by this write. (Usually modified tracking is to page granularity.) Requires WRITE_BACK.
 #define CC_ACCESS_USER_BUFFER_MAPPED (1 << 5) // Set if the user buffer is memory-mapped to mirror this or another cache.
 
-void EsMemoryFill(void *from, void *to, uint8_t byte)
-{
-	uint8_t *a = (uint8_t *) from;
-	uint8_t *b = (uint8_t *) to;
-	while (a != b) *a = byte, a++;
-}
-
-uint8_t EsMemorySumBytes(uint8_t *source, size_t bytes) {
-	if (!bytes) {
-		return 0;
-	}
-
-	uint64_t total = 0;
-
-	for (uintptr_t i = 0; i < bytes; i++) {
-		total += source[i];
-	}
-
-	return (uint8_t)total;
-}
-
-int EsMemoryCompare(const void *a, const void *b, size_t bytes) {
-	if (!bytes) {
-		return 0;
-	}
-
-	const uint8_t *x = (const uint8_t *) a;
-	const uint8_t *y = (const uint8_t *) b;
-
-	for (uintptr_t i = 0; i < bytes; i++) {
-		if (x[i] < y[i]) {
-			return -1;
-		} else if (x[i] > y[i]) {
-			return 1;
-		}
-	}
-
-	return 0;
-}
-
-void EsMemoryZero(void *destination, size_t bytes) {
-	// TODO Prevent this from being optimised out in the kernel.
-
-	if (!bytes) {
-		return;
-	}
-
-	for (uintptr_t i = 0; i < bytes; i++) {
-		((uint8_t *) destination)[i] = 0;
-	}
-}
-
-void EsMemoryCopy(void *_destination, const void *_source, size_t bytes) {
-	// TODO Prevent this from being optimised out in the kernel.
-
-	if (!bytes) {
-		return;
-	}
-
-	uint8_t *destination = (uint8_t *) _destination;
-	uint8_t *source = (uint8_t *) _source;
-
-	while (bytes >= 1) {
-		((uint8_t *) destination)[0] = ((uint8_t *) source)[0];
-
-		source += 1;
-		destination += 1;
-		bytes -= 1;
-	}
-}
-
-void *EsCRTmemcpy(void *dest, const void *src, size_t n) {
-	uint8_t *dest8 = (uint8_t *) dest;
-	const uint8_t *src8 = (const uint8_t *) src;
-	for (uintptr_t i = 0; i < n; i++) {
-		dest8[i] = src8[i];
-	}
-	return dest;
-}
-
-size_t EsCRTstrlen(const char *s) {
-	size_t n = 0;
-	while (s[n]) n++;
-	return n;
-}
-
-char *EsCRTstrcpy(char *dest, const char *src) {
-	size_t stringLength = EsCRTstrlen(src);
-	EsCRTmemcpy(dest, src, stringLength + 1);
-	return dest;
-}
 
 #define ES_MEMORY_OPEN_FAIL_IF_FOUND     (0x1000)
 #define ES_MEMORY_OPEN_FAIL_IF_NOT_FOUND (0x2000)
@@ -521,59 +430,19 @@ extern "C"
     // - ArchCheckBundleHeader and ArchCheckELFHeader.
     // - K_ARCH_STACK_GROWS_DOWN or K_ARCH_STACK_GROWS_UP.
     // - K_ARCH_NAME.
+    void EsMemoryFill(void *from, void *to, uint8_t byte);
+    uint8_t EsMemorySumBytes(uint8_t *source, size_t bytes);
+    int EsMemoryCompare(const void *a, const void *b, size_t bytes);
+    void EsMemoryZero(void *destination, size_t bytes);
+    void EsMemoryCopy(void *_destination, const void *_source, size_t bytes);
+    void *EsCRTmemcpy(void *dest, const void *src, size_t n);
+    size_t EsCRTstrlen(const char *s);
+    char *EsCRTstrcpy(char *dest, const char *src);
+    void EsMemoryCopyReverse(void *_destination, void *_source, size_t bytes);
+    void EsMemoryMove(void *_start, void *_end, intptr_t amount, bool zeroEmptySpace);
+    void EsAssertionFailure(const char *file, int line);
 }
 
-void EsMemoryCopyReverse(void *_destination, void *_source, size_t bytes) {
-	// TODO Prevent this from being optimised out in the kernel.
-
-	if (!bytes) {
-		return;
-	}
-
-	uint8_t *destination = (uint8_t *) _destination;
-	uint8_t *source = (uint8_t *) _source;
-
-	destination += bytes - 1;
-	source += bytes - 1;
-
-	while (bytes >= 1) {
-		((uint8_t *) destination)[0] = ((uint8_t *) source)[0];
-
-		source -= 1;
-		destination -= 1;
-		bytes -= 1;
-	}
-}
-
-void EsMemoryMove(void *_start, void *_end, intptr_t amount, bool zeroEmptySpace) {
-	// TODO Prevent this from being optimised out in the kernel.
-
-	uint8_t *start = (uint8_t *) _start;
-	uint8_t *end = (uint8_t *) _end;
-
-	if (end < start) {
-		EsPrint("MemoryMove end < start: %x %x %x %d\n", start, end, amount, zeroEmptySpace);
-		return;
-	}
-
-	if (amount > 0) {
-		EsMemoryCopyReverse(start + amount, start, end - start);
-
-		if (zeroEmptySpace) {
-			EsMemoryZero(start, amount);
-		}
-	} else if (amount < 0) {
-		EsMemoryCopy(start + amount, start, end - start);
-
-		if (zeroEmptySpace) {
-			EsMemoryZero(end + amount, -amount);
-		}
-	}
-}
-
-void EsAssertionFailure(const char *file, int line) {
-	KernelPanic("%z:%d - EsAssertionFailure called.\n", file, line);
-}
 
 union EsGeneric {
 	uintptr_t u;
