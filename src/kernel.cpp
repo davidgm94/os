@@ -2501,6 +2501,35 @@ struct RangeSet {
     }
 };
 
+// Range C API
+extern "C"
+{
+    Range* RangeSetFind(RangeSet* rangeSet, uintptr_t offset, bool touching)
+    {
+        return rangeSet->Find(offset, touching);
+    }
+    bool RangeSetContains(RangeSet* rangeSet, uintptr_t offset)
+    {
+        return rangeSet->Contains(offset);
+    }
+    void RangeSetValidate(RangeSet* rangeSet)
+    {
+        rangeSet->Validate();
+    }
+    bool RangeSetClear(RangeSet* rangeSet, uintptr_t from, uintptr_t to, intptr_t* delta, bool modify)
+    {
+        return rangeSet->Clear(from, to, delta, modify);
+    }
+    bool RangeSetSet(RangeSet* rangeSet, uintptr_t from, uintptr_t to, intptr_t* delta, bool modify)
+    {
+        return rangeSet->Set(from, to, delta, modify);
+    }
+    bool RangeSetNormalize(RangeSet* rangeSet)
+    {
+        return rangeSet->Normalize();
+    }
+}
+
 struct KDevice {
 	const char *cDebugName;
 
