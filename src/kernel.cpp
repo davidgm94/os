@@ -333,6 +333,7 @@ extern "C"
     void EsPrint(const char *format, ...);
 
     void *EsHeapAllocate(size_t size, bool zeroMemory, EsHeap *kernelHeap);
+    void *EsHeapReallocate(void *oldAddress, size_t newAllocationSize, bool zeroNewSpace, EsHeap *_heap);
     void EsHeapFree(void *address, size_t expectedSize, EsHeap *kernelHeap);
     void MMPhysicalActivatePages(uintptr_t pages, uintptr_t count, unsigned flags);
     bool MMCommit(uint64_t bytes, bool fixed);
@@ -442,7 +443,6 @@ extern "C"
     void EsMemoryMove(void *_start, void *_end, intptr_t amount, bool zeroEmptySpace);
     void EsAssertionFailure(const char *file, int line);
 }
-
 
 union EsGeneric {
 	uintptr_t u;
@@ -1248,8 +1248,11 @@ struct Pool {
 	KMutex mutex;
 };
 
-extern "C" void *PoolAdd(Pool* pool, size_t _elementSize); 		// Aligned to the size of a pointer
-extern "C" void PoolRemove(Pool* pool, void *address);
+extern "C"
+{
+    void *PoolAdd(Pool* pool, size_t _elementSize); 		// Aligned to the size of a pointer
+    void PoolRemove(Pool* pool, void *address);
+}
 
 struct KEvent { // Waiting and notifying. Can wait on multiple at once. Can be set and reset with interrupts disabled.
 	volatile bool autoReset; // This should be first field in the structure, so that the type of KEvent can be easily declared with {autoReset}.
@@ -1524,7 +1527,7 @@ static void HeapPrintAllocatedRegions(EsHeap *heap) {
 	MemoryLeakDetectorCheckpoint(heap);
 }
 
-void *EsHeapAllocate(size_t size, bool zeroMemory, EsHeap *_heap)
+extern "C" void *EsHeapAllocate(size_t size, bool zeroMemory, EsHeap *_heap)
 {
 #ifndef KERNEL
 	if (!_heap) _heap = &heap;
@@ -1659,7 +1662,7 @@ void *EsHeapAllocate(size_t size, bool zeroMemory, EsHeap *_heap)
 	return address;
 }
 
-void EsHeapFree(void *address, size_t expectedSize, EsHeap *_heap) {
+extern "C" void EsHeapFree(void *address, size_t expectedSize, EsHeap *_heap) {
 #ifndef KERNEL
 	if (!_heap) _heap = &heap;
 #endif
@@ -2090,108 +2093,18 @@ struct _ArrayHeader {
 	size_t length, allocated;
 };
 
-#define ArrayHeader(array) ((_ArrayHeader *) (array) - 1)
-#define ArrayLength(array) ((array) ? (ArrayHeader(array)->length) : 0)
-
-bool _ArrayMaybeInitialise(void **array, size_t itemSize, EsHeap *heap) {
-	if (*array) return true;
-	size_t newLength = 4;
-	_ArrayHeader *header = (_ArrayHeader *) EsHeapAllocate(sizeof(_ArrayHeader) + itemSize * newLength, true, heap);
-	if (!header) return false;
-	header->length = 0;
-	header->allocated = newLength;
-	*array = header + 1;
-	return true;
-}
-
-bool _ArrayEnsureAllocated(void **array, size_t minimumAllocated, size_t itemSize, uint8_t additionalHeaderBytes, EsHeap *heap) {
-	if (!_ArrayMaybeInitialise(array, itemSize, heap)) {
-		return false;
-	}
-
-	_ArrayHeader *oldHeader = ArrayHeader(*array);
-
-	if (oldHeader->allocated >= minimumAllocated) {
-		return true;
-	}
-
-	_ArrayHeader *newHeader = (_ArrayHeader *) EsHeapReallocate((uint8_t *) oldHeader - additionalHeaderBytes, 
-			sizeof(_ArrayHeader) + additionalHeaderBytes + itemSize * minimumAllocated, false, heap);
-
-	if (!newHeader) {
-		return false;
-	}
-
-	newHeader->allocated = minimumAllocated;
-	*array = (uint8_t *) (newHeader + 1) + additionalHeaderBytes;
-	return true;
-}
-
-bool _ArraySetLength(void **array, size_t newLength, size_t itemSize, uint8_t additionalHeaderBytes, EsHeap *heap) {
-	if (!_ArrayMaybeInitialise(array, itemSize, heap)) {
-		return false;
-	}
-
-	_ArrayHeader *header = ArrayHeader(*array);
-
-	if (header->allocated >= newLength) {
-		header->length = newLength;
-		return true;
-	}
-
-	if (!_ArrayEnsureAllocated(array, header->allocated * 2 > newLength ? header->allocated * 2 : newLength + 16, itemSize, additionalHeaderBytes, heap)) {
-		return false;
-	}
-
-	header = ArrayHeader(*array);
-	header->length = newLength;
-	return true;
-}
-
-void _ArrayDelete(void *array, uintptr_t position, size_t itemSize, size_t count) {
-	if (!count) return;
-	size_t oldArrayLength = ArrayLength(array);
-	if (position >= oldArrayLength) EsPanic("_ArrayDelete - Position out of bounds (%d/%d).\n", position, oldArrayLength);
-	if (count > oldArrayLength - position) EsPanic("_ArrayDelete - Count out of bounds (%d/%d/%d).\n", position, count, oldArrayLength);
-	ArrayHeader(array)->length = oldArrayLength - count;
-	uint8_t *data = (uint8_t *) array;
-	EsMemoryMove(data + itemSize * (position + count), data + itemSize * oldArrayLength, ES_MEMORY_MOVE_BACKWARDS itemSize * count, false);
-}
-
-void _ArrayDeleteSwap(void *array, uintptr_t position, size_t itemSize) {
-	size_t oldArrayLength = ArrayLength(array);
-	if (position >= oldArrayLength) EsPanic("_ArrayDeleteSwap - Position out of bounds (%d/%d).\n", position, oldArrayLength);
-	ArrayHeader(array)->length = oldArrayLength - 1;
-	uint8_t *data = (uint8_t *) array;
-	EsMemoryCopy(data + itemSize * position, data + itemSize * ArrayLength(array), itemSize);
-}
-
-void *_ArrayInsert(void **array, const void *item, size_t itemSize, ptrdiff_t position, uint8_t additionalHeaderBytes, EsHeap *heap) {
-	size_t oldArrayLength = ArrayLength(*array);
-	if (position == -1) position = oldArrayLength;
-	if (position < 0 || (size_t) position > oldArrayLength) EsPanic("_ArrayInsert - Position out of bounds (%d/%d).\n", position, oldArrayLength);
-	if (!_ArraySetLength(array, oldArrayLength + 1, itemSize, additionalHeaderBytes, heap)) return nullptr;
-	uint8_t *data = (uint8_t *) *array;
-	EsMemoryMove(data + itemSize * position, data + itemSize * oldArrayLength, itemSize, false);
-	if (item) EsMemoryCopy(data + itemSize * position, item, itemSize);
-	else EsMemoryZero(data + itemSize * position, itemSize);
-	return data + itemSize * position;
-}
-
-void *_ArrayInsertMany(void **array, size_t itemSize, ptrdiff_t position, size_t insertCount, EsHeap *heap) {
-	size_t oldArrayLength = ArrayLength(*array);
-	if (position == -1) position = oldArrayLength;
-	if (position < 0 || (size_t) position > oldArrayLength) EsPanic("_ArrayInsertMany - Position out of bounds (%d/%d).\n", position, oldArrayLength);
-	if (!_ArraySetLength(array, oldArrayLength + insertCount, itemSize, 0, heap)) return nullptr;
-	uint8_t *data = (uint8_t *) *array;
-	EsMemoryMove(data + itemSize * position, data + itemSize * oldArrayLength, itemSize * insertCount, false);
-	return data + itemSize * position;
-}
-
-void _ArrayFree(void **array, size_t itemSize, EsHeap *heap) {
-	if (!(*array)) return;
-	EsHeapFree(ArrayHeader(*array), sizeof(_ArrayHeader) + itemSize * ArrayHeader(*array)->allocated, heap);
-	*array = nullptr;
+extern "C"
+{
+    _ArrayHeader* ArrayHeaderGet(void* array);
+    uint64_t ArrayHeaderGetLength(void* array);
+    bool _ArrayMaybeInitialise(void **array, size_t itemSize, EsHeap *heap);
+    bool _ArrayEnsureAllocated(void **array, size_t minimumAllocated, size_t itemSize, uint8_t additionalHeaderBytes, EsHeap *heap);
+    bool _ArraySetLength(void **array, size_t newLength, size_t itemSize, uint8_t additionalHeaderBytes, EsHeap *heap);
+    void _ArrayDelete(void *array, uintptr_t position, size_t itemSize, size_t count);
+    void _ArrayDeleteSwap(void *array, uintptr_t position, size_t itemSize);
+    void *_ArrayInsert(void **array, const void *item, size_t itemSize, ptrdiff_t position, uint8_t additionalHeaderBytes, EsHeap *heap);
+    void *_ArrayInsertMany(void **array, size_t itemSize, ptrdiff_t position, size_t insertCount, EsHeap *heap);
+    void _ArrayFree(void **array, size_t itemSize, EsHeap *heap);
 }
 
 template <class T, EsHeap *heap>
@@ -2199,7 +2112,7 @@ struct Array
 {
     T *array;
 
-	inline size_t Length() { return array ? ArrayHeader(array)->length : 0; }
+	inline size_t Length() { return array ? ArrayHeaderGet(array)->length : 0; }
 	inline T &First() { return array[0]; }
 	inline T &Last() { return array[Length() - 1]; }
 	inline void Delete(uintptr_t position) { _ArrayDelete(array, position, sizeof(T), 1); }
@@ -2243,7 +2156,7 @@ struct Array
 
 	inline void AddFast(T item) { 
 		if (!array) { Add(item); return; }
-		_ArrayHeader *header = ArrayHeader(array);
+		_ArrayHeader *header = ArrayHeaderGet(array);
 		if (header->length == header->allocated) { Add(item); return; }
 		array[header->length++] = item;
 	}

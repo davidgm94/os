@@ -2285,6 +2285,7 @@ export var heapCore: Heap = undefined;
 export var heapFixed: Heap = undefined;
 
 extern fn EsHeapAllocate(size: u64, zeroMemory: bool, heap: *Heap) callconv(.C) u64;
+extern fn EsHeapReallocate(old_address: u64, new_allocation_size: u64, zero_new_space: bool, heap: *Heap) callconv(.C) u64;
 extern fn EsHeapFree(address: u64, expectedSize: u64, heap: *Heap) callconv(.C) void;
 
 pub const HeapRegion = extern struct
@@ -4285,6 +4286,138 @@ export fn EsAssertionFailure(file: [*:0]const u8, line: i32) callconv(.C) void
 {
     _ = file; _ = line;
     KernelPanic("Assertion failure called");
+}
+
+const ArrayHeader = extern struct
+{
+    length: u64,
+    allocated: u64,
+
+};
+
+export fn ArrayHeaderGet(array: ?*u64) callconv(.C) *ArrayHeader
+{
+    return @intToPtr(*ArrayHeader, @ptrToInt(array) - @sizeOf(ArrayHeader));
+}
+
+export fn ArrayHeaderGetLength(array: ?*u64) callconv(.C) u64
+{
+    if (array) |arr| return ArrayHeaderGet(arr).length
+    else return 0;
+}
+
+export fn _ArrayMaybeInitialise(array: *?*u64, item_size: u64, heap: *Heap) callconv(.C) bool
+{
+    const new_length = 4;
+    if (@intToPtr(?*ArrayHeader, EsHeapAllocate(@sizeOf(ArrayHeader) + item_size * new_length, true, heap))) |header|
+    {
+        header.length = 0;
+        header.allocated = new_length;
+        array.* = @intToPtr(?*u64, @ptrToInt(header) + @sizeOf(ArrayHeader));
+        return true;
+    }
+    else
+    {
+        return false;
+    }
+}
+
+export fn _ArrayEnsureAllocated(array: *?*u64, minimum_allocated: u64, item_size: u64, additional_header_bytes: u8, heap: *Heap) callconv(.C) bool
+{
+    if (!_ArrayMaybeInitialise(array, item_size, heap)) return false;
+
+    const old_header = ArrayHeaderGet(array.*);
+
+    if (old_header.allocated >= minimum_allocated) return true;
+
+    if (@intToPtr(?*ArrayHeader, EsHeapReallocate(@ptrToInt(old_header) - additional_header_bytes, @sizeOf(ArrayHeader) + additional_header_bytes + item_size * minimum_allocated, false, heap))) |new_header|
+    {
+        new_header.allocated = minimum_allocated;
+        array.* = @intToPtr(?*u64, @ptrToInt(new_header) + @sizeOf(ArrayHeader) + additional_header_bytes);
+        return true;
+    }
+    else
+    {
+        return false;
+    }
+}
+
+export fn _ArraySetLength(array: *?*u64, new_length: u64, item_size: u64, additional_header_bytes: u8, heap: *Heap) callconv(.C) bool
+{
+    if (!_ArrayMaybeInitialise(array, item_size, heap)) return false;
+
+    var header = ArrayHeaderGet(array.*);
+
+    if (header.allocated >= new_length)
+    {
+        header.length = new_length;
+        return true;
+    }
+
+    if (!_ArrayEnsureAllocated(array, if (header.allocated * 2 > new_length) header.allocated * 2 else new_length + 16, item_size, additional_header_bytes, heap)) return false;
+
+    header = ArrayHeaderGet(array.*);
+    header.length = new_length;
+    return true;
+}
+
+fn memory_move_backwards(comptime T: type, addr: T) std.meta.Int(.signed, @bitSizeOf(T))
+{
+    return - @intCast(std.meta.Int(.signed, @bitSizeOf(T)), addr);
+}
+
+export fn _ArrayDelete(array: ?*u64, position: u64, item_size: u64, count: u64) callconv(.C) void
+{
+    if (count == 0) return;
+
+    const old_array_length = ArrayHeaderGetLength(array);
+    if (position >= old_array_length) KernelPanic("position out of bounds");
+    if (count > old_array_length - position) KernelPanic("count out of bounds");
+    ArrayHeaderGet(array).length = old_array_length - count;
+    const array_address = @ptrToInt(array);
+    // @TODO @WARNING @Dangerous @ERROR @PANIC
+    EsMemoryMove(array_address + item_size * (position + count), array_address + item_size * old_array_length, memory_move_backwards(u64, item_size) * @intCast(i64, count), false);
+}
+
+export fn _ArrayDeleteSwap(array: ?*u64, position: u64, item_size: u64) callconv(.C) void
+{
+    const old_array_length = ArrayHeaderGetLength(array);
+    if (position >= old_array_length) KernelPanic("position out of bounds");
+    ArrayHeaderGet(array).length = old_array_length - 1;
+    const array_address = @ptrToInt(array);
+    EsMemoryCopy(array_address + item_size * position, array_address * ArrayHeaderGetLength(array), item_size);
+}
+
+export fn _ArrayInsert(array: *?*u64, item: u64, item_size: u64, maybe_position: i64, additional_header_bytes: u8, heap: *Heap) callconv(.C) u64
+{
+    const old_array_length = ArrayHeaderGetLength(array.*);
+    const position: u64 = if (maybe_position == -1) old_array_length else @intCast(u64, maybe_position);
+    if (maybe_position < 0 or position > old_array_length) KernelPanic("position out of bounds");
+    if (!_ArraySetLength(array, old_array_length + 1, item_size, additional_header_bytes, heap)) return 0;
+    const array_address = @ptrToInt(array.*);
+    EsMemoryMove(array_address + item_size * position, array_address + item_size * old_array_length, @intCast(i64, item_size), false);
+    if (item != 0) EsMemoryCopy(array_address + item_size * position, item, item_size)
+    else EsMemoryZero(array_address + item_size * position, item_size);
+    return array_address + item_size * position;
+}
+
+export fn _ArrayInsertMany(array: *?*u64, item_size: u64, maybe_position: i64, insert_count: u64, heap: *Heap) callconv(.C) u64
+{
+    const old_array_length = ArrayHeaderGetLength(array.*);
+    const position: u64 = if (maybe_position == -1) old_array_length else @intCast(u64, maybe_position);
+    if (maybe_position < 0 or position > old_array_length) KernelPanic("position out of bounds");
+    if (!_ArraySetLength(array, old_array_length + insert_count, item_size, 0, heap)) return 0;
+    const array_address = @ptrToInt(array.*);
+    EsMemoryMove(array_address + item_size * position, array_address + item_size * old_array_length, @intCast(i64, item_size * insert_count), false);
+    return array_address + item_size * position;
+}
+
+export fn _ArrayFree(array: *?*u64, item_size: u64, heap: *Heap) callconv(.C) void
+{
+    if (array.* == null) return;
+
+    EsHeapFree(@ptrToInt(ArrayHeaderGet(array.*)), @sizeOf(ArrayHeader) + item_size * ArrayHeaderGet(array.*).allocated, heap);
+    array.* = null;
 }
 
 extern fn drivers_init() callconv(.C) void;
