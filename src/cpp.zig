@@ -1179,7 +1179,7 @@ pub const Thread = extern struct
     interrupt_context: *InterruptContext,
     last_known_execution_address: u64, // @TODO: for debugging
 
-    name: [*:0]u8,
+    name: [*:0]const u8,
 
     pub const Priority = enum(i8)
     {
@@ -3067,6 +3067,9 @@ pub const AddressSpace = extern struct
     //}
 };
 
+export var _kernelMMSpace: AddressSpace = undefined;
+export var _coreMMSpace: AddressSpace = undefined;
+
 pub const Event = extern struct
 {
     auto_reset: Volatile(bool),
@@ -4484,9 +4487,123 @@ extern fn ArchInitialise() callconv(.C) void;
 extern fn CreateMainThread() callconv(.C) void;
 export fn KThreadCreate(name: [*:0]const u8, entry: fn (u64) callconv(.C) void, argument: u64) callconv(.C) bool
 {
-    return ThreadSpawn(name, @ptrToInt(entry), argument, 0, null, 0) != null;
+    return ThreadSpawn(name, @ptrToInt(entry), argument, Thread.Flags.empty(), null, 0) != null;
 }
-extern fn ThreadSpawn(name: [*:0]const u8, start_address: u64, argument1: u64, flags: u32, process: ?*Process, argument2: u64) callconv(.C) ?*Thread;
+
+extern fn MMStandardAllocate(space: *AddressSpace, bytes: u64, flags: Region.Flags, base_address: u64, commit_all: bool) callconv(.C) u64;
+extern fn MMCommitRange(space: *AddressSpace, region: *Region, page_offset: u64, page_count: u64) callconv(.C) bool;
+extern fn OpenHandleToObject(object: u64, type: u32, flags: u32) callconv(.C) bool;
+extern fn MMFindAndPinRegion(address_space: *AddressSpace, address: u64, size: u64) callconv(.C) ?*Region;
+extern fn ArchInitialiseThread(kernel_stack: u64, kernel_stack_size: u64, thread: *Thread, start_address: u64, argument1: u64, argument2: u64, userland: bool, user_stack: u64, user_stack_size: u64) callconv(.C) *InterruptContext;
+extern fn MMFree(space: *AddressSpace, address: u64, expected_size: u64, user_only: bool) callconv(.C) bool;
+
+export fn ThreadSpawn(name: [*:0]const u8, start_address: u64, argument1: u64, flags: Thread.Flags, maybe_process: ?*Process, argument2: u64) callconv(.C) ?*Thread
+{
+    const userland = flags.contains(.userland);
+    const parent_thread = GetCurrentThread();
+    const process = if (maybe_process) |process_r| process_r else kernelProcess;
+    if (userland and process == kernelProcess) KernelPanic("cannot add userland thread to kernel process");
+
+    _ = process.threads_mutex.acquire();
+    defer process.threads_mutex.release();
+
+    if (process.prevent_new_threads) return null;
+
+    const thread = @intToPtr(?*Thread, PoolAdd(&scheduler.thread_pool, @sizeOf(Thread))) orelse return null;
+    const kernel_stack_size = 0x5000;
+    const user_stack_reserve: u64 = if (userland) 0x400000 else kernel_stack_size;
+    const user_stack_commit: u64 = if (userland) 0x10000 else 0;
+    var user_stack: u64 = 0;
+    var kernel_stack: u64 = 0;
+
+    var failed = false;
+    if (!flags.contains(.idle))
+    {
+        kernel_stack = MMStandardAllocate(&_kernelMMSpace, kernel_stack_size, Region.Flags.from_flag(.fixed), 0, true);
+        failed = (kernel_stack == 0);
+        if (!failed)
+        {
+            if (userland)
+            {
+                user_stack = MMStandardAllocate(process.address_space, user_stack_reserve, Region.Flags.empty(), 0, false);
+                // @TODO: this migh be buggy, since we are using an invalid stack to get a region?
+                const region = MMFindAndPinRegion(process.address_space, user_stack, user_stack_reserve).?;
+                _ = process.address_space.reserve_mutex.acquire();
+                failed = !MMCommitRange(process.address_space, region, (user_stack_reserve - user_stack_commit) / page_size, user_stack_commit / page_size);
+                process.address_space.reserve_mutex.release();
+                MMUnpinRegion(process.address_space, region);
+                failed = failed or user_stack == 0;
+            }
+            else
+            {
+                user_stack = kernel_stack;
+            }
+        }
+    }
+
+    if (!failed)
+    {
+        thread.paused.write_volatile((parent_thread != null and process == parent_thread.?.process and parent_thread.?.paused.read_volatile()) or flags.contains(.paused));
+        thread.handle_count.write_volatile(2);
+        thread.is_kernel_thread = !userland;
+        thread.priority = if (flags.contains(.low_priority)) @enumToInt(Thread.Priority.low) else @enumToInt(Thread.Priority.normal);
+        thread.name = name;
+        thread.kernel_stack_base = kernel_stack;
+        thread.user_stack_base = if (userland) user_stack else 0;
+        thread.user_stack_reserve = user_stack_reserve;
+        thread.user_stack_commit.write_volatile(user_stack_commit);
+        thread.terminatable_state.write_volatile(if (userland) .terminatable else .in_syscall);
+        thread.type = 
+            if (flags.contains(.async_task)) Thread.Type.async_task
+            else if (flags.contains(.idle)) Thread.Type.idle
+            else Thread.Type.normal;
+        thread.id = @atomicRmw(u64, &scheduler.next_thread_id, .Add, 1, .SeqCst);
+        thread.process = process;
+        thread.item.value = thread;
+        thread.all_item.value = thread;
+        thread.process_item.value = thread;
+
+        if (thread.type != .idle)
+        {
+            thread.interrupt_context = ArchInitialiseThread(kernel_stack, kernel_stack_size, thread, start_address, argument1, argument2, userland, user_stack, user_stack_reserve);
+        }
+        else
+        {
+            thread.state.write_volatile(.active);
+            thread.executing.write_volatile(true);
+        }
+
+        process.threads.insert_at_end(&thread.process_item);
+
+        _ = scheduler.all_threads_mutex.acquire();
+        scheduler.all_threads.insert_at_start(&thread.all_item);
+        scheduler.all_threads_mutex.release();
+
+        // object process
+        // @TODO
+        _ = OpenHandleToObject(@ptrToInt(process), 1, 0);
+
+        if (thread.type == .normal)
+        {
+            scheduler.dispatch_spinlock.acquire();
+            SchedulerAddActiveThread(thread, true);
+            scheduler.dispatch_spinlock.release();
+        }
+        else
+        {
+            // do nothing
+        }
+        return thread;
+    }
+    else
+    {
+        // fail
+        if (user_stack != 0) _ = MMFree(process.address_space, user_stack, 0, false);
+        if (kernel_stack != 0) _ = MMFree(&_kernelMMSpace, kernel_stack, 0, false);
+        PoolRemove(&scheduler.thread_pool, @ptrToInt(thread));
+        return null;
+    }
+}
 
 export fn KernelInitialise() callconv(.C) void
 {

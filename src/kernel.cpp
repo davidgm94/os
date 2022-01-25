@@ -190,8 +190,8 @@ struct ConstantBuffer {
 #define ES_ERROR_TOO_MANY_FILES_WITH_NAME	(-76)
 
 void CloseHandleToObject(void *object, KernelObjectType type, uint32_t flags = 0);
-void *MMStandardAllocate(MMSpace *space, size_t bytes, uint32_t flags, void *baseAddress = nullptr, bool commitAll = true);
-bool MMFree(MMSpace *space, void *address, size_t expectedSize = 0, bool userOnly = false);
+extern "C" void *MMStandardAllocate(MMSpace *space, size_t bytes, uint32_t flags, void *baseAddress = nullptr, bool commitAll = true);
+extern "C" bool MMFree(MMSpace *space, void *address, size_t expectedSize = 0, bool userOnly = false);
 
 #define K_USER_BUFFER // Used to mark pointers that (might) point to non-kernel memory.
 
@@ -3738,7 +3738,6 @@ struct MMSpace {
 
 	KAsyncTask removeAsyncTask;      // The asynchronous task for deallocating the memory space once it's no longer in use.
 };
-MMSpace _coreMMSpace, _kernelMMSpace;
 
 struct GlobalData {
 	volatile int32_t clickChainTimeoutMs;
@@ -3802,8 +3801,8 @@ struct MMRegion {
 	};
 };
 
-MMRegion *MMFindAndPinRegion(MMSpace *space, uintptr_t address, uintptr_t size); 
-bool MMCommitRange(MMSpace *space, MMRegion *region, uintptr_t pageOffset, size_t pageCount);
+extern "C" MMRegion *MMFindAndPinRegion(MMSpace *space, uintptr_t address, uintptr_t size); 
+extern "C" bool MMCommitRange(MMSpace *space, MMRegion *region, uintptr_t pageOffset, size_t pageCount);
 extern "C" void MMUnpinRegion(MMSpace *space, MMRegion *region);
 
 #define ES_SHARED_MEMORY_NAME_MAX_LENGTH (32)
@@ -3814,135 +3813,9 @@ struct MMSharedRegion {
 	void *data;
 };
 
-bool OpenHandleToObject(void *object, KernelObjectType type, uint32_t flags);
+extern "C" bool OpenHandleToObject(void *object, KernelObjectType type, uint32_t flags);
 
-extern "C" Thread* ThreadSpawn(const char *cName, uintptr_t startAddress, uintptr_t argument1 = 0, uint32_t flags = ES_FLAGS_DEFAULT, Process *process = nullptr, uintptr_t argument2 = 0)
-{
-    bool userland = flags & SPAWN_THREAD_USERLAND;
-	Thread *parentThread = GetCurrentThread();
-
-	if (!process) {
-		process = kernelProcess;
-	}
-
-	if (userland && process == kernelProcess) {
-		KernelPanic("ThreadSpawn - Cannot add userland thread to kernel process.\n");
-	}
-
-	// Adding the thread to the owner's list of threads and adding the thread to a scheduling list
-	// need to be done in the same atomic block.
-	KMutexAcquire(&process->threadsMutex);
-	EsDefer(KMutexRelease(&process->threadsMutex));
-
-	if (process->preventNewThreads) {
-		return nullptr;
-	}
-
-	Thread *thread = (Thread *) PoolAdd(&scheduler.threadPool, sizeof(Thread));
-	if (!thread) return nullptr;
-	KernelLog(LOG_INFO, "Scheduler", "spawn thread", "Created thread, %x to start at %x\n", thread, startAddress);
-
-	// Allocate the thread's stacks.
-#if defined(ES_BITS_64)
-	uintptr_t kernelStackSize = 0x5000 /* 20KB */;
-#elif defined(ES_BITS_32)
-	uintptr_t kernelStackSize = 0x4000 /* 16KB */;
-#endif
-	uintptr_t userStackReserve = userland ? 0x400000 /* 4MB */ : kernelStackSize;
-	uintptr_t userStackCommit = userland ? 0x10000 /* 64KB */ : 0;
-	uintptr_t stack = 0, kernelStack = 0;
-
-	if (flags & SPAWN_THREAD_IDLE) goto skipStackAllocation;
-
-	kernelStack = (uintptr_t) MMStandardAllocate(kernelMMSpace, kernelStackSize, MM_REGION_FIXED);
-	if (!kernelStack) goto fail;
-
-	if (userland) {
-		stack = (uintptr_t) MMStandardAllocate(process->vmm, userStackReserve, ES_FLAGS_DEFAULT, nullptr, false);
-
-		MMRegion *region = MMFindAndPinRegion(process->vmm, stack, userStackReserve);
-		KMutexAcquire(&process->vmm->reserveMutex);
-#ifdef K_ARCH_STACK_GROWS_DOWN
-		bool success = MMCommitRange(process->vmm, region, (userStackReserve - userStackCommit) / K_PAGE_SIZE, userStackCommit / K_PAGE_SIZE); 
-#else
-		bool success = MMCommitRange(process->vmm, region, 0, userStackCommit / K_PAGE_SIZE); 
-#endif
-		KMutexRelease(&process->vmm->reserveMutex);
-		MMUnpinRegion(process->vmm, region);
-		if (!success) goto fail;
-	} else {
-		stack = kernelStack;
-	}
-
-	if (!stack) goto fail;
-	skipStackAllocation:;
-
-	// If ProcessPause is called while a thread in that process is spawning a new thread, mark the thread as paused. 
-	// This is synchronized under the threadsMutex.
-	thread->paused = (parentThread && process == parentThread->process && parentThread->paused) || (flags & SPAWN_THREAD_PAUSED);
-
-	// 2 handles to the thread:
-	// 	One for spawning the thread, 
-	// 	and the other for remaining during the thread's life.
-	thread->handles = 2;
-
-	thread->isKernelThread = !userland;
-	thread->priority = (flags & SPAWN_THREAD_LOW_PRIORITY) ? THREAD_PRIORITY_LOW : THREAD_PRIORITY_NORMAL;
-	thread->cName = cName;
-	thread->kernelStackBase = kernelStack;
-	thread->userStackBase = userland ? stack : 0;
-	thread->userStackReserve = userStackReserve;
-	thread->userStackCommit = userStackCommit;
-	thread->terminatableState = userland ? THREAD_TERMINATABLE : THREAD_IN_SYSCALL;
-	thread->type = (flags & SPAWN_THREAD_ASYNC_TASK) ? THREAD_ASYNC_TASK : (flags & SPAWN_THREAD_IDLE) ? THREAD_IDLE : THREAD_NORMAL;
-	thread->id = __sync_fetch_and_add(&scheduler.nextThreadID, 1);
-	thread->process = process;
-	thread->item.thisItem = thread;
-	thread->allItem.thisItem = thread;
-	thread->processItem.thisItem = thread;
-
-	if (thread->type != THREAD_IDLE) {
-		thread->interruptContext = ArchInitialiseThread(kernelStack, kernelStackSize, thread, 
-				startAddress, argument1, argument2, userland, stack, userStackReserve);
-	} else {
-		thread->state = THREAD_ACTIVE;
-		thread->executing = true;
-	}
-
-	process->threads.InsertEnd(&thread->processItem);
-
-	KMutexAcquire(&scheduler.allThreadsMutex);
-	scheduler.allThreads.InsertStart(&thread->allItem);
-	KMutexRelease(&scheduler.allThreadsMutex);
-
-	// Each thread owns a handles to the owner process.
-	// This makes sure the process isn't destroyed before all its threads have been destroyed.
-	OpenHandleToObject(process, KERNEL_OBJECT_PROCESS, ES_FLAGS_DEFAULT);
-
-	KernelLog(LOG_INFO, "Scheduler", "thread stacks", "Spawning thread with stacks (k,u): %x->%x, %x->%x\n", 
-			kernelStack, kernelStack + kernelStackSize, stack, stack + userStackReserve);
-	KernelLog(LOG_INFO, "Scheduler", "create thread", "Create thread ID %d, type %d, owner process %d\n", 
-			thread->id, thread->type, process->id);
-
-	if (thread->type == THREAD_NORMAL) {
-		// Add the thread to the start of the active thread list to make sure that it runs immediately.
-		KSpinlockAcquire(&scheduler.dispatchSpinlock);
-		scheduler.AddActiveThread(thread, true);
-		KSpinlockRelease(&scheduler.dispatchSpinlock);
-	} else {
-		// Idle and asynchronous task threads don't need to be added to a scheduling list.
-	}
-
-	// The thread may now be terminated at any moment.
-
-	return thread;
-
-	fail:;
-	if (stack) MMFree(process->vmm, (void *) stack);
-	if (kernelStack) MMFree(kernelMMSpace, (void *) kernelStack);
-	PoolRemove(&scheduler.threadPool, thread);
-	return nullptr;
-}
+extern "C" Thread* ThreadSpawn(const char *cName, uintptr_t startAddress, uintptr_t argument1 = 0, uint32_t flags = ES_FLAGS_DEFAULT, Process *process = nullptr, uintptr_t argument2 = 0);
 
 extern "C" bool KThreadCreate(const char *cName, void (*startAddress)(uintptr_t), uintptr_t argument = 0);
 
