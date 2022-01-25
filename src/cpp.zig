@@ -3575,10 +3575,153 @@ const HeapType = enum
 // @TODO -> this is just to maintain abi compatibility with the C++ implementation
 pub fn Array(comptime T: type, comptime heap_type: HeapType) type
 {
-    _ = heap_type;
     return extern struct
     {
-        ptr: [*]T,
+        ptr: ?[*]T,
+
+        fn get_heap() *Heap
+        {
+            return switch (heap_type)
+            {
+                .core => &heapCore,
+                .fixed => &heapFixed,
+            };
+        }
+
+        fn length(self: *@This()) u64
+        {
+            return if (self.ptr) |_| ArrayHeaderGet(@ptrCast(*u64, self.ptr.?)).length else 0;
+        }
+
+        fn first(self: *@This()) *T
+        {
+            return &self.ptr.?[0];
+        }
+
+        fn last(self: *@This()) *T
+        {
+            return &self.ptr.?[self.length() - 1];
+        }
+
+        fn delete(self: *@This(), position: u64) void
+        {
+            _ArrayDelete(@ptrCast(?*u64, self.ptr), position, @sizeOf(T), 1);
+        }
+
+        fn delete_swap(self: *@This(), position: u64) void
+        {
+            _ArrayDeleteSwap(self.ptr, position, @sizeOf(T));
+        }
+
+        fn delete_many(self: *@This(), position: u64, count: u64) void
+        {
+            _ArrayDelete(@ptrCast(?*u64, self.ptr), position, @sizeOf(T), count);
+        }
+
+        fn add(self: *@This(), item: T) ?*T
+        {
+            return _ArrayInsert(&self.ptr, &item, @sizeOf(T), -1, 0, get_heap());
+        }
+
+        fn add_uninitialized(self: *@This()) ?*T
+        {
+            return _ArrayInsert(&self.ptr, null, @sizeOf(T), -1, 0, get_heap());
+        }
+
+        fn insert(self: *@This(), item: T, position: u64) ?*T
+        {
+            return @intToPtr(?*T, _ArrayInsert(&@ptrCast(?*u64, self.ptr), @ptrToInt(&item), @sizeOf(T), @intCast(i64, position), 0, get_heap()));
+        }
+
+        fn add_pointer(self: *@This(), item: *const T) ?*T
+        {
+            return _ArrayInsert(&self.ptr, item, @sizeOf(T), -1, 0, get_heap());
+        }
+
+        fn insert_pointer(self: *@This(), item: *const T, position: u64) ?*T
+        {
+            return _ArrayInsert(&self.ptr, item, @sizeOf(T), position, 0, get_heap());
+        }
+
+        fn insert_many(self: *@This(), position: u64, count: u64) ?*T
+        {
+            return _ArrayInsertMany(&self.ptr, @sizeOf(T), position, count, get_heap());
+        }
+
+        fn set_length(self: *@This(), len: u64) bool
+        {
+            return _ArraySetLength(&self.ptr, len, @sizeOf(T), 0, get_heap());
+        }
+
+        fn free(self: *@This()) void
+        {
+            _ArrayFree(&@ptrCast(?*u64, self.ptr), @sizeOf(T), get_heap());
+        }
+
+        fn pop(self: *@This()) T
+        {
+            const t = self.last();
+            self.delete(self.length() - 1);
+            return t;
+        }
+
+        fn get(self: *@This(), index: u64) *T
+        {
+            return &self.ptr.?[index];
+        }
+
+        fn find(self: *@This(), item: T, fail_if_not_found: bool) i64
+        {
+
+            const len = self.length();
+            if (len > 0)
+            {
+                for (self.ptr.?[0..len]) |element, i|
+                {
+                    if (element == item) return @intCast(i64, i);
+                }
+            }
+            if (fail_if_not_found) KernelPanic("find item not found");
+            return -1;
+        }
+
+        fn find_and_delete(self: *@This(), item: T, fail_if_not_found: bool) bool
+        {
+            const index = self.find(item, fail_if_not_found);
+            if (index == -1) return false;
+            self.delete(index);
+            return true;
+        }
+
+        fn find_and_delete_swap(self: *@This(), item: T, fail_if_not_found: bool) bool
+        {
+            const index = self.find(item, fail_if_not_found);
+            if (index == -1) return false;
+            self.delete_swap(index);
+            return true;
+        }
+
+        fn add_fast(self: *@This(), item: T) void
+        {
+            if (self.ptr) |_|
+            {
+                const header = ArrayHeaderGet(self.ptr);
+                if (header.length == header.allocated)
+                {
+                    self.add(item);
+                }
+                else
+                {
+                    self.get(header.length).* = item;
+                    header.length += 1;
+                }
+            }
+            else
+            {
+                self.add(item);
+                return;
+            }
+        }
     };
 }
 
@@ -4149,8 +4292,347 @@ pub const Range = extern struct
     {
         ranges: Array(Range, .core),
         contiguous: u64,
+
+        pub fn set(self: *@This(), from: u64, to: u64, maybe_delta: ?*i64, modify: bool) bool
+        {
+            if (to <= from) KernelPanic("invalid range");
+
+            if (self.ranges.length() == 0)
+            {
+                if (maybe_delta) |delta|
+                {
+                    if (from >= self.contiguous) delta.* = @intCast(i64, to) - @intCast(i64, from)
+                    else if (to >= self.contiguous) delta.* = @intCast(i64, to) - @intCast(i64, self.contiguous)
+                    else delta.* = 0;
+                }
+
+                if (!modify) return true;
+
+                if (from <= self.contiguous)
+                {
+                    if (to > self.contiguous) self.contiguous = to;
+                    return true;
+                }
+
+                if (!self.normalize()) return false;
+            }
+
+            const new_range = blk:
+            {
+                var range = std.mem.zeroes(Range);
+                range.from = if (self.find(from, true)) |left| left.from else from;
+                range.to = if (self.find(to, true)) |right| right.to else to;
+                break :blk range;
+            };
+
+            const index = blk:
+            {
+                if (!modify) break :blk @as(u64, 0);
+
+                const len = self.ranges.length();
+                if (len > 0)
+                {
+                    for (self.ranges.ptr.?[0..len]) |range, range_i|
+                    {
+                        if (range.to > new_range.from)
+                        {
+                            if (self.ranges.insert(new_range, range_i) == null)
+                            {
+                                return false;
+                            }
+
+                            break :blk range_i + 1;
+                        }
+                    }
+                }
+
+                const result_index = self.ranges.length();
+                if (self.ranges.insert(new_range, result_index) == null)
+                {
+                    return false;
+                }
+                break :blk result_index + 1;
+            };
+
+            var delete_start = index;
+            var delete_count: u64 = 0;
+            var delete_total: u64 = 0;
+
+            const len = self.ranges.length();
+            if (len > 0)
+            {
+                for (self.ranges.ptr.?[index..len]) |range|
+                {
+                    const overlap =
+                        (range.from >= new_range.from and range.from <= new_range.to) or
+                        (range.to >= new_range.from and range.to <= new_range.to);
+                    if (overlap)
+                    {
+                        delete_count += 1;
+                        delete_total += range.to - range.from;
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
+            }
+
+            if (modify) self.ranges.delete_many(delete_start, delete_count);
+
+            self.validate();
+
+            if (maybe_delta) |delta|
+            {
+                delta.* = @intCast(i64, new_range.to) - @intCast(i64, new_range.from) - @intCast(i64, delete_total);
+            }
+
+            return true;
+        }
+
+        pub fn normalize(self: *@This()) bool
+        {
+            if (self.contiguous != 0)
+            {
+                const old_contiguous = self.contiguous;
+                self.contiguous = 0;
+
+                if (!self.set(0, old_contiguous, null, true)) return false;
+            }
+
+            return true;
+        }
+
+        pub fn find(self: *@This(), offset: u64, touching: bool) ?*Range
+        {
+            if (self.ranges.length() == 0) return null;
+
+            var low: i64 = 0;
+            var high = @intCast(i64, self.ranges.length() - 1);
+
+            while (low <= high)
+            {
+                const i = @divTrunc(low + (high - low), 2);
+                assert(i >= 0);
+                const range = self.ranges.get(@intCast(u64, i));
+
+                if (range.from <= offset and (offset < range.to or (touching and offset <= range.to))) return range
+                else if (range.from <= offset) low = i + 1
+                else high = i - 1;
+            }
+
+            return null;
+        }
+
+        pub fn contains(self: *@This(), offset: u64) bool
+        {
+            if (self.ranges.length() != 0) return self.find(offset, false) != null
+            else return offset < self.contiguous;
+        }
+
+        pub fn clear(self: *@This(), from: u64, to: u64, maybe_delta: ?*i64, modify: bool) bool
+        {
+            if (to <= from) KernelPanic("clear invalid range");
+
+            if (self.ranges.length() == 0)
+            {
+                if (from < self.contiguous and self.contiguous != 0)
+                {
+                    if (to < self.contiguous)
+                    {
+                        if (modify)
+                        {
+                            if (!self.normalize()) return false;
+                        }
+                        else 
+                        {
+                            if (maybe_delta) |delta| delta.* = @intCast(i64, from) - @intCast(i64, to);
+                            return true;
+                        }
+                    }
+                    else
+                    {
+                        if (maybe_delta) |delta| delta.* = @intCast(i64, from) - @intCast(i64, self.contiguous);
+                        if (modify) self.contiguous = from;
+                        return true;
+                    }
+                }
+                else if (maybe_delta) |delta|
+                {
+                    delta.* = 0;
+                    return true;
+                }
+            }
+
+            if (self.ranges.length() == 0)
+            {
+                self.ranges.free();
+                if (maybe_delta) |delta| delta.* = 0;
+                return true;
+            }
+
+            if (to <= self.ranges.first().from or from >= self.ranges.last().to)
+            {
+                if (maybe_delta) |delta| delta.* = 0;
+                return true;
+            }
+
+            if (from <= self.ranges.first().from and to >= self.ranges.last().to)
+            {
+                if (maybe_delta) |delta|
+                {
+                    var total: i64 = 0;
+                    for (self.ranges.ptr.?[0..self.ranges.length()]) |range|
+                    {
+                        total += @intCast(i64, range.to) - @intCast(i64, range.from);
+                    }
+
+                    delta.* = total;
+                }
+
+                if (modify) self.ranges.free();
+                return true;
+            }
+
+            var overlap_start = self.ranges.length();
+            var overlap_count: u64 = 0;
+
+            for (self.ranges.ptr.?[0..self.ranges.length()]) |range, i|
+            {
+                if (range.to > from and range.from < to)
+                {
+                    overlap_start = i;
+                    overlap_count = 1;
+                    break;
+                }
+            }
+
+            for (self.ranges.ptr.?[overlap_start + 1..self.ranges.length()]) |range|
+            {
+                if (range.to >= from and range.from < to) overlap_count += 1
+                else break;
+            }
+
+            var new_delta: i64 = 0;
+            if (overlap_count == 1)
+            {
+                const range = self.ranges.get(overlap_start);
+
+                if (range.from < from and range.to > to)
+                {
+                    const new_range = Range { .from = to, .to = range.to };
+                    new_delta -= @intCast(i64, to) - @intCast(i64, from);
+
+                    if (modify)
+                    {
+                        if (self.ranges.insert(new_range, overlap_start + 1) == null) return false;
+                        self.ranges.get(overlap_start).to = from;
+                    }
+                }
+                else if (range.from < from)
+                {
+                    new_delta -= @intCast(i64, range.to) - @intCast(i64, from);
+                    if (modify) range.to = from;
+                }
+                else if (range.to > to)
+                {
+                    new_delta -= @intCast(i64, to) - @intCast(i64, range.from);
+                    if (modify) range.from = to;
+                }
+                else
+                {
+                    new_delta -= @intCast(i64, range.to) - @intCast(i64, range.from);
+                    if (modify) self.ranges.delete(overlap_start);
+                }
+            }
+            else if (overlap_count > 1)
+            {
+                const left = self.ranges.get(overlap_start);
+                const right = self.ranges.get(overlap_start + overlap_count - 1);
+
+                if (left.from < from)
+                {
+                    new_delta -= @intCast(i64, left.to) - @intCast(i64, from);
+                    if (modify) left.to = from;
+                    overlap_start += 1;
+                    overlap_count -= 1;
+                }
+
+                if (right.to > to)
+                {
+                    new_delta -= @intCast(i64, to) - @intCast(i64, right.from);
+                    if (modify) right.from = to;
+                    overlap_count -= 1;
+                }
+
+                if (maybe_delta) |_|
+                {
+                    for (self.ranges.ptr.?[overlap_start..overlap_start + overlap_count]) |range|
+                    {
+                        new_delta -= @intCast(i64, range.to) - @intCast(i64, range.from);
+                    }
+                }
+
+                if (modify)
+                {
+                    self.ranges.delete_many(overlap_start, overlap_count);
+                }
+            }
+
+            if (maybe_delta) |delta|
+            {
+                delta.* = new_delta;
+            }
+
+            self.validate();
+            return true;
+        }
+
+        fn validate(self: *@This()) void
+        {
+            var previous_to: u64 = 0;
+            if (self.ranges.length() == 0) return;
+
+            for (self.ranges.ptr.?[0..self.ranges.length()]) |range|
+            {
+                if (previous_to != 0 and range.from <= previous_to) KernelPanic("range in set is not placed after the prior range\n");
+                if (range.from >= range.to) KernelPanic("range in set is invalid\n");
+
+                previous_to = range.to;
+            }
+        }
     };
 };
+
+export fn RangeSetFind(range_set: *Range.Set, offset: u64, touching: bool) callconv(.C) ?*Range
+{
+    return range_set.find(offset, touching);
+}
+
+export fn RangeSetContains(range_set: *Range.Set, offset: u64) callconv(.C) bool
+{
+    return range_set.contains(offset);
+}
+
+export fn RangeSetValidate(range_set: *Range.Set) callconv(.C) void
+{
+    range_set.validate();
+}
+
+export fn RangeSetClear(range_set: *Range.Set, from: u64, to: u64, delta: ?*i64, modify: bool) callconv(.C) bool
+{
+    return range_set.clear(from, to, delta, modify);
+}
+
+export fn RangeSetSet(range_set: *Range.Set, from: u64, to: u64, delta: ?*i64, modify: bool) callconv(.C) bool
+{
+    return range_set.set(from, to, delta, modify);
+}
+
+export fn RangeSetNormalize(range_set: *Range.Set) callconv(.C) bool
+{
+    return range_set.normalize();
+}
 
 export fn EsMemoryFill(from: u64, to: u64, byte: u8) callconv(.C) void
 {
@@ -4295,7 +4777,7 @@ const ArrayHeader = extern struct
 
 };
 
-export fn ArrayHeaderGet(array: ?*u64) callconv(.C) *ArrayHeader
+export fn ArrayHeaderGet(array: *u64) callconv(.C) *ArrayHeader
 {
     return @intToPtr(*ArrayHeader, @ptrToInt(array) - @sizeOf(ArrayHeader));
 }
@@ -4326,7 +4808,7 @@ export fn _ArrayEnsureAllocated(array: *?*u64, minimum_allocated: u64, item_size
 {
     if (!_ArrayMaybeInitialise(array, item_size, heap)) return false;
 
-    const old_header = ArrayHeaderGet(array.*);
+    const old_header = ArrayHeaderGet(array.*.?);
 
     if (old_header.allocated >= minimum_allocated) return true;
 
@@ -4346,7 +4828,7 @@ export fn _ArraySetLength(array: *?*u64, new_length: u64, item_size: u64, additi
 {
     if (!_ArrayMaybeInitialise(array, item_size, heap)) return false;
 
-    var header = ArrayHeaderGet(array.*);
+    var header = ArrayHeaderGet(array.*.?);
 
     if (header.allocated >= new_length)
     {
@@ -4356,7 +4838,7 @@ export fn _ArraySetLength(array: *?*u64, new_length: u64, item_size: u64, additi
 
     if (!_ArrayEnsureAllocated(array, if (header.allocated * 2 > new_length) header.allocated * 2 else new_length + 16, item_size, additional_header_bytes, heap)) return false;
 
-    header = ArrayHeaderGet(array.*);
+    header = ArrayHeaderGet(array.*.?);
     header.length = new_length;
     return true;
 }
@@ -4373,7 +4855,7 @@ export fn _ArrayDelete(array: ?*u64, position: u64, item_size: u64, count: u64) 
     const old_array_length = ArrayHeaderGetLength(array);
     if (position >= old_array_length) KernelPanic("position out of bounds");
     if (count > old_array_length - position) KernelPanic("count out of bounds");
-    ArrayHeaderGet(array).length = old_array_length - count;
+    ArrayHeaderGet(array.?).length = old_array_length - count;
     const array_address = @ptrToInt(array);
     // @TODO @WARNING @Dangerous @ERROR @PANIC
     EsMemoryMove(array_address + item_size * (position + count), array_address + item_size * old_array_length, memory_move_backwards(u64, item_size) * @intCast(i64, count), false);
@@ -4383,7 +4865,7 @@ export fn _ArrayDeleteSwap(array: ?*u64, position: u64, item_size: u64) callconv
 {
     const old_array_length = ArrayHeaderGetLength(array);
     if (position >= old_array_length) KernelPanic("position out of bounds");
-    ArrayHeaderGet(array).length = old_array_length - 1;
+    ArrayHeaderGet(array.?).length = old_array_length - 1;
     const array_address = @ptrToInt(array);
     EsMemoryCopy(array_address + item_size * position, array_address * ArrayHeaderGetLength(array), item_size);
 }
@@ -4416,7 +4898,7 @@ export fn _ArrayFree(array: *?*u64, item_size: u64, heap: *Heap) callconv(.C) vo
 {
     if (array.* == null) return;
 
-    EsHeapFree(@ptrToInt(ArrayHeaderGet(array.*)), @sizeOf(ArrayHeader) + item_size * ArrayHeaderGet(array.*).allocated, heap);
+    EsHeapFree(@ptrToInt(ArrayHeaderGet(array.*.?)), @sizeOf(ArrayHeader) + item_size * ArrayHeaderGet(array.*.?).allocated, heap);
     array.* = null;
 }
 
