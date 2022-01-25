@@ -82,14 +82,17 @@ enum KernelObjectType : uint32_t {
 
 #define ES_MEMORY_MOVE_BACKWARDS -
 
+
 struct EsHeap;
+extern EsHeap heapCore;
+extern EsHeap heapFixed;
 #define K_CORE (&heapCore)
 #define K_FIXED (&heapFixed)
 #define K_PAGED (&heapFixed)
-extern EsHeap heapCore;
-extern EsHeap heapFixed;
+
 struct MMSpace;
-extern MMSpace _kernelMMSpace, _coreMMSpace;
+extern MMSpace _kernelMMSpace;
+extern MMSpace _coreMMSpace;
 #define kernelMMSpace (&_kernelMMSpace)
 #define coreMMSpace (&_coreMMSpace)
 
@@ -3801,11 +3804,7 @@ struct MMRegion {
 
 MMRegion *MMFindAndPinRegion(MMSpace *space, uintptr_t address, uintptr_t size); 
 bool MMCommitRange(MMSpace *space, MMRegion *region, uintptr_t pageOffset, size_t pageCount);
-void MMUnpinRegion(MMSpace *space, MMRegion *region) {
-	KMutexAcquire(&space->reserveMutex);
-	KWriterLockReturn(&region->data.pin, K_LOCK_SHARED);
-	KMutexRelease(&space->reserveMutex);
-}
+extern "C" void MMUnpinRegion(MMSpace *space, MMRegion *region);
 
 #define ES_SHARED_MEMORY_NAME_MAX_LENGTH (32)
 struct MMSharedRegion {

@@ -4458,6 +4458,13 @@ export fn EsStringCompareRaw(s1: [*:0]const u8, length1: i64, s2: [*:0]const u8,
     return 0;
 }
 
+export fn MMUnpinRegion(space: *AddressSpace, region: *Region) callconv(.C) void
+{
+    _ = space.reserve_mutex.acquire();
+    region.data.pin.return_lock(WriterLock.shared);
+    space.reserve_mutex.release();
+}
+
 extern fn drivers_init() callconv(.C) void;
 extern fn start_desktop_process() callconv(.C) void;
 
