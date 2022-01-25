@@ -4420,6 +4420,44 @@ export fn _ArrayFree(array: *?*u64, item_size: u64, heap: *Heap) callconv(.C) vo
     array.* = null;
 }
 
+export fn EsCStringLength(maybe_string: ?[*:0]const u8) callconv(.C) u64
+{
+    if (maybe_string) |string|
+    {
+        var size: u64 = 0;
+
+        while (string[size] != 0)
+        {
+            size += 1;
+        }
+
+        return size;
+    }
+    else return 0;
+}
+
+export fn EsStringCompareRaw(s1: [*:0]const u8, length1: i64, s2: [*:0]const u8, length2: i64) callconv(.C) i32
+{
+    var len1: u64 = if (length1 == -1) EsCStringLength(s1) else @intCast(u64, length1);
+    var len2: u64 = if (length2 == -1) EsCStringLength(s2) else @intCast(u64, length2);
+
+    var i: u64 = 0;
+    while (len1 != 0 or len2 != 0) : (i += 1)
+    {
+        if (len1 == 0) return -1;
+        if (len2 == 0) return 1;
+
+        const c1 = s1[i];
+        const c2 = s2[i];
+
+        if (c1 != c2) return @intCast(i32, c1) - @intCast(i32, c2);
+        len1 -= 1;
+        len2 -= 1;
+    }
+
+    return 0;
+}
+
 extern fn drivers_init() callconv(.C) void;
 extern fn start_desktop_process() callconv(.C) void;
 

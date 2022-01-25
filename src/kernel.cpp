@@ -120,47 +120,6 @@ struct ConstantBuffer {
 	// Data follows.
 };
 
-size_t EsCStringLength(const char *string) {
-	if (!string) {
-		return 0;
-	}
-
-	size_t size = 0;
-
-	while (true) {
-		if (*string) {
-			size++;
-			string++;
-		} else {
-			return size;
-		}
-	}
-}
-
-int EsStringCompareRaw(const char *s1, ptrdiff_t length1, const char *s2, ptrdiff_t length2) {
-	if (length1 == -1) length1 = EsCStringLength(s1);
-	if (length2 == -1) length2 = EsCStringLength(s2);
-
-	while (length1 || length2) {
-		if (!length1) return -1;
-		if (!length2) return 1;
-
-		char c1 = *s1;
-		char c2 = *s2;
-
-		if (c1 != c2) {
-			return c1 - c2;
-		}
-
-		length1--;
-		length2--;
-		s1++;
-		s2++;
-	}
-
-	return 0;
-}
-
 #define K_MAX_PROCESSORS (256)
 
 #define _ES_NODE_FROM_WRITE_EXCLUSIVE	(0x020000)
@@ -442,6 +401,8 @@ extern "C"
     void EsMemoryCopyReverse(void *_destination, void *_source, size_t bytes);
     void EsMemoryMove(void *_start, void *_end, intptr_t amount, bool zeroEmptySpace);
     void EsAssertionFailure(const char *file, int line);
+    size_t EsCStringLength(const char *string);
+    int EsStringCompareRaw(const char *s1, ptrdiff_t length1, const char *s2, ptrdiff_t length2);
 }
 
 union EsGeneric {
@@ -3373,9 +3334,9 @@ struct _EsMessageWithObject {
 };
 
 struct MessageQueue {
-	bool SendMessage(void *target, EsMessage *message); // Returns false if the message queue is full.
-	bool SendMessage(_EsMessageWithObject *message); // Returns false if the message queue is full.
-	bool GetMessage(_EsMessageWithObject *message);
+	//bool SendMessage(void *target, EsMessage *message); // Returns false if the message queue is full.
+	//bool SendMessage(_EsMessageWithObject *message); // Returns false if the message queue is full.
+	//bool GetMessage(_EsMessageWithObject *message);
 
 #define MESSAGE_QUEUE_MAX_LENGTH (4096)
 	Array<_EsMessageWithObject, K_FIXED> messages;
