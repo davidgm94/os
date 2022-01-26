@@ -4127,7 +4127,7 @@ struct PMM {
 #define MM_NON_CACHE_MEMORY_PAGES()               (pmm.commitFixed + pmm.commitPageable - pmm.approximateTotalObjectCacheBytes / K_PAGE_SIZE)
 #define MM_OBJECT_CACHE_PAGES_MAXIMUM()           ((pmm.commitLimit - MM_NON_CACHE_MEMORY_PAGES()) / 2)
 
-PMM pmm;
+extern PMM pmm;
 
 extern MMRegion *mmCoreRegions;
 extern size_t mmCoreRegionCount, mmCoreRegionArrayCommit;
@@ -4181,50 +4181,7 @@ struct KPCIDevice : KDevice {
 };
 
 extern "C" MMRegion *MMFindRegion(MMSpace *space, uintptr_t address);
-//extern "C" MMRegion *MMFindRegion(MMSpace *space, uintptr_t address) {
-	//KMutexAssertLocked(&space->reserveMutex);
-
-	//if (space == coreMMSpace) {
-		//for (uintptr_t i = 0; i < mmCoreRegionCount; i++) {
-			//MMRegion *region = mmCoreRegions + i;
-
-			//if (region->core.used && region->baseAddress <= address
-					//&& region->baseAddress + region->pageCount * K_PAGE_SIZE > address) {
-				//return region;
-			//}
-		//}
-	//} else {
-		//AVLItem<MMRegion> *item = TreeFind(&space->usedRegions, MakeShortKey(address), TREE_SEARCH_LARGEST_BELOW_OR_EQUAL);
-		//if (!item) return nullptr;
-
-		//MMRegion *region = item->thisItem;
-		//if (region->baseAddress > address) KernelPanic("MMFindRegion - Broken usedRegions tree.\n");
-		//if (region->baseAddress + region->pageCount * K_PAGE_SIZE <= address) return nullptr;
-		//return region;
-	//}
-
-	//return nullptr;
-//}
-
-void MMDecommit(uint64_t bytes, bool fixed) {
-	// EsPrint("De-Commit %d %d\n", bytes, fixed);
-
-	if (bytes & (K_PAGE_SIZE - 1)) KernelPanic("MMDecommit - Expected multiple of K_PAGE_SIZE bytes.\n");
-	int64_t pagesNeeded = bytes / K_PAGE_SIZE;
-
-	KMutexAcquire(&pmm.commitMutex);
-	EsDefer(KMutexRelease(&pmm.commitMutex));
-
-	if (fixed) {
-		if (pmm.commitFixed < pagesNeeded) KernelPanic("MMDecommit - Decommitted too many pages.\n");
-		pmm.commitFixed -= pagesNeeded;
-	} else {
-		if (pmm.commitPageable < pagesNeeded) KernelPanic("MMDecommit - Decommitted too many pages.\n");
-		pmm.commitPageable -= pagesNeeded;
-	}
-
-	KernelLog(LOG_VERBOSE, "Memory", "decommit", "Decommit %D%z. Now at %D.\n", bytes, fixed ? ", fixed" : "", (pmm.commitFixed + pmm.commitPageable) << K_PAGE_BITS);
-}
+extern "C" void MMDecommit(uint64_t bytes, bool fixed);
 
 bool MMDecommitRange(MMSpace *space, MMRegion *region, uintptr_t pageOffset, size_t pageCount) {
 	KMutexAssertLocked(&space->reserveMutex);

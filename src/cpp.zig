@@ -4654,9 +4654,469 @@ export fn MMFindRegion(space: *AddressSpace, address: u64) ?*Region
         return region;
     }
 }
-//
-comptime
+
+pub const Bitset = extern struct
 {
+    single_usage: [*]u32,
+    group_usage: [*]u16, 
+    single_usage_count: u64,
+    group_usage_count: u64,
+
+    //pub fn init(self: *@This(), count: u64, map_all: bool) void
+    //{
+        //self.single_usage.len = (count + 31) & ~@as(u64, 31);
+        //self.group_usage.len = self.single_usage.len / group_size + 1;
+        //self.single_usage.ptr = @intToPtr([*]u32, kernel.process.address_space.standard_allocate((self.single_usage.len >> 3) + (self.group_usage.len * 2), if (map_all) memory.Region.Flags.from_flag(.fixed) else memory.Region.Flags.empty()));
+        //self.group_usage.ptr = @intToPtr([*]u16, @ptrToInt(self.single_usage.ptr) + ((self.single_usage.len >> 4) * @sizeOf(u16)));
+    //}
+
+    //pub fn put(self: *@This(), index: u64) void
+    //{
+        //self.single_usage[index >> 5] |= @as(u32, 1) << @truncate(u5, index);
+        //self.group_usage[index / group_size] += 1;
+    //}
+
+    //pub fn take(self: *@This(), index: u64) void
+    //{
+        //const group = index / group_size;
+        //self.group_usage[group] -= 1;
+        //self.single_usage[index >> 5] &= ~(@as(u32, 1) << @truncate(u5, index));
+    //}
+
+    const group_size = 0x1000;
+};
+
+
+pub const PageFrame = extern struct
+{
+    state: Volatile(PageFrame.State),
+    flags: Volatile(u8),
+    cache_reference: ?*volatile u64,
+    u: extern union
+    {
+        list: extern struct
+        {
+            next: Volatile(u64),
+            previous: ?*volatile u64,
+        },
+
+        active: extern struct
+        {
+            references: Volatile(u64),
+        },
+    },
+
+    pub const State = enum(i8)
+    {
+        unusable,
+        bad,
+        zeroed,
+        free,
+        standby,
+        active,
+    };
+};
+
+const ObjectCache = extern struct
+{
+    lock: Spinlock,
+    items: SimpleList,
+    count: u64,
+    trim: fn (cache: *ObjectCache) callconv(.C) bool,
+    trim_lock: WriterLock,
+    item: LinkedList(ObjectCache).Item,
+    average_object_bytes: u64,
+};
+
+pub const Physical = extern struct
+{
+    pub const Allocator = extern struct
+    {
+        pageframes: [*]PageFrame,
+        pageframeDatabaseInitialised: bool,
+        pageframeDatabaseCount: u64,
+
+        first_free_page: u64,
+        first_zeroed_page: u64,
+        first_standby_page: u64,
+        last_standby_page: u64,
+
+        free_or_zeroed_page_bitset: Bitset,
+
+        zeroed_page_count: u64,
+        free_page_count: u64,
+        standby_page_count: u64,
+        active_page_count: u64,
+
+        commit_fixed: i64,
+        commit_pageable: i64,
+        commit_fixed_limit: i64,
+        commit_limit: i64,
+
+        commit_mutex: Mutex,
+        pageframe_mutex: Mutex,
+
+        manipulation_lock: Mutex,
+        manipulation_processor_lock: Spinlock,
+        manipulation_region: ?*Region,
+
+        zero_page_thread: *Thread,
+        zero_page_event: Event,
+
+        object_cache_list: LinkedList(ObjectCache),
+        object_cache_list_mutex: Mutex,
+
+        available_critical_event: Event,
+        available_low_event: Event,
+        available_not_critical_event: Event,
+
+        approximate_total_object_cache_byte_count: u64,
+        trim_object_cache_event: Event,
+
+        next_process_to_balance: ?*Process,
+        next_region_to_balance: ?*Region,
+        balance_resume_position: u64,
+
+        //pub fn allocate_with_flags(self: *@This(), flags: Physical.Flags) u64
+        //{
+            //return self.allocate_extended(flags, 1, 1, 0);
+        //}
+
+        //pub fn allocate_extended(self: *@This(), flags: Physical.Flags, count: u64, alignment: u64, below: u64) u64
+        //{
+            //const mutex_already_acquired = flags.contains(.lock_acquired);
+            //if (!mutex_already_acquired) _ = self.pageframe_mutex.acquire() else self.pageframe_mutex.assert_locked();
+            //defer if (!mutex_already_acquired) self.pageframe_mutex.release();
+
+            //const commit_now = blk:
+            //{
+                //if (flags.contains(.commit_now))
+                //{
+                    //const result = count * page_size;
+                    //if (!self.commit(result, true)) return 0;
+                    //break :blk result;
+                //}
+                //else
+                //{
+                    //break :blk 0;
+                //}
+            //};
+            //_ = commit_now;
+
+            //const simple = count == 1 and alignment == 1 and below == 0;
+
+            //if (self.pageframes.len == 0)
+            //{
+                //if (!simple)
+                //{
+                    //KernelPanic("non-simple allocation before page frame initialization\n");
+                //}
+
+                //const page = kernel.arch.early_allocate_page();
+
+                //if (flags.contains(.zeroed))
+                //{
+                    //// @TODO: hack
+                    //_ = kernel.arch.map_page(&kernel.core.address_space, page, @ptrToInt(&early_zero_buffer), MapPageFlags.from_flags(.{.overwrite, .no_new_tables, .frame_lock_acquired}));
+                    //std.mem.set(u8, early_zero_buffer[0..], 0);
+                //}
+
+                //return page;
+            //}
+            //else if (!simple)
+            //{
+                //TODO();
+            //}
+            //else
+            //{
+                //var not_zeroed = false;
+                //const page = blk:
+                //{
+                    //var p: u64 = 0;
+                    //p = self.first_zeroed_page;
+                    //if (p == 0) { p = self.first_free_page; not_zeroed = true; }
+                    //if (p == 0) { p = self.last_standby_page; not_zeroed = true; }
+                    //break :blk p;
+                //};
+
+                //if (page != 0)
+                //{
+                    //const frame = &self.pageframes[page];
+
+                    //switch (frame.state.read_volatile())
+                    //{
+                        //.active =>
+                        //{
+                            //KernelPanic("corrupt pageframes");
+                        //},
+                        //.standby =>
+                        //{
+                            //if (frame.cache_reference.?.* != ((page << page_bit_count) | shared_entry_present))
+                            //{
+                                //KernelPanic("corrupt shared reference back pointer in frame");
+                            //}
+
+                            //frame.cache_reference.?.* = 0;
+                        //},
+                        //else =>
+                        //{
+                            //self.free_or_zeroed_page_bitset.take(page);
+                        //}
+                    //}
+
+                    //self.activate_pages(page, 1);
+
+                    //const address = page << page_bit_count;
+                    //if (not_zeroed and flags.contains(.zeroed))
+                    //{
+                        //TODO();
+                    //}
+
+                    //return address;
+                //}
+            //}
+
+            //// fail
+            //if (!flags.contains(.can_fail))
+            //{
+                //KernelPanic("out of memory");
+            //}
+
+            //self.decommit(commit_now, true);
+            //return 0;
+        //}
+
+        //pub fn commit(self: *@This(), byte_count: u64, fixed: bool) bool
+        //{
+            //if (byte_count & (page_size - 1) != 0) KernelPanic("expected multiple of page size\n");
+
+            //const needed_page_count = byte_count / page_size;
+
+            //_ = self.commit_mutex.acquire();
+            //defer self.commit_mutex.release();
+
+            //// If not true: we haven't started tracking commit counts yet
+            //if (self.commit_limit != 0)
+            //{
+                //if (fixed)
+                //{
+                    //if (needed_page_count > self.commit_fixed_limit - self.commit_fixed)
+                    //{
+                        //return false;
+                    //}
+
+                    //if (self.get_available_page_count() - needed_page_count < critical_available_page_threshold and !get_current_thread().?.is_page_generator)
+                    //{
+                        //return false;
+                    //}
+
+                    //self.commit_fixed += needed_page_count;
+                //}
+                //else
+                //{
+                    //if (needed_page_count > self.get_remaining_commit() - if (get_current_thread().?.is_page_generator) @as(u64, 0) else @as(u64, critical_remaining_commit_threshold))
+                    //{
+                        //return false;
+                    //}
+
+                    //self.commit_pageable += needed_page_count;
+                //}
+
+                //if (self.should_trim_object_cache())
+                //{
+                    //TODO();
+                //}
+            //}
+        
+            //return true;
+        //}
+
+        //pub fn decommit(self: *@This(), byte_count: u64, fixed: bool) void
+        //{
+            //_ = self;
+            //_ = byte_count;
+            //_ = fixed;
+            //TODO();
+        //}
+        //pub fn activate_pages(self: *@This(), pages: u64, page_count: u64) void
+        //{
+            //self.pageframe_mutex.assert_locked();
+
+            //for (self.pageframes[pages..pages + page_count]) |*frame, frame_i|
+            //{
+                //switch (frame.state.read_volatile())
+                //{
+                    //.free =>
+                    //{
+                        //self.free_page_count -= 1;
+                    //},
+                    //.zeroed =>
+                    //{
+                        //self.zeroed_page_count -= 1;
+                    //},
+                    //.standby =>
+                    //{
+                        //self.standby_page_count -= 1;
+
+                        //if (self.last_standby_page == pages + frame_i)
+                        //{
+                            //if (frame.u.list.previous == &self.first_standby_page)
+                            //{
+                                //self.last_standby_page = 0;
+                            //}
+                            //else
+                            //{
+                                //self.last_standby_page = (@ptrToInt(frame.u.list.previous) - @ptrToInt(self.pageframes.ptr)) / @sizeOf(PageFrame);
+                            //}
+                        //}
+                    //},
+                    //else => unreachable,
+                //}
+
+                //frame.u.list.previous.?.* = frame.u.list.next.read_volatile();
+                //if (frame.u.list.next.read_volatile() != 0)
+                //{
+                    //self.pageframes[frame.u.list.next.read_volatile()].u.list.previous = frame.u.list.previous;
+                //}
+
+                //std.mem.set(u8, @ptrCast([*]u8, frame)[0..@sizeOf(@TypeOf(frame))], 0);
+                //frame.state.write_volatile(.active);
+            //}
+
+            //self.active_page_count += page_count;
+            //self.update_available_page_count(false);
+        //}
+
+        //pub fn insert_free_pages_next(self: *@This(), page: u64) void
+        //{
+            //const frame = &self.pageframes[page];
+            //frame.state.write_volatile(.free);
+
+            //frame.u.list.next.write_volatile(self.first_free_page);
+            //frame.u.list.previous = &self.first_free_page;
+            //if (self.first_free_page != 0)
+            //{
+                //self.pageframes[self.first_free_page].u.list.previous = &frame.u.list.next.value;
+            //}
+            //self.first_free_page = page;
+
+            //self.free_or_zeroed_page_bitset.put(page);
+            //self.free_page_count += 1;
+        //}
+
+        //pub fn free(self: *@This(), page: u64) void
+        //{
+            //return self.free_extended(page, false, 1);
+        //}
+
+        //pub fn free_extended(self: *@This(), page: u64, mutex_already_acquired: bool, count: u64) void
+        //{
+            //_ = self;
+            //_ = page;
+            //_ = mutex_already_acquired;
+            //_ = count;
+            //TODO();
+        //}
+
+        //fn get_available_page_count(self: @This()) callconv(.Inline) u64
+        //{
+            //return self.zeroed_page_count + self.free_page_count + self.standby_page_count;
+        //}
+
+        //fn get_remaining_commit(self: @This()) callconv(.Inline) u64
+        //{
+            //return self.commit_limit - self.commit_pageable - self.commit_fixed;
+        //}
+
+        //fn should_trim_object_cache(self: @This()) callconv(.Inline) bool
+        //{
+            //return self.approximate_total_object_cache_byte_count / page_size > self.get_object_cache_maximum_cache_page_count();
+        //}
+
+        //fn get_object_cache_maximum_cache_page_count(self: @This()) callconv(.Inline) u64
+        //{
+            //return (self.commit_limit - self.get_non_cache_memory_page_count()) / 2;
+        //}
+
+        //fn get_non_cache_memory_page_count(self: @This()) callconv(.Inline) u64
+        //{
+            //return self.commit_fixed - self.commit_pageable - self.approximate_total_object_cache_byte_count / page_size;
+        //}
+
+        //fn start_insert_free_pages(self: *@This()) void
+        //{
+            //_ = self;
+        //}
+
+        //fn end_insert_free_pages(self: *@This()) void
+        //{
+            //if (self.free_page_count > zero_page_threshold)
+            //{
+                //_ = self.zero_page_event.set(true);
+            //}
+
+            //self.update_available_page_count(true);
+        //}
+
+        //fn update_available_page_count(self: *@This(), increase: bool) void
+        //{
+            //if (self.get_available_page_count() >= critical_available_page_threshold)
+            //{
+                //_ = self.available_not_critical_event.set(true);
+                //self.available_not_critical_event.reset();
+            //}
+            //else
+            //{
+                //self.available_not_critical_event.reset();
+                //_ = self.available_critical_event.set(true);
+
+                //if (!increase)
+                //{
+                    //// log
+                //}
+            //}
+
+            //if (self.get_available_page_count() >= low_available_page_threshold) self.available_low_event.reset()
+            //else _ = self.available_low_event.set(true);
+        //}
+
+        const zero_page_threshold = 16;
+        const low_available_page_threshold = 16777216 / page_size;
+        const critical_available_page_threshold = 1048576 / page_size;
+        const critical_remaining_commit_threshold = 1048576 / page_size;
+    };
+
+    pub const Flags = Bitflag(enum(u32)
+        {
+            can_fail = 0,
+            commit_now = 1,
+            zeroed = 2,
+            lock_acquired = 3,
+        });
+
+    pub const memory_manipulation_region_page_count = 0x10;
+};
+
+export var pmm: Physical.Allocator = undefined;
+
+export fn MMDecommit(byte_count: u64, fixed: bool) callconv(.C) void
+{
+    if (byte_count & (page_size - 1) != 0) KernelPanic("byte count not page-aligned");
+
+    const needed_page_count = @intCast(i64, byte_count / page_size);
+    _ = pmm.commit_mutex.acquire();
+    defer pmm.commit_mutex.release();
+
+    if (fixed)
+    {
+        if (pmm.commit_fixed < needed_page_count) KernelPanic("decommited too many pages");
+        pmm.commit_fixed -= needed_page_count;
+    }
+    else
+    {
+        if (pmm.commit_pageable < needed_page_count) KernelPanic("decommited too many pages");
+        pmm.commit_pageable -= needed_page_count;
+    }
 }
 
 export fn KernelInitialise() callconv(.C) void
