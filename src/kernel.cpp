@@ -4182,49 +4182,8 @@ struct KPCIDevice : KDevice {
 
 extern "C" MMRegion *MMFindRegion(MMSpace *space, uintptr_t address);
 extern "C" void MMDecommit(uint64_t bytes, bool fixed);
-
-bool MMDecommitRange(MMSpace *space, MMRegion *region, uintptr_t pageOffset, size_t pageCount) {
-	KMutexAssertLocked(&space->reserveMutex);
-
-	if (region->flags & MM_REGION_NO_COMMIT_TRACKING) {
-		KernelPanic("MMDecommitRange - Region does not support commit tracking.\n");
-	}
-
-	if (pageOffset >= region->pageCount || pageCount > region->pageCount - pageOffset) {
-		KernelPanic("MMDecommitRange - Invalid region offset and page count.\n");
-	}
-
-	if (~region->flags & MM_REGION_NORMAL) {
-		KernelPanic("MMDecommitRange - Cannot decommit from non-normal region.\n");
-	}
-
-	intptr_t delta = 0;
-
-	if (!region->data.normal.commit.Clear(pageOffset, pageOffset + pageCount, &delta, true)) {
-		return false;
-	}
-
-	if (delta > 0) {
-		KernelPanic("MMDecommitRange - Invalid delta calculation removing %x, %x from %x.\n", pageOffset, pageCount, region);
-	}
-
-	delta = -delta;
-
-	if (region->data.normal.commitPageCount < (size_t) delta) {
-		KernelPanic("MMDecommitRange - Invalid delta calculation decreases region %x commit below zero.\n", region);
-	}
-
-	// EsPrint("\tdecommit = %x\n", pagesRemoved);
-
-	MMDecommit(delta * K_PAGE_SIZE, region->flags & MM_REGION_FIXED);
-	space->commit -= delta;
-	region->data.normal.commitPageCount -= delta;
-	MMArchUnmapPages(space, region->baseAddress + pageOffset * K_PAGE_SIZE, pageCount, MM_UNMAP_PAGES_FREE);
-
-	return true;
-}
-
-uintptr_t MMArchTranslateAddress(MMSpace *, uintptr_t virtualAddress, bool writeAccess =false);
+extern "C" bool MMDecommitRange(MMSpace *space, MMRegion *region, uintptr_t pageOffset, size_t pageCount);
+extern "C" uintptr_t MMArchTranslateAddress(MMSpace *, uintptr_t virtualAddress, bool writeAccess =false);
 
 #define CC_ACTIVE_SECTION_SIZE                    ((EsFileOffset) 262144)
 

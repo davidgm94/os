@@ -4179,6 +4179,13 @@ pub const Range = extern struct
     };
 };
 
+extern fn RangeSetFind(range_set: *Range.Set, offset: u64, touching: bool) callconv(.C) ?*Range;
+extern fn RangeSetContains(range_set: *Range.Set, offset: u64) callconv(.C) bool;
+extern fn RangeSetValidate(range_set: *Range.Set) callconv(.C) void;
+extern fn RangeSetClear(range_set: *Range.Set, from: u64, to: u64, delta: ?*i64, modify: bool) callconv(.C) bool;
+extern fn RangeSetSet(range_set: *Range.Set, from: u64, to: u64, delta: ?*i64, modify: bool) callconv(.C) bool;
+extern fn RangeSetNormalize(range_set: *Range.Set) callconv(.C) bool;
+
 export fn EsMemoryFill(from: u64, to: u64, byte: u8) callconv(.C) void
 {
     assert(from != 0);
@@ -5118,6 +5125,33 @@ export fn MMDecommit(byte_count: u64, fixed: bool) callconv(.C) void
         pmm.commit_pageable -= needed_page_count;
     }
 }
+
+export fn MMDecommitRange(space: *AddressSpace, region: *Region, page_offset: u64, page_count: u64) callconv(.C) bool
+{
+    space.reserve_mutex.assert_locked();
+
+    if (region.flags.contains(.no_commit_tracking)) KernelPanic("Region does not support commit tracking");
+    if (page_offset >= region.descriptor.page_count or page_count > region.descriptor.page_count - page_offset) KernelPanic("invalid region offset and page count");
+    if (!region.flags.contains(.normal)) KernelPanic("Cannot decommit from non-normal region");
+
+    var delta: i64 = 0;
+
+    if (!RangeSetClear(&region.data.u.normal.commit, page_offset, page_offset + page_count, &delta, true)) return false;
+
+    if (delta > 0) KernelPanic("invalid delta calculation");
+    const delta_u = @intCast(u64, -delta);
+
+    if (region.data.u.normal.commit_page_count < delta_u) KernelPanic("invalid delta calculation");
+
+    MMDecommit(delta_u * page_size, region.flags.contains(.fixed));
+    space.commit_count -= delta_u;
+    region.data.u.normal.commit_page_count -= delta_u;
+    MMArchUnmapPages(space, region.descriptor.base_address + page_offset * page_size, page_count, 1 << 0, 0, null);
+    
+    return true;
+}
+
+extern fn MMArchUnmapPages(address_space: *AddressSpace, virtual_address_start: u64, page_count: u64, flags: u32, unmap_maximum: u64, resume_position: ?*u64) callconv(.C) void;
 
 export fn KernelInitialise() callconv(.C) void
 {
