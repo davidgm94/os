@@ -4226,34 +4226,7 @@ MMActiveSectionManager activeSectionManager;
 
 extern "C" void CCDereferenceActiveSection(CCActiveSection *section, uintptr_t startingPage = 0);
 
-CCCachedSection *CCFindCachedSectionContaining(CCSpace *cache, EsFileOffset sectionOffset) {
-	KMutexAssertLocked(&cache->cachedSectionsMutex);
-
-	if (!cache->cachedSections.Length()) {
-		return nullptr;
-	}
-
-	CCCachedSection *cachedSection = nullptr;
-
-	bool found = false;
-	intptr_t low = 0, high = cache->cachedSections.Length() - 1;
-
-	while (low <= high) {
-		intptr_t i = low + (high - low) / 2;
-		cachedSection = &cache->cachedSections[i];
-
-		if (cachedSection->offset + cachedSection->pageCount * K_PAGE_SIZE <= sectionOffset) {
-			low = i + 1;
-		} else if (cachedSection->offset > sectionOffset) {
-			high = i - 1;
-		} else {
-			found = true;
-			break;
-		}
-	}
-
-	return found ? cachedSection : nullptr;
-}
+extern "C" CCCachedSection *CCFindCachedSectionContaining(CCSpace *cache, EsFileOffset sectionOffset);
 
 void CCSpaceUncover(CCSpace *cache, EsFileOffset removeStart, EsFileOffset removeEnd) {
 	KMutexAssertLocked(&cache->cachedSectionsMutex);

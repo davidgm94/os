@@ -1703,7 +1703,6 @@ export fn KMutexAssertLocked(mutex: *Mutex) callconv(.C) void
     mutex.assert_locked();
 }
 
-const Error = i64;
 const ObjectCacheItem = SimpleList;
 pub const Node = extern struct
 {
@@ -3592,7 +3591,12 @@ pub fn Array(comptime T: type, comptime heap_type: HeapType) type
     _ = heap_type;
     return extern struct
     {
-        ptr: [*]T,
+        ptr: ?[*]T,
+
+        fn length(self: @This()) u64
+        {
+            return ArrayHeaderGetLength(@ptrCast(?*u64, self.ptr));
+        }
     };
 }
 
@@ -5193,9 +5197,30 @@ const ActiveSession = extern struct
     };
 };
 
+const Error = i64;
+
 const CCSpace = extern struct
 {
-    replace_todo: u64,
+    cached_sections_mutex: Mutex,
+    cached_sections: Array(CCCachedSection, .core),
+    active_sections_mutex: Mutex,
+    active_sections: Array(CCActiveSectionReference, .core),
+    write_complete_event: Event,
+    callbacks: ?*Callbacks,
+
+    const Callbacks = extern struct
+    {
+        read_into: fn(file_cache: *CCSpace, buffer: u64, offset: u64, count: u64) callconv(.C) Error,
+        write_from: fn(file_cache: *CCSpace, buffer: u64, offset: u64, count: u64) callconv(.C) Error,
+    };
+};
+
+const CCCachedSection = extern struct
+{
+    offset: u64,
+    page_count: u64,
+    mapped_region_count: Volatile(u64),
+    data: ?[*]u64,
 };
 
 export var activeSessionManager: ActiveSession.Manager = undefined;
@@ -5229,6 +5254,40 @@ export fn CCDereferenceActiveSection(section: *ActiveSession, starting_page: u64
             }
         }
     }
+}
+
+const CCActiveSectionReference = extern struct
+{
+    offset: u64,
+    index: u64,
+};
+
+export fn CCFindCachedSectionContaining(cache: *CCSpace, section_offset: u64) ?*CCCachedSection
+{
+    cache.cached_sections_mutex.assert_locked();
+
+    if (cache.cached_sections.length() == 0) return null;
+
+    var low: i64 = 0;
+    var high: i64 = @intCast(i64, cache.cached_sections.length()) - 1;
+
+    var found = false;
+    var cached_section: *CCCachedSection = undefined;
+
+    while (low <= high)
+    {
+        const i = low + @divTrunc(high - low,  2);
+        cached_section = &cache.cached_sections.ptr.?[@intCast(u64, i)];
+        if (cached_section.offset + cached_section.page_count * page_size <= section_offset) low = i + 1
+        else if (cached_section.offset > section_offset) high = i - 1
+        else
+        {
+            found = true;
+            break;
+        }
+    }
+
+    return if (found) cached_section else null;
 }
 
 export fn KernelInitialise() callconv(.C) void
