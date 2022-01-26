@@ -3751,6 +3751,7 @@ struct GlobalData {
 	volatile uint64_t schedulerTimeOffset;
 	volatile uint16_t keyboardLayout;
 };
+
 struct MMRegion {
 	uintptr_t baseAddress;
 	size_t pageCount;
@@ -4128,8 +4129,8 @@ struct PMM {
 
 PMM pmm;
 
-MMRegion *mmCoreRegions = (MMRegion *) MM_CORE_REGIONS_START;
-size_t mmCoreRegionCount, mmCoreRegionArrayCommit;
+extern MMRegion *mmCoreRegions;
+extern size_t mmCoreRegionCount, mmCoreRegionArrayCommit;
 
 MMSharedRegion* mmGlobalDataRegion, *mmAPITableRegion;
 GlobalData *globalData; // Shared with all processes.
@@ -4179,30 +4180,31 @@ struct KPCIDevice : KDevice {
 	bool EnableMSI(KIRQHandler irqHandler, void *context, const char *cOwnerName); 
 };
 
-MMRegion *MMFindRegion(MMSpace *space, uintptr_t address) {
-	KMutexAssertLocked(&space->reserveMutex);
+extern "C" MMRegion *MMFindRegion(MMSpace *space, uintptr_t address);
+//extern "C" MMRegion *MMFindRegion(MMSpace *space, uintptr_t address) {
+	//KMutexAssertLocked(&space->reserveMutex);
 
-	if (space == coreMMSpace) {
-		for (uintptr_t i = 0; i < mmCoreRegionCount; i++) {
-			MMRegion *region = mmCoreRegions + i;
+	//if (space == coreMMSpace) {
+		//for (uintptr_t i = 0; i < mmCoreRegionCount; i++) {
+			//MMRegion *region = mmCoreRegions + i;
 
-			if (region->core.used && region->baseAddress <= address
-					&& region->baseAddress + region->pageCount * K_PAGE_SIZE > address) {
-				return region;
-			}
-		}
-	} else {
-		AVLItem<MMRegion> *item = TreeFind(&space->usedRegions, MakeShortKey(address), TREE_SEARCH_LARGEST_BELOW_OR_EQUAL);
-		if (!item) return nullptr;
+			//if (region->core.used && region->baseAddress <= address
+					//&& region->baseAddress + region->pageCount * K_PAGE_SIZE > address) {
+				//return region;
+			//}
+		//}
+	//} else {
+		//AVLItem<MMRegion> *item = TreeFind(&space->usedRegions, MakeShortKey(address), TREE_SEARCH_LARGEST_BELOW_OR_EQUAL);
+		//if (!item) return nullptr;
 
-		MMRegion *region = item->thisItem;
-		if (region->baseAddress > address) KernelPanic("MMFindRegion - Broken usedRegions tree.\n");
-		if (region->baseAddress + region->pageCount * K_PAGE_SIZE <= address) return nullptr;
-		return region;
-	}
+		//MMRegion *region = item->thisItem;
+		//if (region->baseAddress > address) KernelPanic("MMFindRegion - Broken usedRegions tree.\n");
+		//if (region->baseAddress + region->pageCount * K_PAGE_SIZE <= address) return nullptr;
+		//return region;
+	//}
 
-	return nullptr;
-}
+	//return nullptr;
+//}
 
 void MMDecommit(uint64_t bytes, bool fixed) {
 	// EsPrint("De-Commit %d %d\n", bytes, fixed);
@@ -7978,7 +7980,7 @@ bool MMFaultRange(uintptr_t address, uintptr_t byteCount, uint32_t flags = ES_FL
 void MMInitialise() {
 	{
 		// Initialise coreMMSpace and kernelMMSpace.
-
+        mmCoreRegions = (MMRegion*)MM_CORE_REGIONS_START;
 		mmCoreRegions[0].core.used = false;
 		mmCoreRegionCount = 1;
 		MMArchInitialise();
@@ -14484,4 +14486,9 @@ extern "C" void CreateMainThread()
 extern "C" void start_desktop_process()
 {
     process_start_with_something(desktopProcess);
+}
+
+extern "C" uint64_t get_size(MMRegion* region)
+{
+    return offsetof(MMRegion, core.used);
 }

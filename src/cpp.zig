@@ -1119,6 +1119,12 @@ const LocalStorage = extern struct
     //comptime asm
 };
 
+// @TODO: do right
+const FSFile = extern struct
+{
+    foo: u64,
+};
+
 pub const Thread = extern struct
 {
     in_safe_copy: bool,
@@ -1159,12 +1165,12 @@ pub const Thread = extern struct
     blocking: extern union
     {
         mutex: ?*volatile Mutex,
-        writer: struct
+        writer: extern struct
         {
             lock: ?*volatile WriterLock,
             type: bool,
         },
-        event: struct
+        event: extern struct
         {
             items: ?[*]volatile LinkedList(Thread).Item,
             array: [max_wait_count]?*volatile Event,
@@ -2287,6 +2293,11 @@ export var heapFixed: Heap = undefined;
 extern fn EsHeapAllocate(size: u64, zeroMemory: bool, heap: *Heap) callconv(.C) u64;
 extern fn EsHeapReallocate(old_address: u64, new_allocation_size: u64, zero_new_space: bool, heap: *Heap) callconv(.C) u64;
 extern fn EsHeapFree(address: u64, expectedSize: u64, heap: *Heap) callconv(.C) void;
+
+// @TODO: initialize
+export var mmCoreRegions: [*]Region = undefined;
+export var mmCoreRegionCount: u64 = 0;
+export var mmCoreRegionArrayCommit: u64 = 0;
 
 pub const HeapRegion = extern struct
 {
@@ -3638,7 +3649,16 @@ pub fn AVLTree(comptime T: type) type
         long_keys: bool, // @ABICompatibility @Delete
 
         const Tree = @This();
-        const Key = u64;
+        const KeyDefaultType = u64;
+        const Key = extern union
+        {
+            short_key: u64,
+            long: extern struct
+            {
+                key: u64,
+                key_byte_count: u64,
+            },
+        };
 
         pub const SearchMode = enum
         {
@@ -3757,25 +3777,25 @@ pub fn AVLTree(comptime T: type) type
             return true;
         }
 
-        pub fn find(self: *@This(), key: Key, search_mode: SearchMode) ?*Item
+        pub fn find(self: *@This(), key: KeyDefaultType, search_mode: SearchMode) ?*Item
         {
             if (self.modcheck) KernelPanic("concurrent access\n");
             self.validate();
             return self.find_recursive(self.root, key, search_mode);
         }
 
-        pub fn find_recursive(self: *@This(), maybe_root: ?*Item, key: Key, search_mode: SearchMode) ?*Item
+        pub fn find_recursive(self: *@This(), maybe_root: ?*Item, key: KeyDefaultType, search_mode: SearchMode) ?*Item
         {
             if (maybe_root) |root|
             {
-                if (Item.compare_keys(root.key, key) == 0) return root;
+                if (Item.compare_keys(root.key.short_key, key) == 0) return root;
 
                 switch (search_mode)
                 {
                     .exact => return self.find_recursive(root.children[0], key, search_mode),
                     .smallest_above_or_equal =>
                     {
-                        if (Item.compare_keys(root.key, key) > 0)
+                        if (Item.compare_keys(root.key.short_key, key) > 0)
                         {
                             if (self.find_recursive(root.children[0], key, search_mode)) |item| return item
                             else return root;
@@ -3784,7 +3804,7 @@ pub fn AVLTree(comptime T: type) type
                     },
                     .largest_below_or_equal =>
                     {
-                        if (Item.compare_keys(root.key, key) < 0)
+                        if (Item.compare_keys(root.key.short_key, key) < 0)
                         {
                             if (self.find_recursive(root.children[1], key, search_mode)) |item| return item
                             else return root;
@@ -4044,7 +4064,7 @@ pub fn AVLTree(comptime T: type) type
 
             fn compare(self: *@This(), other: *@This()) i32
             {
-                return compare_keys(self.key, other.key);
+                return compare_keys(self.key.short_key, other.key.short_key);
             }
 
             fn compare_keys(key1: u64, key2: u64) i32
@@ -4073,19 +4093,23 @@ pub const Region = extern struct
     {
         u: extern union
         {
-            physical: struct
+            physical: extern struct
             {
                 offset: u64,
             },
-            shared: struct
+            shared: extern struct
             {
                 region: ?*SharedRegion,
                 offset: u64,
             },
-            file: struct
+            file: extern struct
             {
+                node: ?*FSFile,
+                offset: u64,
+                zeroed_bytes: u64,
+                file_handle_flags: u64,
             },
-            normal: struct
+            normal: extern struct
             {
                 commit: Range.Set,
                 commit_page_count: u64,
@@ -4605,6 +4629,36 @@ export fn ThreadSpawn(name: [*:0]const u8, start_address: u64, argument1: u64, f
     }
 }
 
+export fn MMFindRegion(space: *AddressSpace, address: u64) ?*Region
+{
+    space.reserve_mutex.assert_locked();
+
+    if (space == &_coreMMSpace)
+    {
+        for (mmCoreRegions[0..mmCoreRegionCount]) |*region|
+        {
+            const matched = region.u.core.used and region.descriptor.base_address <= address and region.descriptor.base_address + region.descriptor.page_count * page_size > address;
+            if (matched)
+            {
+                return region;
+            }
+        }
+        return null;
+    }
+    else
+    {
+        const item = space.used_regions.find(address, .largest_below_or_equal) orelse return null;
+        const region = item.value.?;
+        if (region.descriptor.base_address > address) KernelPanic("broken used regions tree");
+        if (region.descriptor.base_address + region.descriptor.page_count * page_size <= address) return null;
+        return region;
+    }
+}
+//
+comptime
+{
+}
+
 export fn KernelInitialise() callconv(.C) void
 {
     kernelProcess = &_kernelProcess;
@@ -4615,4 +4669,9 @@ export fn KernelInitialise() callconv(.C) void
     CreateMainThread();
     ArchInitialise();
     scheduler.started.write_volatile(true);
+}
+
+export fn get_size_zig() callconv(.C) u64
+{
+    return @sizeOf(Region);
 }
