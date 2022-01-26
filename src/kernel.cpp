@@ -4224,32 +4224,7 @@ MMActiveSectionManager activeSectionManager;
 #define CC_MAX_MODIFIED                           (67108864 / CC_ACTIVE_SECTION_SIZE)
 #define CC_MODIFIED_GETTING_FULL                  (CC_MAX_MODIFIED * 2 / 3)
 
-void CCDereferenceActiveSection(CCActiveSection *section, uintptr_t startingPage = 0) {
-	KMutexAssertLocked(&activeSectionManager.mutex);
-
-	if (!startingPage) {
-		MMArchUnmapPages(kernelMMSpace, 
-				(uintptr_t) activeSectionManager.baseAddress + (section - activeSectionManager.sections) * CC_ACTIVE_SECTION_SIZE, 
-				CC_ACTIVE_SECTION_SIZE / K_PAGE_SIZE, MM_UNMAP_PAGES_BALANCE_FILE);
-		EsMemoryZero(section->referencedPages, sizeof(section->referencedPages));
-		EsMemoryZero(section->modifiedPages, sizeof(section->modifiedPages));
-		section->referencedPageCount = 0;
-	} else {
-		MMArchUnmapPages(kernelMMSpace, 
-				(uintptr_t) activeSectionManager.baseAddress 
-					+ (section - activeSectionManager.sections) * CC_ACTIVE_SECTION_SIZE 
-					+ startingPage * K_PAGE_SIZE, 
-				(CC_ACTIVE_SECTION_SIZE / K_PAGE_SIZE - startingPage), MM_UNMAP_PAGES_BALANCE_FILE);
-
-		for (uintptr_t i = startingPage; i < CC_ACTIVE_SECTION_SIZE / K_PAGE_SIZE; i++) {
-			if (section->referencedPages[i >> 3] & (1 << (i & 7))) {
-				section->referencedPages[i >> 3] &= ~(1 << (i & 7));
-				section->modifiedPages[i >> 3] &= ~(1 << (i & 7));
-				section->referencedPageCount--;
-			}
-		}
-	}
-}
+extern "C" void CCDereferenceActiveSection(CCActiveSection *section, uintptr_t startingPage = 0);
 
 CCCachedSection *CCFindCachedSectionContaining(CCSpace *cache, EsFileOffset sectionOffset) {
 	KMutexAssertLocked(&cache->cachedSectionsMutex);

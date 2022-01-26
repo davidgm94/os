@@ -5146,12 +5146,90 @@ export fn MMDecommitRange(space: *AddressSpace, region: *Region, page_offset: u6
     MMDecommit(delta_u * page_size, region.flags.contains(.fixed));
     space.commit_count -= delta_u;
     region.data.u.normal.commit_page_count -= delta_u;
-    MMArchUnmapPages(space, region.descriptor.base_address + page_offset * page_size, page_count, 1 << 0, 0, null);
+    MMArchUnmapPages(space, region.descriptor.base_address + page_offset * page_size, page_count, UnmapPagesFlags.from_flag(.free), 0, null);
     
     return true;
 }
 
-extern fn MMArchUnmapPages(address_space: *AddressSpace, virtual_address_start: u64, page_count: u64, flags: u32, unmap_maximum: u64, resume_position: ?*u64) callconv(.C) void;
+const UnmapPagesFlags = Bitflag(enum(u32)
+    {
+        free = 0,
+        free_copied = 1,
+        balance_file = 2,
+    });
+
+extern fn MMArchUnmapPages(address_space: *AddressSpace, virtual_address_start: u64, page_count: u64, flags: UnmapPagesFlags, unmap_maximum: u64, resume_position: ?*u64) callconv(.C) void;
+
+const ActiveSession = extern struct
+{
+    load_complete_event: Event,
+    write_complete_event: Event,
+    list_item: LinkedList(ActiveSession).Item,
+    offset: u64,
+    cache: ?*CCSpace,
+    accessors: u64,
+    loading: Volatile(bool),
+    writing: Volatile(bool),
+    modified: Volatile(bool),
+    flush: Volatile(bool),
+    referenced_page_count: u64,
+    referenced_pages: [ActiveSession.size / page_size / 8]u8,
+    modified_pages: [ActiveSession.size / page_size / 8]u8,
+
+    const size = 262144;
+
+    const Manager = extern struct
+    {
+        sections: [*]ActiveSession,
+        section_count: u64,
+        base_address: u64,
+        mutex: Mutex,
+        LRU_list: LinkedList(ActiveSession),
+        modified_list: LinkedList(ActiveSession),
+        modified_non_empty_event: Event,
+        modified_non_full_event: Event,
+        modified_getting_full_event: Event,
+        write_back_thread: ?*Thread,
+    };
+};
+
+const CCSpace = extern struct
+{
+    replace_todo: u64,
+};
+
+export var activeSessionManager: ActiveSession.Manager = undefined;
+
+export fn CCDereferenceActiveSection(section: *ActiveSession, starting_page: u64) callconv(.C) void
+{
+    activeSessionManager.mutex.assert_locked();
+
+    if (starting_page == 0)
+    {
+        MMArchUnmapPages(&_kernelMMSpace, activeSessionManager.base_address + ((@ptrToInt(section) - @ptrToInt(activeSessionManager.sections)) / @sizeOf(ActiveSession)) * ActiveSession.size, ActiveSession.size / page_size, UnmapPagesFlags.from_flag(.balance_file), 0, null);
+        std.mem.set(u8, section.referenced_pages[0..], 0);
+        std.mem.set(u8, section.modified_pages[0..], 0);
+        section.referenced_page_count = 0;
+    }
+    else
+    {
+        MMArchUnmapPages(&_kernelMMSpace, activeSessionManager.base_address + ((@ptrToInt(section) - @ptrToInt(activeSessionManager.sections)) / @sizeOf(ActiveSession)) * ActiveSession.size + starting_page * page_size, ActiveSession.size / page_size - starting_page, UnmapPagesFlags.from_flag(.balance_file), 0, null);
+
+        var i = starting_page;
+        while (i < ActiveSession.size / page_size) : (i += 1)
+        {
+            const index = i >> 3;
+            const shifter = @as(u8, 1) << @truncate(u3, i);
+
+            if (section.referenced_pages[index] & shifter != 0)
+            {
+                section.referenced_pages[index] &= ~shifter;
+                section.modified_pages[index] &= ~shifter;
+                section.referenced_page_count -= 1;
+            }
+        }
+    }
+}
 
 export fn KernelInitialise() callconv(.C) void
 {
