@@ -5614,6 +5614,38 @@ export fn MMSharedResizeRegion(region: *SharedRegion, asked_size: u64) callconv(
     return true;
 }
 
+export fn MMSharedDestroyRegion(region: *SharedRegion) callconv(.C) void
+{
+    _ = MMSharedResizeRegion(region, 0);
+    EsHeapFree(@ptrToInt(region), 0, &heapCore);
+}
+
+export fn MMSharedCreateRegion(size: u64, fixed: bool, below: u64) callconv(.C) ?*SharedRegion
+{
+    if (size == 0) return null;
+
+    const region = @intToPtr(?*SharedRegion, EsHeapAllocate(@sizeOf(SharedRegion), true, &heapCore)) orelse return null;
+
+    region.handle_count.write_volatile(1);
+
+    if (!MMSharedResizeRegion(region, size))
+    {
+        EsHeapFree(@ptrToInt(region), 0, &heapCore);
+        return null;
+    }
+
+    if (fixed)
+    {
+        var i: u64 = 0;
+        while (i < region.size >> page_bit_count) : (i += 1)
+        {
+            @intToPtr([*]u64, region.address)[i] = MMPhysicalAllocate(Physical.Flags.from_flag(.zeroed), 1, 1, below) | 1; // MM_SHARED_ENTRY_PRESENT
+        }
+    }
+
+    return region;
+}
+
 export fn KernelInitialise() callconv(.C) void
 {
     kernelProcess = &_kernelProcess;
