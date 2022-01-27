@@ -4064,7 +4064,7 @@ struct MMObjectCache {
 	size_t averageObjectBytes;
 };
 
-uintptr_t /* Returns physical address of first page, or 0 if none were available. */ MMPhysicalAllocate(unsigned flags, 
+extern "C" uintptr_t /* Returns physical address of first page, or 0 if none were available. */ MMPhysicalAllocate(unsigned flags, 
 		uintptr_t count = 1 /* Number of contiguous pages to allocate. */, 
 		uintptr_t align = 1 /* Alignment, in pages. */, 
 		uintptr_t below = 0 /* Upper limit of physical address, in pages. E.g. for 32-bit pages only, pass (0x100000000 >> K_PAGE_BITS). */);
@@ -5006,170 +5006,171 @@ copy:;
 
 }
 
-bool MMHandlePageFault(MMSpace *space, uintptr_t address, unsigned faultFlags) {
-	// EsPrint("HandlePageFault: %x/%x/%x\n", space, address, faultFlags);
+extern "C" bool MMHandlePageFault(MMSpace *space, uintptr_t address, unsigned faultFlags);
 
-	address &= ~(K_PAGE_SIZE - 1);
+     //EsPrint("HandlePageFault: %x/%x/%x\n", space, address, faultFlags);
 
-	bool lockAcquired = faultFlags & MM_HANDLE_PAGE_FAULT_LOCK_ACQUIRED;
-	MMRegion *region;
+    //address &= ~(K_PAGE_SIZE - 1);
 
-	if (!lockAcquired && MM_AVAILABLE_PAGES() < MM_CRITICAL_AVAILABLE_PAGES_THRESHOLD && GetCurrentThread() && !GetCurrentThread()->isPageGenerator) {
-		KernelLog(LOG_ERROR, "Memory", "waiting for non-critical state", "Page fault on non-generator thread, waiting for more available pages.\n");
-		KEventWait(&pmm.availableNotCritical);
-	}
+    //bool lockAcquired = faultFlags & MM_HANDLE_PAGE_FAULT_LOCK_ACQUIRED;
+    //MMRegion *region;
 
-	{
-		if (!lockAcquired) KMutexAcquire(&space->reserveMutex);
-		else KMutexAssertLocked(&space->reserveMutex);
-		EsDefer(if (!lockAcquired) KMutexRelease(&space->reserveMutex));
+    //if (!lockAcquired && MM_AVAILABLE_PAGES() < MM_CRITICAL_AVAILABLE_PAGES_THRESHOLD && GetCurrentThread() && !GetCurrentThread()->isPageGenerator) {
+        //KernelLog(LOG_ERROR, "Memory", "waiting for non-critical state", "Page fault on non-generator thread, waiting for more available pages.\n");
+        //KEventWait(&pmm.availableNotCritical);
+    //}
 
-		// Find the region, and pin it (so it can't be freed).
-		region = MMFindRegion(space, address);
-		if (!region) return false;
-		if (!KWriterLockTake(&region->data.pin, K_LOCK_SHARED, true /* poll */)) return false;
-	}
+    //{
+        //if (!lockAcquired) KMutexAcquire(&space->reserveMutex);
+        //else KMutexAssertLocked(&space->reserveMutex);
+        //EsDefer(if (!lockAcquired) KMutexRelease(&space->reserveMutex));
 
-	EsDefer(KWriterLockReturn(&region->data.pin, K_LOCK_SHARED));
-	KMutexAcquire(&region->data.mapMutex);
-	EsDefer(KMutexRelease(&region->data.mapMutex));
+         //Find the region, and pin it (so it can't be freed).
+        //region = MMFindRegion(space, address);
+        //if (!region) return false;
+        //if (!KWriterLockTake(&region->data.pin, K_LOCK_SHARED, true  poll )) return false;
+    //}
 
-	if (MMArchTranslateAddress(space, address, faultFlags & MM_HANDLE_PAGE_FAULT_WRITE)) {
-		// Spurious page fault.
-		return true;
-	}
+    //EsDefer(KWriterLockReturn(&region->data.pin, K_LOCK_SHARED));
+    //KMutexAcquire(&region->data.mapMutex);
+    //EsDefer(KMutexRelease(&region->data.mapMutex));
 
-	bool copyOnWrite = false, markModified = false;
+    //if (MMArchTranslateAddress(space, address, faultFlags & MM_HANDLE_PAGE_FAULT_WRITE)) {
+         //Spurious page fault.
+        //return true;
+    //}
 
-	if (faultFlags & MM_HANDLE_PAGE_FAULT_WRITE) {
-		if (region->flags & MM_REGION_COPY_ON_WRITE) {
-			// This is copy-on-write page that needs to be copied.
-			copyOnWrite = true;
-		} else if (region->flags & MM_REGION_READ_ONLY) {
-			// The page was read-only.
-			KernelLog(LOG_ERROR, "Memory", "read only page fault", "MMHandlePageFault - Page was read only.\n");
-			return false;
-		} else {
-			// We mapped the page as read-only so we could track whether it has been written to.
-			// It has now been written to.
-			markModified = true;
-		}
-	}
+    //bool copyOnWrite = false, markModified = false;
 
-	uintptr_t offsetIntoRegion = address - region->baseAddress;
-	uint64_t needZeroPages = 0;
-	bool zeroPage = true;
+    //if (faultFlags & MM_HANDLE_PAGE_FAULT_WRITE) {
+        //if (region->flags & MM_REGION_COPY_ON_WRITE) {
+             //This is copy-on-write page that needs to be copied.
+            //copyOnWrite = true;
+        //} else if (region->flags & MM_REGION_READ_ONLY) {
+             //The page was read-only.
+            //KernelLog(LOG_ERROR, "Memory", "read only page fault", "MMHandlePageFault - Page was read only.\n");
+            //return false;
+        //} else {
+             //We mapped the page as read-only so we could track whether it has been written to.
+             //It has now been written to.
+            //markModified = true;
+        //}
+    //}
 
-	if (space->user) {
-		needZeroPages = MM_PHYSICAL_ALLOCATE_ZEROED;
-		zeroPage = false;
-	}
+    //uintptr_t offsetIntoRegion = address - region->baseAddress;
+    //uint64_t needZeroPages = 0;
+    //bool zeroPage = true;
 
-	unsigned flags = ES_FLAGS_DEFAULT;
+    //if (space->user) {
+        //needZeroPages = MM_PHYSICAL_ALLOCATE_ZEROED;
+        //zeroPage = false;
+    //}
 
-	if (space->user) flags |= MM_MAP_PAGE_USER;
-	if (region->flags & MM_REGION_NOT_CACHEABLE) flags |= MM_MAP_PAGE_NOT_CACHEABLE;
-	if (region->flags & MM_REGION_WRITE_COMBINING) flags |= MM_MAP_PAGE_WRITE_COMBINING;
-	if (!markModified && !(region->flags & MM_REGION_FIXED) && (region->flags & MM_REGION_FILE)) flags |= MM_MAP_PAGE_READ_ONLY;
+    //unsigned flags = ES_FLAGS_DEFAULT;
 
-	if (region->flags & MM_REGION_PHYSICAL) {
-		MMArchMapPage(space, region->data.physical.offset + address - region->baseAddress, address, flags);
-		return true;
-	} else if (region->flags & MM_REGION_SHARED) {
-		MMSharedRegion *sharedRegion = region->data.shared.region;
+    //if (space->user) flags |= MM_MAP_PAGE_USER;
+    //if (region->flags & MM_REGION_NOT_CACHEABLE) flags |= MM_MAP_PAGE_NOT_CACHEABLE;
+    //if (region->flags & MM_REGION_WRITE_COMBINING) flags |= MM_MAP_PAGE_WRITE_COMBINING;
+    //if (!markModified && !(region->flags & MM_REGION_FIXED) && (region->flags & MM_REGION_FILE)) flags |= MM_MAP_PAGE_READ_ONLY;
 
-		if (!sharedRegion->handles) {
-			KernelPanic("MMHandlePageFault - Shared region has no handles.\n");
-		}
+    //if (region->flags & MM_REGION_PHYSICAL) {
+        //MMArchMapPage(space, region->data.physical.offset + address - region->baseAddress, address, flags);
+        //return true;
+    //} else if (region->flags & MM_REGION_SHARED) {
+        //MMSharedRegion *sharedRegion = region->data.shared.region;
 
-		KMutexAcquire(&sharedRegion->mutex);
+        //if (!sharedRegion->handles) {
+            //KernelPanic("MMHandlePageFault - Shared region has no handles.\n");
+        //}
 
-		uintptr_t offset = address - region->baseAddress + region->data.shared.offset;
+        //KMutexAcquire(&sharedRegion->mutex);
 
-		if (offset >= sharedRegion->sizeBytes) {
-			KMutexRelease(&sharedRegion->mutex);
-			KernelLog(LOG_ERROR, "Memory", "outside shared size", "MMHandlePageFault - Attempting to access shared memory past end of region.\n");
-			return false;
-		}
+        //uintptr_t offset = address - region->baseAddress + region->data.shared.offset;
 
-		uintptr_t *entry = (uintptr_t *) sharedRegion->data + (offset / K_PAGE_SIZE);
+        //if (offset >= sharedRegion->sizeBytes) {
+            //KMutexRelease(&sharedRegion->mutex);
+            //KernelLog(LOG_ERROR, "Memory", "outside shared size", "MMHandlePageFault - Attempting to access shared memory past end of region.\n");
+            //return false;
+        //}
 
-		if (*entry & MM_SHARED_ENTRY_PRESENT) zeroPage = false;
-		else *entry = MMPhysicalAllocate(needZeroPages) | MM_SHARED_ENTRY_PRESENT;
+        //uintptr_t *entry = (uintptr_t *) sharedRegion->data + (offset / K_PAGE_SIZE);
 
-		MMArchMapPage(space, *entry & ~(K_PAGE_SIZE - 1), address, flags);
-		if (zeroPage) EsMemoryZero((void *) address, K_PAGE_SIZE); 
-		KMutexRelease(&sharedRegion->mutex);
-		return true;
-	} else if (region->flags & MM_REGION_FILE) {
-		if (address >= region->baseAddress + (region->pageCount << K_PAGE_BITS) - region->data.file.zeroedBytes) {
-			// EsPrint("%x:%d\n", address, needZeroPages);
-			MMArchMapPage(space, MMPhysicalAllocate(needZeroPages), address, (flags & ~MM_MAP_PAGE_READ_ONLY) | MM_MAP_PAGE_COPIED);
-			if (zeroPage) EsMemoryZero((void *) address, K_PAGE_SIZE); 
-			return true;
-		}
+        //if (*entry & MM_SHARED_ENTRY_PRESENT) zeroPage = false;
+        //else *entry = MMPhysicalAllocate(needZeroPages) | MM_SHARED_ENTRY_PRESENT;
 
-		if (copyOnWrite) {
-			doCopyOnWrite:;
-			uintptr_t existingTranslation = MMArchTranslateAddress(space, address);
+        //MMArchMapPage(space, *entry & ~(K_PAGE_SIZE - 1), address, flags);
+        //if (zeroPage) EsMemoryZero((void *) address, K_PAGE_SIZE); 
+        //KMutexRelease(&sharedRegion->mutex);
+        //return true;
+    //} else if (region->flags & MM_REGION_FILE) {
+        //if (address >= region->baseAddress + (region->pageCount << K_PAGE_BITS) - region->data.file.zeroedBytes) {
+             //EsPrint("%x:%d\n", address, needZeroPages);
+            //MMArchMapPage(space, MMPhysicalAllocate(needZeroPages), address, (flags & ~MM_MAP_PAGE_READ_ONLY) | MM_MAP_PAGE_COPIED);
+            //if (zeroPage) EsMemoryZero((void *) address, K_PAGE_SIZE); 
+            //return true;
+        //}
 
-			if (existingTranslation) {
-				// We need to use PMCopy, because as soon as the page is mapped for the user,
-				// other threads can access it.
-				uintptr_t page = MMPhysicalAllocate(ES_FLAGS_DEFAULT);
-				PMCopy(page, (void *) address, 1);
-				MMArchUnmapPages(space, address, 1, MM_UNMAP_PAGES_BALANCE_FILE);
-				MMArchMapPage(space, page, address, (flags & ~MM_MAP_PAGE_READ_ONLY) | MM_MAP_PAGE_COPIED);
-				return true;
-			} else {
-				// EsPrint("Write to unmapped, %x.\n", address);
-			}
-		}
+        //if (copyOnWrite) {
+            //doCopyOnWrite:;
+            //uintptr_t existingTranslation = MMArchTranslateAddress(space, address);
 
-		KMutexRelease(&region->data.mapMutex);
+            //if (existingTranslation) {
+                 //We need to use PMCopy, because as soon as the page is mapped for the user,
+                 //other threads can access it.
+                //uintptr_t page = MMPhysicalAllocate(ES_FLAGS_DEFAULT);
+                //PMCopy(page, (void *) address, 1);
+                //MMArchUnmapPages(space, address, 1, MM_UNMAP_PAGES_BALANCE_FILE);
+                //MMArchMapPage(space, page, address, (flags & ~MM_MAP_PAGE_READ_ONLY) | MM_MAP_PAGE_COPIED);
+                //return true;
+            //} else {
+                 //EsPrint("Write to unmapped, %x.\n", address);
+            //}
+        //}
 
-		size_t pagesToRead = 16;
+        //KMutexRelease(&region->data.mapMutex);
 
-		if (region->pageCount - (offsetIntoRegion + region->data.file.zeroedBytes) / K_PAGE_SIZE < pagesToRead) {
-			pagesToRead = region->pageCount - (offsetIntoRegion + region->data.file.zeroedBytes) / K_PAGE_SIZE;
-		}
+        //size_t pagesToRead = 16;
 
-		EsError error = CCSpaceAccess(&region->data.file.node->cache, (void *) address, 
-				offsetIntoRegion + region->data.file.offset, pagesToRead * K_PAGE_SIZE, 
-				CC_ACCESS_MAP, space, flags);
+        //if (region->pageCount - (offsetIntoRegion + region->data.file.zeroedBytes) / K_PAGE_SIZE < pagesToRead) {
+            //pagesToRead = region->pageCount - (offsetIntoRegion + region->data.file.zeroedBytes) / K_PAGE_SIZE;
+        //}
 
-		KMutexAcquire(&region->data.mapMutex);
+        //EsError error = CCSpaceAccess(&region->data.file.node->cache, (void *) address, 
+                //offsetIntoRegion + region->data.file.offset, pagesToRead * K_PAGE_SIZE, 
+                //CC_ACCESS_MAP, space, flags);
 
-		if (error != ES_SUCCESS) {
-			KernelLog(LOG_ERROR, "Memory", "mapped file read error", "MMHandlePageFault - Could not read from file %x. Error: %d.\n", 
-					region->data.file.node, error);
-			return false;
-		}
+        //KMutexAcquire(&region->data.mapMutex);
 
-		if (copyOnWrite) {
-			goto doCopyOnWrite;
-		}
+        //if (error != ES_SUCCESS) {
+            //KernelLog(LOG_ERROR, "Memory", "mapped file read error", "MMHandlePageFault - Could not read from file %x. Error: %d.\n", 
+                    //region->data.file.node, error);
+            //return false;
+        //}
 
-		return true;
-	} else if (region->flags & MM_REGION_NORMAL) {
-		if (!(region->flags & MM_REGION_NO_COMMIT_TRACKING)) {
-			if (!region->data.normal.commit.Contains(offsetIntoRegion >> K_PAGE_BITS)) {
-				KernelLog(LOG_ERROR, "Memory", "outside commit range", "MMHandlePageFault - Attempting to access uncommitted memory in reserved region.\n");
-				return false;
-			}
-		}
+        //if (copyOnWrite) {
+            //goto doCopyOnWrite;
+        //}
 
-		MMArchMapPage(space, MMPhysicalAllocate(needZeroPages), address, flags);
-		if (zeroPage) EsMemoryZero((void *) address, K_PAGE_SIZE); 
-		return true;
-	} else if (region->flags & MM_REGION_GUARD) {
-		KernelLog(LOG_ERROR, "Memory", "guard page hit", "MMHandlePageFault - Guard page hit!\n");
-		return false;
-	} else {
-		KernelLog(LOG_ERROR, "Memory", "cannot fault in region", "MMHandlePageFault - Unsupported region type (flags: %x).\n", region->flags);
-		return false;
-	}
-}
+        //return true;
+    //} else if (region->flags & MM_REGION_NORMAL) {
+        //if (!(region->flags & MM_REGION_NO_COMMIT_TRACKING)) {
+            //if (!region->data.normal.commit.Contains(offsetIntoRegion >> K_PAGE_BITS)) {
+                //KernelLog(LOG_ERROR, "Memory", "outside commit range", "MMHandlePageFault - Attempting to access uncommitted memory in reserved region.\n");
+                //return false;
+            //}
+        //}
+
+        //MMArchMapPage(space, MMPhysicalAllocate(needZeroPages), address, flags);
+        //if (zeroPage) EsMemoryZero((void *) address, K_PAGE_SIZE); 
+        //return true;
+    //} else if (region->flags & MM_REGION_GUARD) {
+        //KernelLog(LOG_ERROR, "Memory", "guard page hit", "MMHandlePageFault - Guard page hit!\n");
+        //return false;
+    //} else {
+        //KernelLog(LOG_ERROR, "Memory", "cannot fault in region", "MMHandlePageFault - Unsupported region type (flags: %x).\n", region->flags);
+        //return false;
+    //}
+//}
 
 struct KDMASegment
 {

@@ -3597,6 +3597,11 @@ pub fn Array(comptime T: type, comptime heap_type: HeapType) type
         {
             return ArrayHeaderGetLength(@ptrCast(?*u64, self.ptr));
         }
+
+        fn get_slice(self: @This()) []T
+        {
+            return self.ptr.?[0..self.length()];
+        }
     };
 }
 
@@ -5029,67 +5034,67 @@ pub const Physical = extern struct
             //TODO();
         //}
 
-        //fn get_available_page_count(self: @This()) callconv(.Inline) u64
-        //{
-            //return self.zeroed_page_count + self.free_page_count + self.standby_page_count;
-        //}
+        fn get_available_page_count(self: @This()) callconv(.Inline) u64
+        {
+            return self.zeroed_page_count + self.free_page_count + self.standby_page_count;
+        }
 
-        //fn get_remaining_commit(self: @This()) callconv(.Inline) u64
-        //{
-            //return self.commit_limit - self.commit_pageable - self.commit_fixed;
-        //}
+        fn get_remaining_commit(self: @This()) callconv(.Inline) u64
+        {
+            return self.commit_limit - self.commit_pageable - self.commit_fixed;
+        }
 
-        //fn should_trim_object_cache(self: @This()) callconv(.Inline) bool
-        //{
-            //return self.approximate_total_object_cache_byte_count / page_size > self.get_object_cache_maximum_cache_page_count();
-        //}
+        fn should_trim_object_cache(self: @This()) callconv(.Inline) bool
+        {
+            return self.approximate_total_object_cache_byte_count / page_size > self.get_object_cache_maximum_cache_page_count();
+        }
 
-        //fn get_object_cache_maximum_cache_page_count(self: @This()) callconv(.Inline) u64
-        //{
-            //return (self.commit_limit - self.get_non_cache_memory_page_count()) / 2;
-        //}
+        fn get_object_cache_maximum_cache_page_count(self: @This()) callconv(.Inline) u64
+        {
+            return (self.commit_limit - self.get_non_cache_memory_page_count()) / 2;
+        }
 
-        //fn get_non_cache_memory_page_count(self: @This()) callconv(.Inline) u64
-        //{
-            //return self.commit_fixed - self.commit_pageable - self.approximate_total_object_cache_byte_count / page_size;
-        //}
+        fn get_non_cache_memory_page_count(self: @This()) callconv(.Inline) u64
+        {
+            return self.commit_fixed - self.commit_pageable - self.approximate_total_object_cache_byte_count / page_size;
+        }
 
-        //fn start_insert_free_pages(self: *@This()) void
-        //{
-            //_ = self;
-        //}
+        fn start_insert_free_pages(self: *@This()) void
+        {
+            _ = self;
+        }
 
-        //fn end_insert_free_pages(self: *@This()) void
-        //{
-            //if (self.free_page_count > zero_page_threshold)
-            //{
-                //_ = self.zero_page_event.set(true);
-            //}
+        fn end_insert_free_pages(self: *@This()) void
+        {
+            if (self.free_page_count > zero_page_threshold)
+            {
+                _ = self.zero_page_event.set(true);
+            }
 
-            //self.update_available_page_count(true);
-        //}
+            self.update_available_page_count(true);
+        }
 
-        //fn update_available_page_count(self: *@This(), increase: bool) void
-        //{
-            //if (self.get_available_page_count() >= critical_available_page_threshold)
-            //{
-                //_ = self.available_not_critical_event.set(true);
-                //self.available_not_critical_event.reset();
-            //}
-            //else
-            //{
-                //self.available_not_critical_event.reset();
-                //_ = self.available_critical_event.set(true);
+        fn update_available_page_count(self: *@This(), increase: bool) void
+        {
+            if (self.get_available_page_count() >= critical_available_page_threshold)
+            {
+                _ = self.available_not_critical_event.set(true);
+                self.available_not_critical_event.reset();
+            }
+            else
+            {
+                self.available_not_critical_event.reset();
+                _ = self.available_critical_event.set(true);
 
-                //if (!increase)
-                //{
-                    //// log
-                //}
-            //}
+                if (!increase)
+                {
+                    // log
+                }
+            }
 
-            //if (self.get_available_page_count() >= low_available_page_threshold) self.available_low_event.reset()
-            //else _ = self.available_low_event.set(true);
-        //}
+            if (self.get_available_page_count() >= low_available_page_threshold) self.available_low_event.reset()
+            else _ = self.available_low_event.set(true);
+        }
 
         const zero_page_threshold = 16;
         const low_available_page_threshold = 16777216 / page_size;
@@ -5154,13 +5159,6 @@ export fn MMDecommitRange(space: *AddressSpace, region: *Region, page_offset: u6
     
     return true;
 }
-
-const UnmapPagesFlags = Bitflag(enum(u32)
-    {
-        free = 0,
-        free_copied = 1,
-        balance_file = 2,
-    });
 
 extern fn MMArchUnmapPages(address_space: *AddressSpace, virtual_address_start: u64, page_count: u64, flags: UnmapPagesFlags, unmap_maximum: u64, resume_position: ?*u64) callconv(.C) void;
 
@@ -5288,6 +5286,175 @@ export fn CCFindCachedSectionContaining(cache: *CCSpace, section_offset: u64) ?*
     }
 
     return if (found) cached_section else null;
+}
+
+fn round_down(comptime T: type, value: T, divisor: T) T
+{
+    return value / divisor * divisor;
+}
+
+fn round_up(comptime T: type, value: T, divisor: T) T
+{
+    return (value + (divisor - 1)) / divisor * divisor;
+}
+
+pub const HandlePageFaultFlags = Bitflag(enum(u32)
+    {
+        write = 0,
+        lock_acquired = 1,
+        for_supervisor = 2,
+    }
+);
+
+pub const MapPageFlags = Bitflag(enum(u32)
+    {
+        not_cacheable = 0,
+        user = 1,
+        overwrite = 2,
+        commit_tables_now = 3,
+        read_only = 4,
+        copied = 5,
+        no_new_tables = 6,
+        frame_lock_acquired = 7,
+        write_combining = 8,
+        ignore_if_mapped = 9,
+    }
+);
+
+pub const UnmapPagesFlags = Bitflag(enum(u32)
+    {
+        free = 0,
+        free_copied = 1,
+        balance_file = 2,
+    }
+);
+
+extern fn MMArchTranslateAddress(_: *AddressSpace, virtual_address: u64, write_access: bool) callconv(.C) u64;
+extern fn MMArchMapPage(space: *AddressSpace, physical_address: u64, virtual_address: u64, flags: MapPageFlags) callconv(.C) bool;
+extern fn MMPhysicalAllocate(flags: Physical.Flags, count: u64, alignment: u64, below: u64) callconv(.C) u64;
+fn MMPhysicalAllocateWithFlags(flags: Physical.Flags) u64
+{
+    return MMPhysicalAllocate(flags, 1, 1, 0);
+}
+
+export fn MMHandlePageFault(space: *AddressSpace, asked_address: u64, flags: HandlePageFaultFlags) callconv(.C) bool
+{
+    const address = asked_address & ~@as(u64, page_size - 1);
+    const lock_acquired = flags.contains(.lock_acquired);
+
+    var region = blk:
+    {
+        if (lock_acquired)
+        {
+            space.reserve_mutex.assert_locked();
+            const result = MMFindRegion(space, asked_address) orelse return false;
+            if (!result.data.pin.take_extended(WriterLock.shared, true)) return false;
+            break :blk result;
+        }
+        else
+        {
+            if (pmm.get_available_page_count() < Physical.Allocator.critical_available_page_threshold and GetCurrentThread() != null and !GetCurrentThread().?.is_page_generator)
+            {
+                _ = pmm.available_not_critical_event.wait();
+            }
+            _ = space.reserve_mutex.acquire();
+            defer space.reserve_mutex.release();
+
+            const result = MMFindRegion(space, asked_address) orelse return false;
+            if (!result.data.pin.take_extended(WriterLock.shared, true)) return false;
+            break :blk result;
+        }
+    };
+
+    defer region.data.pin.return_lock(WriterLock.shared);
+    _ = region.data.map_mutex.acquire();
+    defer region.data.map_mutex.release();
+
+    if (MMArchTranslateAddress(space, address, flags.contains(.write)) != 0) return true;
+
+    var copy_on_write = false;
+    var mark_modified = false;
+
+    if (flags.contains(.write))
+    {
+        if (region.flags.contains(.copy_on_write)) copy_on_write = true
+        else if (region.flags.contains(.read_only)) return false
+        else mark_modified = true;
+    }
+
+    const offset_into_region = address - region.descriptor.base_address;
+    _ = offset_into_region;
+    var physical_allocation_flags = Physical.Flags.empty();
+    var zero_page = true;
+
+    if (space.user)
+    {
+         physical_allocation_flags = physical_allocation_flags.or_flag(.zeroed);
+         zero_page = false;
+    }
+
+    var map_page_flags = MapPageFlags.empty();
+    if (space.user) map_page_flags = map_page_flags.or_flag(.user);
+    if (region.flags.contains(.not_cacheable)) map_page_flags = map_page_flags.or_flag(.not_cacheable);
+    if (region.flags.contains(.write_combining)) map_page_flags = map_page_flags.or_flag(.write_combining);
+    if (!mark_modified and !region.flags.contains(.fixed) and region.flags.contains(.file)) map_page_flags = map_page_flags.or_flag(.read_only);
+
+    if (region.flags.contains(.physical))
+    {
+        _ = MMArchMapPage(space, region.data.u.physical.offset + address - region.descriptor.base_address, address, map_page_flags);
+        return true;
+    }
+    else if (region.flags.contains(.shared))
+    {
+        const shared_region = region.data.u.shared.region.?;
+        if (shared_region.handle_count.read_volatile() == 0) KernelPanic("Shared region has no handles");
+        _ = shared_region.mutex.acquire();
+
+        const offset = address - region.descriptor.base_address + region.data.u.shared.offset;
+
+        if (offset >= shared_region.size)
+        {
+            shared_region.mutex.release();
+            return false;
+        }
+
+        const entry = @intToPtr(*u64, shared_region.address + (offset / page_size * @sizeOf(u64)));
+
+        // @TODO SHARED_ENTRY_PRESENT
+        if (entry.* & 1 != 0) zero_page = false
+        else entry.* = MMPhysicalAllocateWithFlags(physical_allocation_flags) | 1;
+
+        _ = MMArchMapPage(space, entry.* & ~@as(u64, page_size - 1), address, map_page_flags);
+        if (zero_page) EsMemoryZero(address, page_size);
+        shared_region.mutex.release();
+        return true;
+    }
+    else if (region.flags.contains(.file))
+    {
+        TODO();
+    }
+    else if (region.flags.contains(.normal))
+    {
+        if (!region.flags.contains(.no_commit_tracking))
+        {
+            if (!RangeSetContains(&region.data.u.normal.commit, offset_into_region >> page_bit_count))
+            {
+                return false;
+            }
+        }
+
+        _ = MMArchMapPage(space, MMPhysicalAllocateWithFlags(physical_allocation_flags), address, map_page_flags);
+        if (zero_page) EsMemoryZero(address, page_size);
+        return true;
+    }
+    else if (region.flags.contains(.guard))
+    {
+        TODO();
+    }
+    else
+    {
+        return false;
+    }
 }
 
 export fn KernelInitialise() callconv(.C) void
