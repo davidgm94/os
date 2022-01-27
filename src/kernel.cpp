@@ -297,7 +297,7 @@ extern "C"
     void *EsHeapAllocate(size_t size, bool zeroMemory, EsHeap *kernelHeap);
     void *EsHeapReallocate(void *oldAddress, size_t newAllocationSize, bool zeroNewSpace, EsHeap *_heap);
     void EsHeapFree(void *address, size_t expectedSize, EsHeap *kernelHeap);
-    void MMPhysicalActivatePages(uintptr_t pages, uintptr_t count, unsigned flags);
+    void MMPhysicalActivatePages(uintptr_t pages, uintptr_t count);
     bool MMCommit(uint64_t bytes, bool fixed);
     void PMCopy(uintptr_t page, void *_source, size_t pageCount);
     uintptr_t ProcessorGetRSP();
@@ -4758,7 +4758,7 @@ EsError CCSpaceAccess(CCSpace *cache, K_USER_BUFFER void *_buffer, EsFileOffset 
                     if (frame->state == MMPageFrame::STANDBY) {
                         // The page was mapped out from all MMSpaces, and therefore was placed on the standby list.
                         // Mark the page as active before we map it.
-                        MMPhysicalActivatePages(entry / K_PAGE_SIZE, 1, ES_FLAGS_DEFAULT);
+                        MMPhysicalActivatePages(entry / K_PAGE_SIZE, 1);
                         frame->cacheReference = cachedSection->data + pageInCachedSectionIndex;
                     } else if (frame->state != MMPageFrame::ACTIVE) {
                         KernelPanic("CCSpaceAccess - Page frame %x was neither standby nor active.\n", frame);
@@ -5343,44 +5343,42 @@ void CCSpaceFlush(CCSpace *cache) {
 
 extern "C" void MMUpdateAvailablePageCount(bool increase);
 
-void MMPhysicalActivatePages(uintptr_t pages, uintptr_t count, unsigned flags) {
-	(void) flags;
+extern "C" void MMPhysicalActivatePages(uintptr_t pages, uintptr_t count);
+	//KMutexAssertLocked(&pmm.pageFrameMutex);
 
-	KMutexAssertLocked(&pmm.pageFrameMutex);
+	//for (uintptr_t i = 0; i < count; i++) {
+		//MMPageFrame *frame = pmm.pageFrames + pages + i;
 
-	for (uintptr_t i = 0; i < count; i++) {
-		MMPageFrame *frame = pmm.pageFrames + pages + i;
+		//if (frame->state == MMPageFrame::FREE) {
+			//pmm.countFreePages--;
+		//} else if (frame->state == MMPageFrame::ZEROED) {
+			//pmm.countZeroedPages--;
+		//} else if (frame->state == MMPageFrame::STANDBY) {
+			//pmm.countStandbyPages--;
 
-		if (frame->state == MMPageFrame::FREE) {
-			pmm.countFreePages--;
-		} else if (frame->state == MMPageFrame::ZEROED) {
-			pmm.countZeroedPages--;
-		} else if (frame->state == MMPageFrame::STANDBY) {
-			pmm.countStandbyPages--;
+			//if (pmm.lastStandbyPage == pages + i) {
+				//if (frame->list.previous == &pmm.firstStandbyPage) {
+					//// There are no more pages in the list.
+					//pmm.lastStandbyPage = 0;
+				//} else {
+					//pmm.lastStandbyPage = ((uintptr_t) frame->list.previous - (uintptr_t) pmm.pageFrames) / sizeof(MMPageFrame);
+				//}
+			//}
+		//} else {
+			//KernelPanic("MMPhysicalActivatePages - Corrupt page frame database (4).\n");
+		//}
 
-			if (pmm.lastStandbyPage == pages + i) {
-				if (frame->list.previous == &pmm.firstStandbyPage) {
-					// There are no more pages in the list.
-					pmm.lastStandbyPage = 0;
-				} else {
-					pmm.lastStandbyPage = ((uintptr_t) frame->list.previous - (uintptr_t) pmm.pageFrames) / sizeof(MMPageFrame);
-				}
-			}
-		} else {
-			KernelPanic("MMPhysicalActivatePages - Corrupt page frame database (4).\n");
-		}
+		//// Unlink the frame from its list.
+		//*frame->list.previous = frame->list.next;
+		//if (frame->list.next) pmm.pageFrames[frame->list.next].list.previous = frame->list.previous;
 
-		// Unlink the frame from its list.
-		*frame->list.previous = frame->list.next;
-		if (frame->list.next) pmm.pageFrames[frame->list.next].list.previous = frame->list.previous;
+		//EsMemoryZero(frame, sizeof(MMPageFrame));
+		//frame->state = MMPageFrame::ACTIVE;
+	//}
 
-		EsMemoryZero(frame, sizeof(MMPageFrame));
-		frame->state = MMPageFrame::ACTIVE;
-	}
-
-	pmm.countActivePages += count;
-	MMUpdateAvailablePageCount(false);
-}
+	//pmm.countActivePages += count;
+	//MMUpdateAvailablePageCount(false);
+//}
 
 void CCSpaceDestroy(CCSpace *cache) {
 	CCSpaceFlush(cache);
@@ -5416,7 +5414,7 @@ void CCSpaceDestroy(CCSpace *cache) {
 				uintptr_t page = section->data[i] & ~(K_PAGE_SIZE - 1);
 
 				if (pmm.pageFrames[page >> K_PAGE_BITS].state != MMPageFrame::ACTIVE) {
-				       MMPhysicalActivatePages(page >> K_PAGE_BITS, 1, ES_FLAGS_DEFAULT);
+                    MMPhysicalActivatePages(page >> K_PAGE_BITS, 1);
 				}
 
 				MMPhysicalFree(page, true, 1);
@@ -7251,7 +7249,7 @@ uintptr_t MMPhysicalAllocate(unsigned flags, uintptr_t count, uintptr_t align, u
 
 		uintptr_t pages = pmm.freeOrZeroedPageBitset.Get(count, align, below);
 		if (pages == (uintptr_t) -1) goto fail;
-		MMPhysicalActivatePages(pages, count, flags);
+		MMPhysicalActivatePages(pages, count);
 		uintptr_t address = pages << K_PAGE_BITS;
 		if (flags & MM_PHYSICAL_ALLOCATE_ZEROED) PMZero(&address, count, true);
 		return address;
@@ -7285,7 +7283,7 @@ uintptr_t MMPhysicalAllocate(unsigned flags, uintptr_t count, uintptr_t align, u
 			pmm.freeOrZeroedPageBitset.Take(page);
 		}
 
-		MMPhysicalActivatePages(page, 1, flags);
+		MMPhysicalActivatePages(page, 1);
 
 		// EsPrint("PAGE FRAME ALLOCATE: %x\n", page << K_PAGE_BITS);
 
@@ -7448,7 +7446,7 @@ void MMZeroPageThread() {
 				for (; i < PHYSICAL_MEMORY_MANIPULATION_REGION_PAGES; i++) {
 					if (pmm.firstFreePage) {
 						pages[i] = pmm.firstFreePage;
-						MMPhysicalActivatePages(pages[i], 1, ES_FLAGS_DEFAULT);
+						MMPhysicalActivatePages(pages[i], 1);
 					} else {
 						done = true;
 						break;

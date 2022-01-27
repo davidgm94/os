@@ -5485,6 +5485,49 @@ export fn MMUpdateAvailablePageCount(increase: bool) callconv(.C) void
     }
 }
 
+export fn MMPhysicalActivatePages(pages: u64, count: u64) callconv(.C) void
+{
+    pmm.pageframe_mutex.assert_locked();
+
+    for (pmm.pageframes[pages..pages+count]) |*frame, i|
+    {
+        switch (frame.state.read_volatile())
+        {
+            .free => pmm.free_page_count -= 1,
+            .zeroed => pmm.zeroed_page_count -= 1,
+            .standby =>
+            {
+                pmm.standby_page_count -= 1;
+
+                if (pmm.last_standby_page == pages + i)
+                {
+                    if (frame.u.list.previous == &pmm.first_standby_page)
+                    {
+                        pmm.last_standby_page = 0;
+                    }
+                    else
+                    {
+                        pmm.last_standby_page = (@ptrToInt(frame.u.list.previous) - @ptrToInt(pmm.pageframes)) / @sizeOf(PageFrame);
+                    }
+                }
+            },
+            else => KernelPanic("Corrupt page frame database"),
+        }
+
+        frame.u.list.previous.?.* = frame.u.list.next.read_volatile();
+
+        if (frame.u.list.next.read_volatile() != 0)
+        {
+            pmm.pageframes[frame.u.list.next.read_volatile()].u.list.previous = frame.u.list.previous;
+        }
+        EsMemoryZero(@ptrToInt(frame), @sizeOf(PageFrame));
+        frame.state.write_volatile(.active);
+    }
+
+    pmm.active_page_count += count;
+    MMUpdateAvailablePageCount(false);
+}
+
 export fn KernelInitialise() callconv(.C) void
 {
     kernelProcess = &_kernelProcess;
