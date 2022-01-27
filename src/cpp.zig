@@ -5039,7 +5039,7 @@ pub const Physical = extern struct
             return self.zeroed_page_count + self.free_page_count + self.standby_page_count;
         }
 
-        fn get_remaining_commit(self: @This()) callconv(.Inline) u64
+        fn get_remaining_commit(self: @This()) callconv(.Inline) i64
         {
             return self.commit_limit - self.commit_pageable - self.commit_fixed;
         }
@@ -5049,14 +5049,14 @@ pub const Physical = extern struct
             return self.approximate_total_object_cache_byte_count / page_size > self.get_object_cache_maximum_cache_page_count();
         }
 
-        fn get_object_cache_maximum_cache_page_count(self: @This()) callconv(.Inline) u64
+        fn get_object_cache_maximum_cache_page_count(self: @This()) callconv(.Inline) i64
         {
-            return (self.commit_limit - self.get_non_cache_memory_page_count()) / 2;
+            return @divTrunc(self.commit_limit - self.get_non_cache_memory_page_count(), 2);
         }
 
-        fn get_non_cache_memory_page_count(self: @This()) callconv(.Inline) u64
+        fn get_non_cache_memory_page_count(self: @This()) callconv(.Inline) i64
         {
-            return self.commit_fixed - self.commit_pageable - self.approximate_total_object_cache_byte_count / page_size;
+            return @divTrunc(self.commit_fixed - self.commit_pageable - @intCast(i64, self.approximate_total_object_cache_byte_count), page_size);
         }
 
         fn start_insert_free_pages(self: *@This()) void
@@ -5526,6 +5526,41 @@ export fn MMPhysicalActivatePages(pages: u64, count: u64) callconv(.C) void
 
     pmm.active_page_count += count;
     MMUpdateAvailablePageCount(false);
+}
+
+export fn ThreadRemove(thread: *Thread) callconv(.C) void
+{
+    PoolRemove(&scheduler.thread_pool, @ptrToInt(thread));
+}
+
+export fn MMCommit(byte_count: u64, fixed: bool) callconv(.C) bool
+{
+    if (byte_count & (page_size - 1) != 0) KernelPanic("Bytes should be page-aligned");
+
+    const needed_page_count = @intCast(i64, byte_count / page_size);
+
+    _  = pmm.commit_mutex.acquire();
+    defer pmm.commit_mutex.release();
+
+    // Else we haven't started tracking commit counts yet
+    if (pmm.commit_limit != 0)
+    {
+        if (fixed)
+        {
+            if (needed_page_count > pmm.commit_fixed_limit - pmm.commit_fixed) return false;
+            if (@intCast(i64, pmm.get_available_page_count()) - needed_page_count < Physical.Allocator.critical_available_page_threshold and !GetCurrentThread().?.is_page_generator) return false;
+            pmm.commit_fixed += needed_page_count;
+        }
+        else
+        {
+            if (needed_page_count > pmm.get_remaining_commit() - if (GetCurrentThread().?.is_page_generator) @as(i64, 0) else @as(i64, Physical.Allocator.critical_remaining_commit_threshold)) return false;
+            pmm.commit_pageable += needed_page_count;
+        }
+
+        if (pmm.should_trim_object_cache()) _ = pmm.trim_object_cache_event.set(true);
+    }
+
+    return true;
 }
 
 export fn KernelInitialise() callconv(.C) void

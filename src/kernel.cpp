@@ -5343,43 +5343,6 @@ void CCSpaceFlush(CCSpace *cache) {
 
 extern "C" void MMUpdateAvailablePageCount(bool increase);
 
-extern "C" void MMPhysicalActivatePages(uintptr_t pages, uintptr_t count);
-	//KMutexAssertLocked(&pmm.pageFrameMutex);
-
-	//for (uintptr_t i = 0; i < count; i++) {
-		//MMPageFrame *frame = pmm.pageFrames + pages + i;
-
-		//if (frame->state == MMPageFrame::FREE) {
-			//pmm.countFreePages--;
-		//} else if (frame->state == MMPageFrame::ZEROED) {
-			//pmm.countZeroedPages--;
-		//} else if (frame->state == MMPageFrame::STANDBY) {
-			//pmm.countStandbyPages--;
-
-			//if (pmm.lastStandbyPage == pages + i) {
-				//if (frame->list.previous == &pmm.firstStandbyPage) {
-					//// There are no more pages in the list.
-					//pmm.lastStandbyPage = 0;
-				//} else {
-					//pmm.lastStandbyPage = ((uintptr_t) frame->list.previous - (uintptr_t) pmm.pageFrames) / sizeof(MMPageFrame);
-				//}
-			//}
-		//} else {
-			//KernelPanic("MMPhysicalActivatePages - Corrupt page frame database (4).\n");
-		//}
-
-		//// Unlink the frame from its list.
-		//*frame->list.previous = frame->list.next;
-		//if (frame->list.next) pmm.pageFrames[frame->list.next].list.previous = frame->list.previous;
-
-		//EsMemoryZero(frame, sizeof(MMPageFrame));
-		//frame->state = MMPageFrame::ACTIVE;
-	//}
-
-	//pmm.countActivePages += count;
-	//MMUpdateAvailablePageCount(false);
-//}
-
 void CCSpaceDestroy(CCSpace *cache) {
 	CCSpaceFlush(cache);
 
@@ -5631,73 +5594,7 @@ void FSNodeCloseHandle(KNode *node, uint32_t flags) {
 	} 
 }
 
-void ThreadRemove(Thread *thread) {
-	KernelLog(LOG_INFO, "Scheduler", "remove thread", "Removing thread %d.\n", thread->id);
-
-	// The last handle to the thread has been closed,
-	// so we can finally deallocate the thread.
-
-#ifdef ENABLE_POSIX_SUBSYSTEM
-	if (thread->posixData) {
-		if (thread->posixData->forkStack) {
-			EsHeapFree(thread->posixData->forkStack, thread->posixData->forkStackSize, K_PAGED);
-			CloseHandleToObject(thread->posixData->forkProcess, KERNEL_OBJECT_PROCESS);
-		}
-
-		EsHeapFree(thread->posixData, sizeof(POSIXThread), K_PAGED);
-	}
-#endif
-
-	PoolRemove(&scheduler.threadPool, thread);
-}
-
 KMutex objectHandleCountChange;
-
-bool MMCommit(uint64_t bytes, bool fixed) {
-	if (bytes & (K_PAGE_SIZE - 1)) KernelPanic("MMCommit - Expected multiple of K_PAGE_SIZE bytes.\n");
-	int64_t pagesNeeded = bytes / K_PAGE_SIZE;
-
-	KMutexAcquire(&pmm.commitMutex);
-	EsDefer(KMutexRelease(&pmm.commitMutex));
-
-	if (pmm.commitLimit) {
-		if (fixed) {
-			if (pagesNeeded > pmm.commitFixedLimit - pmm.commitFixed) {
-				KernelLog(LOG_ERROR, "Memory", "failed fixed commit", "Failed fixed commit %d pages (currently %d/%d).\n",
-						pagesNeeded, pmm.commitFixed, pmm.commitFixedLimit);
-				return false;
-			}
-
-			if (MM_AVAILABLE_PAGES() - pagesNeeded < MM_CRITICAL_AVAILABLE_PAGES_THRESHOLD && !GetCurrentThread()->isPageGenerator) {
-				KernelLog(LOG_ERROR, "Memory", "failed fixed commit", 
-						"Failed fixed commit %d as the available pages (%d, %d, %d) would cross the critical threshold, %d.\n.",
-						pagesNeeded, pmm.countZeroedPages, pmm.countFreePages, pmm.countStandbyPages, MM_CRITICAL_AVAILABLE_PAGES_THRESHOLD);
-				return false;
-			}
-
-			pmm.commitFixed += pagesNeeded;
-		} else {
-			if (pagesNeeded > MM_REMAINING_COMMIT() - (intptr_t) (GetCurrentThread()->isPageGenerator ? 0 : MM_CRITICAL_REMAINING_COMMIT_THRESHOLD)) {
-				KernelLog(LOG_ERROR, "Memory", "failed pageable commit",
-						"Failed pageable commit %d pages (currently %d/%d).\n",
-						pagesNeeded, pmm.commitPageable + pmm.commitFixed, pmm.commitLimit);
-				return false;
-			}
-
-			pmm.commitPageable += pagesNeeded;
-		}
-
-		if (MM_OBJECT_CACHE_SHOULD_TRIM()) {
-			KEventSet(&pmm.trimObjectCaches, true);
-		}
-	} else {
-		// We haven't started tracking commit counts yet.
-	}
-
-	KernelLog(LOG_VERBOSE, "Memory", "commit", "Commit %D%z. Now at %D.\n", bytes, fixed ? ", fixed" : "", (pmm.commitFixed + pmm.commitPageable) << K_PAGE_BITS);
-		
-	return true;
-}
 
 bool MMSharedResizeRegion(MMSharedRegion *region, size_t sizeBytes) {
 	KMutexAcquire(&region->mutex);
@@ -6066,6 +5963,7 @@ void NetConnectionDestroy(NetConnection *connection)
 }
 
 void ProcessRemove(Process *process);
+extern "C" void ThreadRemove(Thread* thread);
 void CloseHandleToObject(void *object, KernelObjectType type, uint32_t flags)
 {
 	switch (type) {
