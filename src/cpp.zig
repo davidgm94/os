@@ -5457,6 +5457,34 @@ export fn MMHandlePageFault(space: *AddressSpace, asked_address: u64, flags: Han
     }
 }
 
+export fn MMUpdateAvailablePageCount(increase: bool) callconv(.C) void
+{
+    if (pmm.get_available_page_count() >= Physical.Allocator.critical_available_page_threshold)
+    {
+        _ = pmm.available_not_critical_event.set(true);
+        pmm.available_critical_event.reset();
+    }
+    else
+    {
+        pmm.available_not_critical_event.reset();
+        _ = pmm.available_critical_event.set(true);
+
+        if (!increase)
+        {
+            // log error
+        }
+    }
+
+    if (pmm.get_available_page_count() >= Physical.Allocator.low_available_page_threshold)
+    {
+        pmm.available_low_event.reset();
+    }
+    else
+    {
+        _ = pmm.available_low_event.set(true);
+    }
+}
+
 export fn KernelInitialise() callconv(.C) void
 {
     kernelProcess = &_kernelProcess;
