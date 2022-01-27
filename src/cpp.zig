@@ -5563,6 +5563,57 @@ export fn MMCommit(byte_count: u64, fixed: bool) callconv(.C) bool
     return true;
 }
 
+extern fn MMPhysicalFree(page: u64, mutex_already_acquired: bool, count: u64) callconv(.C) void;
+export fn MMSharedResizeRegion(region: *SharedRegion, asked_size: u64) callconv(.C) bool
+{
+    _ = region.mutex.acquire();
+    defer region.mutex.release();
+
+    const size = (asked_size + page_size - 1) & ~@as(u64, page_size - 1);
+    const page_count = size / page_size;
+    const old_page_count = region.size / page_size;
+    const old_address = region.address;
+
+    const new_address = EsHeapAllocate(page_count * @sizeOf(u64), true, &heapCore);
+    if (new_address == 0 and page_count != 0) return false;
+
+    if (old_page_count > page_count)
+    {
+        MMDecommit(page_size * (old_page_count - page_count), true);
+    }
+    else if (page_count > old_page_count)
+    {
+        if (!MMCommit(page_size * (page_count - old_page_count), true))
+        {
+            EsHeapFree(new_address, page_count * @sizeOf(u64), &heapCore);
+            return false;
+        }
+    }
+
+    region.size = size;
+    region.address = new_address;
+
+    if (old_address == 0) return true;
+
+    if (old_page_count > page_count)
+    {
+        var i = page_count;
+        while (i < old_page_count) : (i += 1)
+        {
+            // @TODO
+            const addresses = @intToPtr([*]u64, old_address);
+            const address = addresses[i];
+            // MM_SHARED_ENTRY_PRESENT
+            if (address & 1 != 0) _ = MMPhysicalFree(address, false, 1);
+        }
+    }
+
+    const copy = if (old_page_count > page_count) page_count else old_page_count;
+    EsMemoryCopy(region.address, old_address, @sizeOf(u64) * copy);
+    EsHeapFree(old_address, old_page_count * @sizeOf(u64), &heapCore);
+    return true;
+}
+
 export fn KernelInitialise() callconv(.C) void
 {
     kernelProcess = &_kernelProcess;

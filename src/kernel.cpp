@@ -4068,7 +4068,7 @@ extern "C" uintptr_t /* Returns physical address of first page, or 0 if none wer
 		uintptr_t count = 1 /* Number of contiguous pages to allocate. */, 
 		uintptr_t align = 1 /* Alignment, in pages. */, 
 		uintptr_t below = 0 /* Upper limit of physical address, in pages. E.g. for 32-bit pages only, pass (0x100000000 >> K_PAGE_BITS). */);
-void MMPhysicalFree(uintptr_t page /* Physical address. */, 
+extern "C" void MMPhysicalFree(uintptr_t page /* Physical address. */, 
 		bool mutexAlreadyAcquired = false /* Internal use. Pass false. */, 
 		size_t count = 1 /* Number of consecutive pages to free. */);
 
@@ -5596,51 +5596,51 @@ void FSNodeCloseHandle(KNode *node, uint32_t flags) {
 
 KMutex objectHandleCountChange;
 
-bool MMSharedResizeRegion(MMSharedRegion *region, size_t sizeBytes) {
-	KMutexAcquire(&region->mutex);
-	EsDefer(KMutexRelease(&region->mutex));
+extern "C" bool MMSharedResizeRegion(MMSharedRegion *region, size_t sizeBytes);
+	//KMutexAcquire(&region->mutex);
+	//EsDefer(KMutexRelease(&region->mutex));
 
-	sizeBytes = (sizeBytes + K_PAGE_SIZE - 1) & ~(K_PAGE_SIZE - 1);
+	//sizeBytes = (sizeBytes + K_PAGE_SIZE - 1) & ~(K_PAGE_SIZE - 1);
 
-	size_t pages = sizeBytes / K_PAGE_SIZE;
-	size_t oldPages = region->sizeBytes / K_PAGE_SIZE;
-	void *oldData = region->data;
+	//size_t pages = sizeBytes / K_PAGE_SIZE;
+	//size_t oldPages = region->sizeBytes / K_PAGE_SIZE;
+	//void *oldData = region->data;
 
-	void *newData = EsHeapAllocate(pages * sizeof(void *), true, K_CORE);
+	//void *newData = EsHeapAllocate(pages * sizeof(void *), true, K_CORE);
 
-	if (!newData && pages) {
-		return false;
-	}
+	//if (!newData && pages) {
+		//return false;
+	//}
 
-	if (oldPages > pages) {
-		MMDecommit(K_PAGE_SIZE * (oldPages - pages), true);
-	} else if (pages > oldPages) {
-		if (!MMCommit(K_PAGE_SIZE * (pages - oldPages), true)) {
-			EsHeapFree(newData, pages * sizeof(void *), K_CORE);
-			return false;
-		}
-	}
+	//if (oldPages > pages) {
+		//MMDecommit(K_PAGE_SIZE * (oldPages - pages), true);
+	//} else if (pages > oldPages) {
+		//if (!MMCommit(K_PAGE_SIZE * (pages - oldPages), true)) {
+			//EsHeapFree(newData, pages * sizeof(void *), K_CORE);
+			//return false;
+		//}
+	//}
 
-	region->sizeBytes = sizeBytes;
-	region->data = newData; 
+	//region->sizeBytes = sizeBytes;
+	//region->data = newData; 
 
-	// The old shared memory region was empty.
-	if (!oldData) return true;
+	//// The old shared memory region was empty.
+	//if (!oldData) return true;
 
-	if (oldPages > pages) {
-		for (uintptr_t i = pages; i < oldPages; i++) {
-			uintptr_t *addresses = (uintptr_t *) oldData;
-			uintptr_t address = addresses[i];
-			if (address & MM_SHARED_ENTRY_PRESENT) MMPhysicalFree(address);
-		}
-	}
+	//if (oldPages > pages) {
+		//for (uintptr_t i = pages; i < oldPages; i++) {
+			//uintptr_t *addresses = (uintptr_t *) oldData;
+			//uintptr_t address = addresses[i];
+			//if (address & MM_SHARED_ENTRY_PRESENT) MMPhysicalFree(address);
+		//}
+	//}
 
-	uintptr_t copy = oldPages > pages ? pages : oldPages;
-	EsMemoryCopy(region->data, oldData, sizeof(void *) * copy);
-	EsHeapFree(oldData, oldPages * sizeof(void *), K_CORE); 
+	//uintptr_t copy = oldPages > pages ? pages : oldPages;
+	//EsMemoryCopy(region->data, oldData, sizeof(void *) * copy);
+	//EsHeapFree(oldData, oldPages * sizeof(void *), K_CORE); 
 
-	return true;
-}
+	//return true;
+//}
 
 void MMSharedDestroyRegion(MMSharedRegion *region) {
 	MMSharedResizeRegion(region, 0); // TODO Check leaks.
