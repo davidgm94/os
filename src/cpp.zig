@@ -1,6 +1,14 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const zeroes = std.mem.zeroes;
+
+fn zeroes(comptime T: type) T
+{
+    @setEvalBranchQuota(100000);
+    var zero_value: T = undefined;
+    std.mem.set(u8, std.mem.asBytes(&zero_value), 0);
+    return zero_value;
+}
+
 pub const max_wait_count = 8;
 pub const wait_no_timeout = std.math.maxInt(u64);
 pub const page_bit_count = 12;
@@ -9,9 +17,9 @@ pub const page_size = 0x1000;
 pub const entry_per_page_table_count = 512;
 pub const entry_per_page_table_bit_count = 9;
 
-export var _stack: [0x4000]u8 align(0x1000) linksection(".bss") = zeroes([0x4000]u8);
-export var _idt_data: [idt_entry_count]IDTEntry align(0x1000) linksection(".bss") = zeroes([idt_entry_count]IDTEntry);
-export var _cpu_local_storage: [0x2000]u8 align(0x1000) linksection(".bss") = zeroes([0x2000]u8);
+export var _stack: [0x4000]u8 align(0x1000) linksection(".bss") = undefined;
+export var _idt_data: [idt_entry_count]IDTEntry align(0x1000) linksection(".bss") = undefined;
+export var _cpu_local_storage: [0x2000]u8 align(0x1000) linksection(".bss") = undefined;
 
 export var timeStampCounterSynchronizationValue = Volatile(u64) { .value = 0 };
 
@@ -1356,7 +1364,7 @@ pub fn LinkedList(comptime T: type) type
         {
             if (self.count == 0)
             {
-                TODO();
+                if (self.first != null or self.last != null) KernelPanic("invalid list");
             }
             else if (self.count == 1)
             {
@@ -3683,7 +3691,7 @@ pub fn AVLTree(comptime T: type) type
             fail,
         };
 
-        pub fn insert(self: *@This(), item: *Item, item_value: ?*T, key: Key, duplicate_key_policy: DuplicateKeyPolicy) bool
+        pub fn insert(self: *@This(), item: *Item, item_value: ?*T, key: KeyDefaultType, duplicate_key_policy: DuplicateKeyPolicy) bool
         {
             self.validate();
             
@@ -3694,7 +3702,8 @@ pub fn AVLTree(comptime T: type) type
 
             item.tree = self;
 
-            item.key = key;
+            item.key = zeroes(Key);
+            item.key.short_key = key;
             item.children[0] = null;
             item.children[1] = null;
             item.value = item_value;
@@ -3728,7 +3737,6 @@ pub fn AVLTree(comptime T: type) type
             var fake_root = zeroes(Item);
             self.root.?.parent = &fake_root;
             fake_root.tree = self;
-            fake_root.key = 0;
             fake_root.children[0] = self.root;
 
             var item_it = item.parent.?;
@@ -3742,14 +3750,14 @@ pub fn AVLTree(comptime T: type) type
                 var new_root: ?*Item = null;
                 var old_parent = item_it.parent.?;
 
-                if (balance > 1 and Item.compare_keys(key, item_it.children[0].?.key) <= 0)
+                if (balance > 1 and Item.compare_keys(key, item_it.children[0].?.key.short_key) <= 0)
                 {
                     const right_rotation = item_it.rotate_right();
                     new_root = right_rotation;
                     const old_parent_child_index = @boolToInt(old_parent.children[1] == item_it);
                     old_parent.children[old_parent_child_index] = right_rotation;
                 }
-                else if (balance > 1 and Item.compare_keys(key, item_it.children[0].?.key) > 0 and item_it.children[0].?.children[1] != null)
+                else if (balance > 1 and Item.compare_keys(key, item_it.children[0].?.key.short_key) > 0 and item_it.children[0].?.children[1] != null)
                 {
                     item_it.children[0] = item_it.children[0].?.rotate_left();
                     item_it.children[0].?.parent = item_it;
@@ -3758,14 +3766,14 @@ pub fn AVLTree(comptime T: type) type
                     const old_parent_child_index = @boolToInt(old_parent.children[1] == item_it);
                     old_parent.children[old_parent_child_index] = right_rotation;
                 }
-                else if (balance < -1 and Item.compare_keys(key, item_it.children[1].?.key) > 0)
+                else if (balance < -1 and Item.compare_keys(key, item_it.children[1].?.key.short_key) > 0)
                 {
                     const left_rotation = item_it.rotate_left();
                     new_root = left_rotation;
                     const old_parent_child_index = @boolToInt(old_parent.children[1] == item_it);
                     old_parent.children[old_parent_child_index] = left_rotation;
                 }
-                else if (balance < -1 and Item.compare_keys(key, item_it.children[1].?.key) <= 0 and item_it.children[1].?.children[0] != null)
+                else if (balance < -1 and Item.compare_keys(key, item_it.children[1].?.key.short_key) <= 0 and item_it.children[1].?.children[0] != null)
                 {
                     item_it.children[1] = item_it.children[1].?.rotate_right();
                     item_it.children[1].?.parent = item_it;
@@ -3840,7 +3848,6 @@ pub fn AVLTree(comptime T: type) type
             var fake_root = zeroes(Item);
             self.root.?.parent = &fake_root;
             fake_root.tree = self;
-            fake_root.key = 0;
             fake_root.children[0] = self.root;
 
             if (item.children[0] != null and item.children[1] != null)
@@ -5644,6 +5651,111 @@ export fn MMSharedCreateRegion(size: u64, fixed: bool, below: u64) callconv(.C) 
     }
 
     return region;
+}
+
+export fn MMUnreserve(space: *AddressSpace, region: *Region, unmap_pages: bool, guard_region: bool) callconv(.C) void
+{
+    space.reserve_mutex.assert_locked();
+
+    if (pmm.next_region_to_balance == region)
+    {
+        pmm.next_region_to_balance = if (region.u.item.u.non_guard.next) |next| next.value else null;
+        pmm.balance_resume_position = 0;
+    }
+
+    if (region.flags.contains(.normal))
+    {
+        if (region.data.u.normal.guard_before) |before| MMUnreserve(space, before, false, true);
+        if (region.data.u.normal.guard_after) |after| MMUnreserve(space, after, false, true);
+    }
+    else if (region.flags.contains(.guard) and !guard_region)
+    {
+        // log error
+        return;
+    }
+
+    if (region.u.item.u.non_guard.list != null and !guard_region)
+    {
+        region.u.item.u.non_guard.remove_from_list();
+    }
+
+    if (unmap_pages)
+    {
+        _ = MMArchUnmapPages(space, region.descriptor.base_address, region.descriptor.page_count, UnmapPagesFlags.empty(), 0, null);
+    }
+
+    space.reserve_count += region.descriptor.page_count;
+
+    if (space == &_coreMMSpace)
+    {
+        region.u.core.used = false;
+
+        var remove1: i64 = -1;
+        var remove2: i64 = -1;
+
+        for (mmCoreRegions[0..mmCoreRegionCount]) |*r, i|
+        {
+            if (!(remove1 != -1 or remove2 != 1)) break;
+            if (r.u.core.used) continue;
+            if (r == region) continue;
+
+            if (r.descriptor.base_address == region.descriptor.base_address + (region.descriptor.page_count << page_bit_count))
+            {
+                region.descriptor.page_count += r.descriptor.page_count;
+                remove1 = @intCast(i64, i);
+            }
+            else if (region.descriptor.base_address == r.descriptor.base_address + (r.descriptor.page_count << page_bit_count))
+            {
+                region.descriptor.page_count += r.descriptor.page_count;
+                region.descriptor.base_address = r.descriptor.base_address;
+                remove2 = @intCast(i64, i);
+            }
+        }
+
+        if (remove1 != -1)
+        {
+            mmCoreRegionCount -= 1;
+            mmCoreRegions[@intCast(u64, remove1)] = mmCoreRegions[mmCoreRegionCount];
+            if (remove2 == @intCast(i64, mmCoreRegionCount)) remove2 = remove1;
+        }
+
+        if (remove2 != -1)
+        {
+            mmCoreRegionCount -= 1;
+            mmCoreRegions[@intCast(u64, remove2)] = mmCoreRegions[mmCoreRegionCount];
+        }
+    }
+    else
+    {
+        space.used_regions.remove(&region.u.item.base);
+        const address = region.descriptor.base_address;
+
+        if (space.free_region_base.find(address, .largest_below_or_equal)) |before|
+        {
+            if (before.value.?.descriptor.base_address + before.value.?.descriptor.page_count * page_size == region.descriptor.base_address)
+            {
+                region.descriptor.base_address = before.value.?.descriptor.base_address;
+                region.descriptor.page_count += before.value.?.descriptor.page_count;
+                space.free_region_base.remove(before);
+                space.free_region_size.remove(&before.value.?.u.item.u.size);
+                EsHeapFree(@ptrToInt(before.value), @sizeOf(Region), &heapCore);
+            }
+        }
+
+        if (space.free_region_base.find(address, .smallest_above_or_equal)) |after|
+        {
+            if (region.descriptor.base_address + region.descriptor.page_count * page_size == after.value.?.descriptor.base_address)
+            {
+                region.descriptor.page_count += after.value.?.descriptor.page_count;
+                space.free_region_base.remove(after);
+                space.free_region_size.remove(&after.value.?.u.item.u.size);
+                EsHeapFree(@ptrToInt(after.value), @sizeOf(Region), &heapCore);
+            }
+        }
+
+        _ = space.free_region_base.insert(&region.u.item.base, region, region.descriptor.base_address, .panic);
+        _ = space.free_region_size.insert(&region.u.item.u.size, region, region.descriptor.page_count, .allow);
+    }
 }
 
 export fn KernelInitialise() callconv(.C) void
