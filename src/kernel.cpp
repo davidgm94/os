@@ -189,7 +189,7 @@ struct ConstantBuffer {
 #define ES_ERROR_DEVICE_REMOVED			(-75)
 #define ES_ERROR_TOO_MANY_FILES_WITH_NAME	(-76)
 
-void CloseHandleToObject(void *object, KernelObjectType type, uint32_t flags = 0);
+extern "C" void CloseHandleToObject(void *object, KernelObjectType type, uint32_t flags = 0);
 extern "C" void *MMStandardAllocate(MMSpace *space, size_t bytes, uint32_t flags, void *baseAddress = nullptr, bool commitAll = true);
 extern "C" bool MMFree(MMSpace *space, void *address, size_t expectedSize = 0, bool userOnly = false);
 
@@ -6184,96 +6184,6 @@ bool OpenHandleToObject(void *object, KernelObjectType type, uint32_t flags = 0)
 }
 
 extern "C" void MMUnreserve(MMSpace *space, MMRegion *remove, bool unmapPages, bool guardRegion = false);
-
-bool MMFree(MMSpace *space, void *address, size_t expectedSize, bool userOnly) {
-	if (!space) space = kernelMMSpace;
-
-	MMSharedRegion *sharedRegionToFree = nullptr;
-	FSFile *nodeToFree = nullptr;
-	uint64_t fileHandleFlags = 0;
-
-	{
-		KMutexAcquire(&space->reserveMutex);
-		EsDefer(KMutexRelease(&space->reserveMutex));
-
-		MMRegion *region = MMFindRegion(space, (uintptr_t) address);
-
-		if (!region) {
-			return false;
-		}
-
-		if (userOnly && (~region->flags & MM_REGION_USER)) {
-			KernelLog(LOG_ERROR, "Memory", "attempt to free non-user region", 
-					"MMFree - A user process is attempting to free a region %x that is not marked with MM_REGION_USER.\n", region);
-			return false;
-		}
-
-		if (!KWriterLockTake(&region->data.pin, K_LOCK_EXCLUSIVE, true /* poll */)) {
-			KernelLog(LOG_ERROR, "Memory", "attempt to free in use region", 
-					"MMFree - Attempting to free a region %x that is currently in by a system call.\n", region);
-			return false;
-		}
-
-		if (region->baseAddress != (uintptr_t) address && (~region->flags & MM_REGION_PHYSICAL /* physical region bases are not page aligned */)) {
-			KernelLog(LOG_ERROR, "Memory", "incorrect base address", "MMFree - Passed the address %x to free region %x, which has baseAddress of %x.\n",
-					address, region, region->baseAddress);
-			return false;
-		}
-
-		if (expectedSize && (expectedSize + K_PAGE_SIZE - 1) / K_PAGE_SIZE != region->pageCount) {
-			KernelLog(LOG_ERROR, "Memory", "incorrect free size", "MMFree - The region page count is %d, but the expected free size is %d.\n",
-					region->pageCount, (expectedSize + K_PAGE_SIZE - 1) / K_PAGE_SIZE);
-			return false;
-		}
-
-		bool unmapPages = true;
-
-		if (region->flags & MM_REGION_NORMAL) {
-			if (!MMDecommitRange(space, region, 0, region->pageCount)) {
-				KernelPanic("MMFree - Could not decommit entire region %x (should not fail).\n", region);
-			}
-
-			if (region->data.normal.commitPageCount) {
-				KernelPanic("MMFree - After decommiting range covering the entire region (%x), some pages were still commited.\n", region);
-			}
-
-			region->data.normal.commit.ranges.Free();
-			unmapPages = false;
-		} else if (region->flags & MM_REGION_SHARED) {
-			sharedRegionToFree = region->data.shared.region;
-		} else if (region->flags & MM_REGION_FILE) {
-			MMArchUnmapPages(space, region->baseAddress, region->pageCount, MM_UNMAP_PAGES_FREE_COPIED | MM_UNMAP_PAGES_BALANCE_FILE);
-			unmapPages = false;
-
-			FSFile *node = region->data.file.node;
-			EsFileOffset removeStart = RoundDown(region->data.file.offset, (EsFileOffset) K_PAGE_SIZE);
-			EsFileOffset removeEnd = RoundUp(removeStart + (region->pageCount << K_PAGE_BITS) - region->data.file.zeroedBytes, (EsFileOffset) K_PAGE_SIZE);
-			nodeToFree = node;
-			fileHandleFlags = region->data.file.fileHandleFlags;
-
-			KMutexAcquire(&node->cache.cachedSectionsMutex);
-			CCSpaceUncover(&node->cache, removeStart, removeEnd);
-			KMutexRelease(&node->cache.cachedSectionsMutex);
-
-			if (region->flags & MM_REGION_COPY_ON_WRITE) {
-				MMDecommit(region->pageCount << K_PAGE_BITS, false);
-			}
-		} else if (region->flags & MM_REGION_PHYSICAL) {
-		} else if (region->flags & MM_REGION_GUARD) {
-			KernelLog(LOG_ERROR, "Memory", "attempt to free guard region", "MMFree - Attempting to free a guard region!\n");
-			return false;
-		} else {
-			KernelPanic("MMFree - Unsupported region type.\n");
-		}
-
-		MMUnreserve(space, region, unmapPages);
-	}
-
-	if (sharedRegionToFree) CloseHandleToObject(sharedRegionToFree, KERNEL_OBJECT_SHMEM);
-	if (nodeToFree && fileHandleFlags) CloseHandleToObject(nodeToFree, KERNEL_OBJECT_NODE, fileHandleFlags);
-
-	return true;
-}
 
 void ThreadKill(KAsyncTask *task) {
 	Thread *thread = EsContainerOf(Thread, killAsyncTask, task);

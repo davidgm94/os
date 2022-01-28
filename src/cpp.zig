@@ -3610,6 +3610,20 @@ pub fn Array(comptime T: type, comptime heap_type: HeapType) type
         {
             return self.ptr.?[0..self.length()];
         }
+
+        fn free(self: *@This()) void
+        {
+            _ArrayFree(@ptrCast(*?*u64, &self.ptr), @sizeOf(T), get_heap());
+        }
+
+        fn get_heap() *Heap
+        {
+            return switch (heap_type)
+            {
+                .core => &heapCore,
+                .fixed => &heapFixed,
+            };
+        }
     };
 }
 
@@ -4542,7 +4556,6 @@ extern fn MMCommitRange(space: *AddressSpace, region: *Region, page_offset: u64,
 extern fn OpenHandleToObject(object: u64, type: u32, flags: u32) callconv(.C) bool;
 extern fn MMFindAndPinRegion(address_space: *AddressSpace, address: u64, size: u64) callconv(.C) ?*Region;
 extern fn ArchInitialiseThread(kernel_stack: u64, kernel_stack_size: u64, thread: *Thread, start_address: u64, argument1: u64, argument2: u64, userland: bool, user_stack: u64, user_stack_size: u64) callconv(.C) *InterruptContext;
-extern fn MMFree(space: *AddressSpace, address: u64, expected_size: u64, user_only: bool) callconv(.C) bool;
 
 export fn ThreadSpawn(name: [*:0]const u8, start_address: u64, argument1: u64, flags: Thread.Flags, maybe_process: ?*Process, argument2: u64) callconv(.C) ?*Thread
 {
@@ -5757,6 +5770,63 @@ export fn MMUnreserve(space: *AddressSpace, region: *Region, unmap_pages: bool, 
         _ = space.free_region_size.insert(&region.u.item.u.size, region, region.descriptor.page_count, .allow);
     }
 }
+
+export fn MMFree(space: *AddressSpace, address: u64, expected_size: u64, user_only: bool) callconv(.C) bool
+{
+    {
+        _ = space.reserve_mutex.acquire();
+        defer space.reserve_mutex.release();
+
+        const region = MMFindRegion(space, address) orelse return false;
+
+        if (user_only and !region.flags.contains(.user)) return false;
+        if (!region.data.pin.take_extended(WriterLock.exclusive, true)) return false;
+        if (region.descriptor.base_address != address and !region.flags.contains(.physical)) return false;
+        if (expected_size != 0 and (expected_size + page_size - 1) / page_size != region.descriptor.page_count) return false;
+
+        var unmap_pages = true;
+
+        if (region.flags.contains(.normal))
+        {
+            if (!MMDecommitRange(space, region, 0, region.descriptor.page_count)) KernelPanic("Could not decommit the entere region");
+            if (region.data.u.normal.commit_page_count != 0) KernelPanic("After decommiting range covering the entere region, some pages were still commited");
+            region.data.u.normal.commit.ranges.free();
+            unmap_pages = false;
+        }
+        else if (region.flags.contains(.shared))
+        {
+            CloseHandleToObject(@ptrToInt(region.data.u.shared.region), .shared_memory, 0);
+        }
+        else if (region.flags.contains(.file))
+        {
+            TODO();
+        }
+        else if (region.flags.contains(.physical)) { } // do nothing
+        else if (region.flags.contains(.guard)) return false
+        else KernelPanic("unsupported region type");
+        return true;
+    }
+}
+
+extern fn CloseHandleToObject(object: u64, object_type: KernelObjectType, flags: u32) callconv(.C) void;
+
+const KernelObjectType = enum(u32)
+{
+    could_not_resolve = 0,
+    none = 0x80000000,
+    process = 0x1,
+    thread = 0x2,
+    window = 0x4,
+    shared_memory = 0x8,
+    node = 0x10,
+    event = 0x20,
+    constant_buffer = 0x40,
+    posix_fd = 0x100,
+    pipe = 0x200,
+    embedded_window = 0x400,
+    connection = 0x4000,
+    device = 0x8000,
+};
 
 export fn KernelInitialise() callconv(.C) void
 {
