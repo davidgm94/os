@@ -6188,43 +6188,8 @@ extern "C" void ThreadKill(KAsyncTask *task);
 extern "C" void KRegisterAsyncTask(KAsyncTask *task, KAsyncTaskCallback callback);
 extern "C" void thread_exit(Thread *thread);
 extern "C" void KThreadTerminate();
-
-extern "C" void MMSpaceOpenReference(MMSpace *space) {
-	if (space == kernelMMSpace) {
-		return;
-	}
-
-	if (space->referenceCount < 1) {
-		KernelPanic("MMSpaceOpenReference - Space %x has invalid reference count.\n", space);
-	}
-
-	if (space->referenceCount >= K_MAX_PROCESSORS + 1) {
-		KernelPanic("MMSpaceOpenReference - Space %x has too many references (expected a maximum of %d).\n", K_MAX_PROCESSORS + 1);
-	}
-
-	__sync_fetch_and_add(&space->referenceCount, 1);
-}
-
-void MMSpaceDestroy(MMSpace *space) {
-	LinkedItem<MMRegion> *item = space->usedRegionsNonGuard.firstItem;
-
-	while (item) {
-		MMRegion *region = item->thisItem;
-		item = item->nextItem;
-		MMFree(space, (void *) region->baseAddress);
-	}
-
-	while (true) {
-		AVLItem<MMRegion> *item = TreeFind(&space->freeRegionsBase, MakeShortKey(0), TREE_SEARCH_SMALLEST_ABOVE_OR_EQUAL);
-		if (!item) break;
-		TreeRemove(&space->freeRegionsBase, &item->thisItem->itemBase);
-		TreeRemove(&space->freeRegionsSize, &item->thisItem->itemSize);
-		EsHeapFree(item->thisItem, sizeof(MMRegion), K_CORE);
-	}
-
-	MMArchFreeVAS(space);
-}
-
+extern "C" void MMSpaceOpenReference(MMSpace *space);
+extern "C" void MMSpaceDestroy(MMSpace *space);
 void DesktopSendMessage(_EsMessageWithObject *message) {
     (void)message;
     return;

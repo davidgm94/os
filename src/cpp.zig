@@ -10,6 +10,7 @@ fn zeroes(comptime T: type) T
 }
 
 pub const max_wait_count = 8;
+pub const max_processors = 256;
 pub const wait_no_timeout = std.math.maxInt(u64);
 pub const page_bit_count = 12;
 pub const page_size = 0x1000;
@@ -5838,7 +5839,6 @@ export fn ThreadSetTemporaryAddressSpace(space: ?*AddressSpace) callconv(.C) voi
     MMSpaceCloseReference(old_space);
 }
 
-extern fn MMSpaceOpenReference(space: *AddressSpace) callconv(.C) void;
 extern fn MMSpaceCloseReference(space: *volatile AddressSpace) callconv(.C) void;
 extern fn ProcessorSetAddressSpace(address_space: *ArchAddressSpace) callconv(.C) void;
 extern fn ProcessKill(process: *Process) callconv(.C) void;
@@ -5920,6 +5920,38 @@ export fn thread_exit(thread: *Thread) callconv(.C) void
     scheduler.dispatch_spinlock.release();
     if (yield) ProcessorFakeTimerInterrupt();
 }
+
+export fn MMSpaceOpenReference(space: *AddressSpace) callconv(.C) void
+{
+    if (space != &_kernelMMSpace)
+    {
+        if (space.reference_count.read_volatile() < 1) KernelPanic("space has invalid reference count");
+        if (space.reference_count.read_volatile() >= max_processors + 1) KernelPanic("space has too many references");
+        _ = space.reference_count.atomic_fetch_add(1);
+    }
+}
+
+export fn MMSpaceDestroy(space: *AddressSpace) callconv(.C) void
+{
+    var maybe_item = space.used_regions_non_guard.first;
+    while (maybe_item) |item|
+    {
+        const region = item.value.?;
+        maybe_item = item.next;
+        _ = MMFree(space, region.descriptor.base_address, 0, false);
+    }
+
+    while (space.free_region_base.find(0, .smallest_above_or_equal)) |item|
+    {
+        space.free_region_base.remove(&item.value.?.u.item.base);
+        space.free_region_size.remove(&item.value.?.u.item.u.size);
+        EsHeapFree(@ptrToInt(item.value), @sizeOf(Region), &heapCore);
+    }
+
+    MMArchFreeVAS(space);
+}
+
+extern fn MMArchFreeVAS(space: *AddressSpace) callconv(.C) void;
 
 export fn KThreadTerminate() callconv(.C) void
 {
