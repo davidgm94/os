@@ -6213,14 +6213,15 @@ extern "C" void thread_exit(Thread *thread);
 extern "C" void KThreadTerminate();
 extern "C" void MMSpaceOpenReference(MMSpace *space);
 extern "C" void MMSpaceDestroy(MMSpace *space);
-void DesktopSendMessage(_EsMessageWithObject *message) {
+
+void DesktopSendMessage(_EsMessageWithObject *message)
+{
     (void)message;
     return;
 }
 
-MMRegion *MMReserve(MMSpace *space, size_t bytes, unsigned flags, uintptr_t forcedAddress = 0, bool generateGuardPages = false) {
+MMRegion *MMReserve(MMSpace *space, size_t bytes, unsigned flags, uintptr_t forcedAddress = 0) {
 	// TODO Handling EsHeapAllocate failures.
-    (void)generateGuardPages;
 	
 	MMRegion *outputRegion = nullptr;
 	size_t pagesNeeded = ((bytes + K_PAGE_SIZE - 1) & ~(K_PAGE_SIZE - 1)) / K_PAGE_SIZE;
@@ -6298,11 +6299,7 @@ MMRegion *MMReserve(MMSpace *space, size_t bytes, unsigned flags, uintptr_t forc
 		EsMemoryZero(&region->data, sizeof(region->data));
 		outputRegion = region;
 	} else {
-#ifdef GUARD_PAGES
-		size_t guardPagesNeeded = generateGuardPages ? 2 : 0;
-#else
 		size_t guardPagesNeeded = 0;
-#endif
 
 		AVLItem<MMRegion> *item = TreeFind(&space->freeRegionsSize, MakeShortKey(pagesNeeded + guardPagesNeeded), TREE_SEARCH_SMALLEST_ABOVE_OR_EQUAL);
 
@@ -6486,7 +6483,7 @@ void *MMStandardAllocate(MMSpace *space, size_t bytes, uint32_t flags, void *bas
 	KMutexAcquire(&space->reserveMutex);
 	EsDefer(KMutexRelease(&space->reserveMutex));
 
-	MMRegion *region = MMReserve(space, bytes, flags | MM_REGION_NORMAL, (uintptr_t) baseAddress, true);
+	MMRegion *region = MMReserve(space, bytes, flags | MM_REGION_NORMAL, (uintptr_t) baseAddress);
 	if (!region) return nullptr;
 
 	if (commitAll) {
