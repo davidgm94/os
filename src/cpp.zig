@@ -5828,6 +5828,47 @@ const KernelObjectType = enum(u32)
     device = 0x8000,
 };
 
+export fn ThreadSetTemporaryAddressSpace(space: ?*AddressSpace) callconv(.C) void
+{
+    scheduler.dispatch_spinlock.acquire();
+    const thread = GetCurrentThread().?;
+    const old_space = if (thread.temporary_address_space) |tas| tas else &_kernelMMSpace;
+    thread.temporary_address_space = space;
+    const new_space = if (space) |sp| sp else &_kernelMMSpace;
+    MMSpaceOpenReference(new_space);
+    ProcessorSetAddressSpace(&new_space.arch);
+    scheduler.dispatch_spinlock.release();
+    MMSpaceCloseReference(old_space);
+}
+
+extern fn MMSpaceOpenReference(space: *AddressSpace) callconv(.C) void;
+extern fn MMSpaceCloseReference(space: *volatile AddressSpace) callconv(.C) void;
+extern fn ProcessorSetAddressSpace(address_space: *ArchAddressSpace) callconv(.C) void;
+extern fn ProcessKill(process: *Process) callconv(.C) void;
+
+export fn ThreadKill(task: *AsyncTask) callconv(.C) void
+{
+    const thread = @fieldParentPtr(Thread, "kill_async_task", task);
+    ThreadSetTemporaryAddressSpace(thread.process.?.address_space);
+
+    _ = scheduler.all_threads_mutex.acquire();
+    scheduler.all_threads.remove(&thread.all_item);
+    scheduler.all_threads_mutex.release();
+
+    _ = thread.process.?.threads_mutex.acquire();
+    thread.process.?.threads.remove(&thread.process_item);
+    const last_thread = thread.process.?.threads.count == 0;
+    thread.process.?.threads_mutex.release();
+
+    if (last_thread) ProcessKill(thread.process.?);
+
+    _ = MMFree(&_kernelMMSpace,thread.kernel_stack_base, 0, false);
+    if (thread.user_stack_base != 0) _ = MMFree(thread.process.?.address_space, thread.user_stack_base, 0, false);
+    _ = thread.killed_event.set(false);
+    CloseHandleToObject(@ptrToInt(thread.process), KernelObjectType.process, 0);
+    CloseHandleToObject(@ptrToInt(thread), KernelObjectType.thread, 0);
+}
+
 export fn KernelInitialise() callconv(.C) void
 {
     kernelProcess = &_kernelProcess;

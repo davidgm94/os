@@ -6185,35 +6185,7 @@ bool OpenHandleToObject(void *object, KernelObjectType type, uint32_t flags = 0)
 
 extern "C" void MMUnreserve(MMSpace *space, MMRegion *remove, bool unmapPages, bool guardRegion = false);
 
-void ThreadKill(KAsyncTask *task) {
-	Thread *thread = EsContainerOf(Thread, killAsyncTask, task);
-	ThreadSetTemporaryAddressSpace(thread->process->vmm);
-
-	KMutexAcquire(&scheduler.allThreadsMutex);
-	scheduler.allThreads.Remove(&thread->allItem);
-	KMutexRelease(&scheduler.allThreadsMutex);
-
-	KMutexAcquire(&thread->process->threadsMutex);
-	thread->process->threads.Remove(&thread->processItem);
-	bool lastThread = thread->process->threads.count == 0;
-	KMutexRelease(&thread->process->threadsMutex);
-
-	KernelLog(LOG_INFO, "Scheduler", "killing thread", 
-			"Killing thread (ID %d, %d remain in process %d) %x...\n", thread->id, thread->process->threads.count, thread->process->id, thread);
-
-	if (lastThread) {
-		ProcessKill(thread->process);
-	}
-
-	MMFree(kernelMMSpace, (void *) thread->kernelStackBase);
-	if (thread->userStackBase) MMFree(thread->process->vmm, (void *) thread->userStackBase);
-
-	KEventSet(&thread->killedEvent);
-
-	// Close the handle that this thread owns of its owner process, and the handle it owns of itself.
-	CloseHandleToObject(thread->process, KERNEL_OBJECT_PROCESS);
-	CloseHandleToObject(thread, KERNEL_OBJECT_THREAD);
-}
+extern "C" void ThreadKill(KAsyncTask *task);
 
 void KRegisterAsyncTask(KAsyncTask *task, KAsyncTaskCallback callback) {
 	KSpinlockAcquire(&scheduler.asyncTaskSpinlock);
@@ -6315,7 +6287,7 @@ void KThreadTerminate() {
 	thread_exit(GetCurrentThread());
 }
 
-void MMSpaceOpenReference(MMSpace *space) {
+extern "C" void MMSpaceOpenReference(MMSpace *space) {
 	if (space == kernelMMSpace) {
 		return;
 	}
@@ -6329,18 +6301,6 @@ void MMSpaceOpenReference(MMSpace *space) {
 	}
 
 	__sync_fetch_and_add(&space->referenceCount, 1);
-}
-
-void ThreadSetTemporaryAddressSpace(MMSpace *space) {
-	KSpinlockAcquire(&scheduler.dispatchSpinlock);
-	Thread *thread = GetCurrentThread();
-	MMSpace *oldSpace = thread->temporaryAddressSpace ?: kernelMMSpace;
-	thread->temporaryAddressSpace = space;
-	MMSpace *newSpace = space ?: kernelMMSpace;
-	MMSpaceOpenReference(newSpace);
-	ProcessorSetAddressSpace(&newSpace->data);
-	KSpinlockRelease(&scheduler.dispatchSpinlock);
-	MMSpaceCloseReference(oldSpace);
 }
 
 void MMSpaceDestroy(MMSpace *space) {
