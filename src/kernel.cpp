@@ -3384,10 +3384,10 @@ struct HandleTable {
     // Be careful putting handles in the handle table!
     // The process will be able to immediately close it.
     // If this fails, the handle is closed and ES_INVALID_HANDLE is returned.
-    EsHandle OpenHandle(void *_object, uint32_t _flags, KernelObjectType _type, EsHandle at = ES_INVALID_HANDLE);
+    //EsHandle OpenHandle(void *_object, uint32_t _flags, KernelObjectType _type, EsHandle at = ES_INVALID_HANDLE);
 
-    bool CloseHandle(EsHandle handle);
-    void ModifyFlags(EsHandle handle, uint32_t newFlags);
+    //bool CloseHandle(EsHandle handle);
+    //void ModifyFlags(EsHandle handle, uint32_t newFlags);
 
     // Resolve the handle if it is valid.
     // The initial value of type is used as a mask of expected object types for the handle.
@@ -3419,6 +3419,29 @@ struct HandleTable {
         }
     }
 };
+
+//extern "C" EsHandle HandleTableOpenHandle(HandleTable* self, void* object, uint32_t flags, KernelObjectType type, EsHandle at)
+//{
+    //return self->OpenHandle(object, flags, type, at);
+//}
+//extern "C" EsHandle HandleTableCloseHandle(HandleTable* self, EsHandle handle)
+//{
+    //return self->CloseHandle(handle);
+//}
+//extern "C" void HandleTableModifyFlags(HandleTable self, EsHandle handle, uint32_t new_flags)
+//{
+    //return self.ModifyFlags(handle, new_flags);
+//}
+
+extern "C" uint8_t HandleTableResolveHandle(HandleTable* self, Handle* out_handle, EsHandle in_handle, KernelObjectType type_mask)
+{
+    return self->ResolveHandle(out_handle, in_handle, type_mask);
+}
+
+extern "C" void HandleTableDestroy(HandleTable* self)
+{
+    self->Destroy();
+}
 
 struct Process {
 	MMSpace *vmm;
@@ -6193,74 +6216,6 @@ extern "C" void MMSpaceDestroy(MMSpace *space);
 void DesktopSendMessage(_EsMessageWithObject *message) {
     (void)message;
     return;
-}
-
-void ProcessKill(Process *process) {
-	// This function should only be called by ThreadKill, when the last thread in the process exits.
-	// There should be at least one remaining handle to the process here, owned by that thread.
-	// It will be closed at the end of the ThreadKill function.
-
-	if (!process->handles) {
-		KernelPanic("ProcessKill - Process %x is on the allProcesses list but there are no handles to it.\n", process);
-	}
-
-	KernelLog(LOG_INFO, "Scheduler", "killing process", "Killing process (%d) %x...\n", process->id, process);
-
-	__sync_fetch_and_sub(&scheduler.activeProcessCount, 1);
-
-	// Remove the process from the list of processes.
-	KMutexAcquire(&scheduler.allProcessesMutex);
-	scheduler.allProcesses.Remove(&process->allItem);
-
-	if (pmm.nextProcessToBalance == process) {
-		// If the balance thread got interrupted while balancing this process,
-		// start at the beginning of the next process.
-		pmm.nextProcessToBalance = process->allItem.nextItem ? process->allItem.nextItem->thisItem : nullptr;
-		pmm.nextRegionToBalance = nullptr;
-		pmm.balanceResumePosition = 0;
-	}
-
-	KMutexRelease(&scheduler.allProcessesMutex);
-
-	KSpinlockAcquire(&scheduler.dispatchSpinlock);
-	process->allThreadsTerminated = true;
-	bool setProcessKilledEvent = true;
-
-#ifdef ENABLE_POSIX_SUBSYSTEM
-	if (process->posixForking) {
-		// If the process is from an incomplete vfork(),
-		// then the parent process gets to set the killed event
-		// and the exit status.
-		setProcessKilledEvent = false;
-	}
-#endif
-
-	KSpinlockRelease(&scheduler.dispatchSpinlock);
-
-	if (setProcessKilledEvent) {
-		// We can now also set the killed event on the process.
-		KEventSet(&process->killedEvent, true);
-	}
-
-	// There are no threads left in this process.
-	// We should destroy the handle table at this point.
-	// Otherwise, the process might never be freed
-	// because of a cyclic-dependency.
-	process->handleTable.Destroy();
-
-	// Destroy the virtual memory space.
-	// Don't actually deallocate it yet though; that is done on an async task queued by ProcessRemove.
-	// This must be destroyed after the handle table!
-	MMSpaceDestroy(process->vmm); 
-
-	// Tell Desktop the process has terminated.
-	if (!scheduler.shutdown) {
-		_EsMessageWithObject m;
-		EsMemoryZero(&m, sizeof(m));
-		m.message.type = ES_MSG_PROCESS_TERMINATED;
-		m.message.crash.pid = process->id;
-		DesktopSendMessage(&m);
-	}
 }
 
 MMRegion *MMReserve(MMSpace *space, size_t bytes, unsigned flags, uintptr_t forcedAddress = 0, bool generateGuardPages = false) {

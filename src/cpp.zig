@@ -5841,7 +5841,6 @@ export fn ThreadSetTemporaryAddressSpace(space: ?*AddressSpace) callconv(.C) voi
 
 extern fn MMSpaceCloseReference(space: *volatile AddressSpace) callconv(.C) void;
 extern fn ProcessorSetAddressSpace(address_space: *ArchAddressSpace) callconv(.C) void;
-extern fn ProcessKill(process: *Process) callconv(.C) void;
 
 export fn ThreadKill(task: *AsyncTask) callconv(.C) void
 {
@@ -5956,6 +5955,37 @@ extern fn MMArchFreeVAS(space: *AddressSpace) callconv(.C) void;
 export fn KThreadTerminate() callconv(.C) void
 {
     thread_exit(GetCurrentThread().?);
+}
+
+extern fn HandleTableDestroy(handle_table: *HandleTable) callconv(.C) void;
+export fn ProcessKill(process: *Process) callconv(.C) void
+{
+    if (process.handle_count.read_volatile() == 0) KernelPanic("process is on the all process list but there are no handles in it");
+
+    _ = scheduler.active_process_count.atomic_fetch_add(1);
+
+    _ = scheduler.all_processes_mutex.acquire();
+    scheduler.all_processes.remove(&process.all_item);
+    
+    if (pmm.next_process_to_balance == process)
+    {
+        pmm.next_process_to_balance = if (process.all_item.next) |next| next.value else null;
+        pmm.next_region_to_balance = null;
+        pmm.balance_resume_position = 0;
+    }
+
+    scheduler.all_processes_mutex.release();
+
+    scheduler.dispatch_spinlock.acquire();
+    process.all_threads_terminated = true;
+    scheduler.dispatch_spinlock.release();
+    _ = process.killed_event.set(true);
+    HandleTableDestroy(&process.handle_table);
+    MMSpaceDestroy(process.address_space);
+    if (!scheduler.shutdown.read_volatile())
+    {
+        // @TODO @Desktop send message to the desktop
+    }
 }
 
 export fn KernelInitialise() callconv(.C) void
