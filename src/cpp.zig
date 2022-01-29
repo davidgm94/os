@@ -69,7 +69,7 @@ export var desktopProcess: *Process = undefined;
 extern fn ProcessorAreInterruptsEnabled() callconv(.C) bool;
 extern fn ProcessorEnableInterrupts() callconv(.C) void;
 extern fn ProcessorDisableInterrupts() callconv(.C) void;
-extern fn ProcessorFakeTimerInterrupt() callconv(.C) void;
+extern fn ProcessorFakeTimerInterrupt() callconv(.C) noreturn;
 extern fn GetLocalStorage() callconv(.C) ?*LocalStorage;
 extern fn GetCurrentThread() callconv(.C) ?*Thread;
 
@@ -3482,6 +3482,11 @@ pub const AsyncTask = extern struct
     item: SimpleList,
     callback: ?Callback,
 
+    comptime
+    {
+        assert(@sizeOf(AsyncTask) == @sizeOf(SimpleList) + 8);
+    }
+
     pub const Callback = fn (*@This()) callconv(.C) void;
 
     pub fn register(self: *@This(), callback: Callback) void
@@ -4534,14 +4539,6 @@ extern fn start_desktop_process() callconv(.C) void;
 
 export var shutdownEvent: Event = undefined;
 
-export fn KernelMain(_: u64) callconv(.C) void
-{
-    desktopProcess = ProcessSpawn(.desktop).?;
-    drivers_init();
-
-    start_desktop_process();
-    _ = shutdownEvent.wait();
-}
 
 extern fn MMInitialise() callconv(.C) void;
 extern fn ArchInitialise() callconv(.C) void;
@@ -5869,6 +5866,66 @@ export fn ThreadKill(task: *AsyncTask) callconv(.C) void
     CloseHandleToObject(@ptrToInt(thread), KernelObjectType.thread, 0);
 }
 
+export fn KRegisterAsyncTask(task: *AsyncTask, callback: AsyncTask.Callback) callconv(.C) void
+{
+    scheduler.async_task_spinlock.acquire();
+
+    if (task.callback == null)
+    {
+        task.callback = callback;
+        GetLocalStorage().?.async_task_list.insert(&task.item, false);
+    }
+
+    scheduler.async_task_spinlock.release();
+}
+
+export fn thread_exit(thread: *Thread) callconv(.C) void
+{
+    scheduler.dispatch_spinlock.acquire();
+
+    var yield = false;
+    const was_terminating = thread.terminating.read_volatile();
+    if (!was_terminating)
+    {
+        thread.terminating.write_volatile(true);
+        thread.paused.write_volatile(false);
+    }
+
+    if (thread == GetCurrentThread())
+    {
+        thread.terminatable_state.write_volatile(.terminatable);
+        yield = true;
+    }
+    else if (!was_terminating and !thread.executing.read_volatile())
+    {
+        switch (thread.terminatable_state.read_volatile())
+        {
+            .terminatable =>
+            {
+                if (thread.state.read_volatile() != .active) KernelPanic("terminatable thread non-active");
+
+                thread.item.remove_from_list();
+                KRegisterAsyncTask(&thread.kill_async_task, ThreadKill);
+                yield = true;
+            },
+            .user_block_request =>
+            {
+                const thread_state = thread.state.read_volatile();
+                if (thread_state == .waiting_mutex or thread_state == .waiting_event) SchedulerUnblockThread(thread, null);
+            },
+            else => {}
+        }
+    }
+
+    scheduler.dispatch_spinlock.release();
+    if (yield) ProcessorFakeTimerInterrupt();
+}
+
+export fn KThreadTerminate() callconv(.C) void
+{
+    thread_exit(GetCurrentThread().?);
+}
+
 export fn KernelInitialise() callconv(.C) void
 {
     kernelProcess = &_kernelProcess;
@@ -5881,6 +5938,14 @@ export fn KernelInitialise() callconv(.C) void
     scheduler.started.write_volatile(true);
 }
 
+export fn KernelMain(_: u64) callconv(.C) void
+{
+    desktopProcess = ProcessSpawn(.desktop).?;
+    drivers_init();
+
+    start_desktop_process();
+    _ = shutdownEvent.wait();
+}
 export fn get_size_zig() callconv(.C) u64
 {
     return @sizeOf(Region);
