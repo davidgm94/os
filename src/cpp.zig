@@ -7433,6 +7433,15 @@ export fn ProcessSpawn(process_type: Process.Type) callconv(.C) ?*Process
     return process;
 }
 
+export fn ProcessorSendYieldIPI(thread: *Thread) callconv(.C) void
+{
+    thread.received_yield_IPI.write_volatile(false);
+    ipiLock.acquire();
+    _ = ProcessorSendIPI(yield_ipi, false, -1);
+    ipiLock.release();
+    while (!thread.received_yield_IPI.read_volatile()) {}
+}
+
 export fn KernelInitialise() callconv(.C) void
 {
     kernelProcess = &_kernelProcess;

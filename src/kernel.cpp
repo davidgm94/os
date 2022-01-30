@@ -7372,14 +7372,6 @@ void Scheduler::Yield(InterruptContext *context) {
 	KernelPanic("Scheduler::Yield - DoContextSwitch unexpectedly returned.\n");
 }
 
-void ProcessorSendYieldIPI(Thread *thread) {
-	thread->receivedYieldIPI = false;
-	KSpinlockAcquire(&ipiLock);
-	ProcessorSendIPI(YIELD_IPI, false);
-	KSpinlockRelease(&ipiLock);
-	while (!thread->receivedYieldIPI); // Spin until the thread gets the IPI.
-}
-
 void ThreadPause(Thread *thread, bool resume) {
 	KSpinlockAcquire(&scheduler.dispatchSpinlock);
 
