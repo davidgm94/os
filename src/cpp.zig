@@ -4758,6 +4758,8 @@ const ObjectCache = extern struct
     trim_lock: WriterLock,
     item: LinkedList(ObjectCache).Item,
     average_object_bytes: u64,
+
+    const trim_group_count = 1024;
 };
 
 pub const Physical = extern struct
@@ -6357,6 +6359,63 @@ export fn MMZeroPageThread() callconv(.C) void
             }
 
             pmm.pageframe_mutex.release();
+        }
+    }
+}
+
+export fn MMObjectCacheTrimThread() callconv(.C) void
+{
+    var cache: ?*ObjectCache = null;
+
+    while (true)
+    {
+        while (!pmm.should_trim_object_cache())
+        {
+            pmm.trim_object_cache_event.reset();
+            _ = pmm.trim_object_cache_event.wait();
+        }
+
+        _ = pmm.object_cache_list_mutex.acquire();
+
+        var previous_cache = cache;
+        cache = null;
+
+        var maybe_item = pmm.object_cache_list.first;
+
+        while (maybe_item) |item|
+        {
+            if (item.value == previous_cache)
+            {
+                if (item.next) |next|
+                {
+                    cache = next.value;
+                    break;
+                }
+            }
+
+            maybe_item = item.next;
+        }
+
+        if (cache == null)
+        {
+            if (pmm.object_cache_list.first) |first| cache = first.value;
+        }
+        if (cache) |cache_unwrapped| 
+        {
+            _ = cache_unwrapped.trim_lock.take(WriterLock.shared);
+            pmm.object_cache_list_mutex.release();
+
+            var i: u64 = 0;
+            while (i < ObjectCache.trim_group_count) : (i += 1)
+            {
+                if (cache_unwrapped.trim(cache_unwrapped)) break;
+            }
+
+            cache_unwrapped.trim_lock.return_lock(WriterLock.shared);
+        }
+        else
+        {
+            pmm.object_cache_list_mutex.release();
         }
     }
 }

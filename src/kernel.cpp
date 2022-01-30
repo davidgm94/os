@@ -6500,59 +6500,7 @@ extern "C" void *MMMapPhysical(MMSpace *space, uintptr_t offset, size_t bytes, u
 extern "C" void MMPhysicalInsertZeroedPage(uintptr_t page);
 extern "C" void MMZeroPageThread();
 
-void MMObjectCacheTrimThread() {
-	MMObjectCache *cache = nullptr;
-
-	while (true) {
-		while (!MM_OBJECT_CACHE_SHOULD_TRIM()) {
-			KEventReset(&pmm.trimObjectCaches);
-			KEventWait(&pmm.trimObjectCaches);
-		}
-
-		KMutexAcquire(&pmm.objectCacheListMutex);
-
-		// TODO Is there a faster way to find the next cache?
-		// This needs to work with multiple producers and consumers.
-		// And I don't want to put the caches in an array, because then registering a cache could fail.
-
-		MMObjectCache *previousCache = cache;
-		cache = nullptr;
-
-		LinkedItem<MMObjectCache> *item = pmm.objectCacheList.firstItem;
-
-		while (item) {
-			if (item->thisItem == previousCache && item->nextItem) {
-				cache = item->nextItem->thisItem;
-				break;
-			}
-
-			item = item->nextItem;
-		}
-
-		if (!cache && pmm.objectCacheList.firstItem) {
-			cache = pmm.objectCacheList.firstItem->thisItem;
-		}
-
-		if (cache) {
-			KWriterLockTake(&cache->trimLock, K_LOCK_SHARED);
-		}
-		
-		KMutexRelease(&pmm.objectCacheListMutex);
-
-		if (!cache) {
-			continue;
-		}
-
-		for (uintptr_t i = 0; i < MM_OBJECT_CACHE_TRIM_GROUP_COUNT; i++) {
-			if (!cache->trim(cache)) {
-				break;
-			}
-		}
-
-		KWriterLockReturn(&cache->trimLock, K_LOCK_SHARED);
-	}
-}
-
+extern "C" void MMObjectCacheTrimThread();
 void MMBalanceThread() {
 	size_t targetAvailablePages = 0;
 
