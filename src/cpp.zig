@@ -4549,7 +4549,6 @@ export fn KThreadCreate(name: [*:0]const u8, entry: fn (u64) callconv(.C) void, 
     return ThreadSpawn(name, @ptrToInt(entry), argument, Thread.Flags.empty(), null, 0) != null;
 }
 
-extern fn MMStandardAllocate(space: *AddressSpace, bytes: u64, flags: Region.Flags, base_address: u64, commit_all: bool) callconv(.C) u64;
 extern fn OpenHandleToObject(object: u64, type: u32, flags: u32) callconv(.C) bool;
 extern fn ArchInitialiseThread(kernel_stack: u64, kernel_stack_size: u64, thread: *Thread, start_address: u64, argument1: u64, argument2: u64, userland: bool, user_stack: u64, user_stack_size: u64) callconv(.C) *InterruptContext;
 
@@ -6050,6 +6049,37 @@ export fn MMCommitRange(space: *AddressSpace, region: *Region, page_offset: u64,
     }
 
     return true;
+}
+
+extern fn MMReserve(space: *AddressSpace, byte_count: u64, flags: Region.Flags, forced_address: u64) callconv(.C) ?*Region;
+
+export fn MMStandardAllocate(space: *AddressSpace, byte_count: u64, flags: Region.Flags, base_address: u64, commit_all: bool) callconv(.C) u64
+{
+    _ = space.reserve_mutex.acquire();
+    defer space.reserve_mutex.release();
+
+    const region = MMReserve(space, byte_count, flags.or_flag(.normal), base_address) orelse return 0;
+
+    if (commit_all)
+    {
+        if (!MMCommitRange(space, region, 0, region.descriptor.page_count))
+        {
+            MMUnreserve(space, region, false, false);
+            return 0;
+        }
+    }
+
+    return region.descriptor.base_address;
+}
+
+export fn MMPhysicalInsertFreePagesStart() callconv(.C) void
+{
+}
+
+export fn MMPhysicalInsertFreePagesEnd() callconv(.C) void
+{
+    if (pmm.free_page_count > Physical.Allocator.zero_page_threshold) _ = pmm.zero_page_event.set(true);
+    MMUpdateAvailablePageCount(true);
 }
 
 export fn KernelInitialise() callconv(.C) void

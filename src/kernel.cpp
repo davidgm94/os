@@ -6220,7 +6220,7 @@ void DesktopSendMessage(_EsMessageWithObject *message)
     return;
 }
 
-MMRegion *MMReserve(MMSpace *space, size_t bytes, unsigned flags, uintptr_t forcedAddress = 0) {
+extern "C" MMRegion *MMReserve(MMSpace *space, size_t bytes, unsigned flags, uintptr_t forcedAddress = 0) {
 	// TODO Handling EsHeapAllocate failures.
 	
 	MMRegion *outputRegion = nullptr;
@@ -6388,35 +6388,8 @@ MMRegion *MMReserve(MMSpace *space, size_t bytes, unsigned flags, uintptr_t forc
 	return outputRegion;
 }
 
-void *MMStandardAllocate(MMSpace *space, size_t bytes, uint32_t flags, void *baseAddress, bool commitAll)
-{
-	if (!space) space = kernelMMSpace;
-
-	KMutexAcquire(&space->reserveMutex);
-	EsDefer(KMutexRelease(&space->reserveMutex));
-
-	MMRegion *region = MMReserve(space, bytes, flags | MM_REGION_NORMAL, (uintptr_t) baseAddress);
-	if (!region) return nullptr;
-
-	if (commitAll) {
-		if (!MMCommitRange(space, region, 0, region->pageCount)) {
-			MMUnreserve(space, region, false /* No pages have been mapped. */);
-			return nullptr;
-		}
-	}
-
-	return (void *) region->baseAddress;
-}
-
-void MMPhysicalInsertFreePagesStart() {}
-
-void MMPhysicalInsertFreePagesEnd() {
-	if (pmm.countFreePages > MM_ZERO_PAGE_THRESHOLD) {
-		KEventSet(&pmm.zeroPageEvent, true);
-	}
-
-	MMUpdateAvailablePageCount(true);
-}
+extern "C" void MMPhysicalInsertFreePagesStart();
+extern "C" void MMPhysicalInsertFreePagesEnd();
 
 #define CC_SECTION_BYTES                          (ClampIntptr(0, 1024L * 1024 * 1024, pmm.commitFixedLimit * K_PAGE_SIZE / 4))
 
