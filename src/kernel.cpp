@@ -348,7 +348,6 @@ extern "C"
     bool MMArchInitialiseUserSpace(MMSpace *space, struct MMRegion *firstRegion);
     void MMArchInitialise();
     void MMArchFreeVAS(MMSpace *space);
-    void MMArchFinalizeVAS(MMSpace *space);
     uintptr_t MMArchEarlyAllocatePage();
     uint64_t MMArchPopulatePageFrameDatabase();
     uintptr_t MMArchGetPhysicalMemoryHighest();
@@ -6502,19 +6501,7 @@ extern "C" void MMZeroPageThread();
 extern "C" void MMObjectCacheTrimThread();
 extern "C" void MMBalanceThread();
 extern "C" void *MMMapShared(MMSpace *space, MMSharedRegion *sharedRegion, uintptr_t offset, size_t bytes, uint32_t additionalFlags = ES_FLAGS_DEFAULT, void *baseAddress = nullptr);
-
-bool MMFaultRange(uintptr_t address, uintptr_t byteCount, uint32_t flags = ES_FLAGS_DEFAULT) {
-	uintptr_t start = address & ~(K_PAGE_SIZE - 1);
-	uintptr_t end = (address + byteCount - 1) & ~(K_PAGE_SIZE - 1);
-
-	for (uintptr_t page = start; page <= end; page += K_PAGE_SIZE) {
-		if (!MMArchHandlePageFault(page, flags)) {
-			return false;
-		}
-	}
-
-	return true;
-}
+extern "C" bool MMFaultRange(uintptr_t address, uintptr_t byteCount, uint32_t flags = ES_FLAGS_DEFAULT);
 
 void MMInitialise() {
 	{
@@ -6577,26 +6564,6 @@ void MMInitialise() {
 		globalData = (GlobalData *) MMMapShared(kernelMMSpace, mmGlobalDataRegion, 0, sizeof(GlobalData), MM_REGION_FIXED);
 		MMFaultRange((uintptr_t) globalData, sizeof(GlobalData), MM_HANDLE_PAGE_FAULT_FOR_SUPERVISOR);
 	}
-}
-
-void MMSpaceCloseReference(MMSpace *space) {
-	if (space == kernelMMSpace) {
-		return;
-	}
-
-	if (space->referenceCount < 1) {
-		KernelPanic("MMSpaceCloseReference - Space %x has invalid reference count.\n", space);
-	}
-
-	if (__sync_fetch_and_sub(&space->referenceCount, 1) > 1) {
-		return;
-	}
-
-	KRegisterAsyncTask(&space->removeAsyncTask, [] (KAsyncTask *task) { 
-		MMSpace *space = EsContainerOf(MMSpace, removeAsyncTask, task);
-		MMArchFinalizeVAS(space);
-		PoolRemove(&scheduler.mmSpacePool, space);
-	});
 }
 
 #define SIGNATURE_RSDP (0x2052545020445352)
@@ -7270,12 +7237,6 @@ int8_t Scheduler::GetThreadEffectivePriority(Thread *thread) {
 	}
 
 	return thread->priority;
-}
-
-void MMArchFinalizeVAS(MMSpace *space) {
-    (void)space;
-	// TODO.
-	KernelPanic("Unimplemented!\n");
 }
 
 void EarlyDelay1Ms() {

@@ -5836,10 +5836,9 @@ export fn ThreadSetTemporaryAddressSpace(space: ?*AddressSpace) callconv(.C) voi
     MMSpaceOpenReference(new_space);
     ProcessorSetAddressSpace(&new_space.arch);
     scheduler.dispatch_spinlock.release();
-    MMSpaceCloseReference(old_space);
+    MMSpaceCloseReference(@ptrCast(*AddressSpace, old_space));
 }
 
-extern fn MMSpaceCloseReference(space: *volatile AddressSpace) callconv(.C) void;
 extern fn ProcessorSetAddressSpace(address_space: *ArchAddressSpace) callconv(.C) void;
 
 export fn ThreadKill(task: *AsyncTask) callconv(.C) void
@@ -6523,6 +6522,46 @@ export fn MMMapShared(space: *AddressSpace, shared_region: *SharedRegion, offset
     region.data.u.shared.region = shared_region;
     region.data.u.shared.offset = offset & ~@as(u64, page_size - 1);
     return region.descriptor.base_address + (offset & (page_size - 1));
+}
+
+export fn MMFaultRange(address: u64, byte_count: u64, flags: HandlePageFaultFlags) callconv(.C) bool
+{
+    const start = address & ~@as(u64, page_size - 1);
+    const end = (address + byte_count - 1) & ~@as(u64, page_size - 1);
+    var page = start;
+
+    while (page <= end) : (page += page_size)
+    {
+        if (!MMArchHandlePageFault(page, flags)) return false;
+    }
+
+    return true;
+}
+
+extern fn MMArchHandlePageFault(address: u64, flags: HandlePageFaultFlags) callconv(.C) bool;
+
+// @TODO: MMInitialise
+
+export fn MMSpaceCloseReference(space: *AddressSpace) callconv(.C) void
+{
+    if (space == &_kernelMMSpace) return;
+    if (space.reference_count.read_volatile() < 1) KernelPanic("space has invalid reference count");
+    if (space.reference_count.atomic_fetch_sub(1) > 1) return;
+
+    KRegisterAsyncTask(&space.remove_async_task, CloseReferenceTask);
+}
+
+fn CloseReferenceTask(task: *AsyncTask) callconv(.C) void
+{
+    const space = @fieldParentPtr(AddressSpace, "remove_async_task", task);
+    MMArchFinalizeVAS(space);
+    PoolRemove(&scheduler.address_space_pool, @ptrToInt(space));
+}
+
+export fn MMArchFinalizeVAS(space: *AddressSpace) callconv(.C) void
+{
+    _ = space;
+    TODO();
 }
 
 export fn KernelInitialise() callconv(.C) void
