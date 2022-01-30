@@ -1191,7 +1191,7 @@ pub fn sum_bytes(bytes: []const u8) u8
     return @truncate(u8, total);
 }
 
-pub const RandomNumberGenerator = struct
+pub const RandomNumberGenerator = extern struct
 {
     s: [4]u64,
     lock: kernel.sync.Spinlock,

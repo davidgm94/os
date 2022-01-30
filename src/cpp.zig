@@ -1,6 +1,8 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
+const atomic_order: std.builtin.AtomicOrder = .SeqCst;
+
 fn zeroes(comptime T: type) T
 {
     @setEvalBranchQuota(100000);
@@ -7276,6 +7278,76 @@ export fn EarlyDelay1Ms() callconv(.C) void
 
         if (ProcessorIn8(IO_PIT_DATA) & (1 << 7) != 0) break;
     }
+}
+
+//const UserSpinlock = extern struct
+//{
+    //state: Volatile(u8),
+
+    //fn acquire(self: *@This()) void
+    //{
+        //@fence(atomic_order);
+        //while (self.state.atomic_compare_and_swap(0, 1) != null) {}
+        //@fence(atomic_order);
+    //}
+
+    //fn release(self: *@This()) void
+    //{
+        //@fence(atomic_order);
+        //if (self.state.read_volatile() == 0) KernelPanic("spinlock not acquired");
+        //self.state.write_volatile(0);
+        //@fence(atomic_order);
+    //}
+//};
+
+pub const RandomNumberGenerator = extern struct
+{
+    s: [4]u64,
+    lock: UserSpinlock,
+
+    pub fn add_entropy(self: *@This(), n: u64) void
+    {
+        @setRuntimeSafety(false); // We are relying on overflow here
+        self.lock.acquire();
+        var x = n;
+
+        for (self.s) |*s|
+        {
+            x += 0x9E3779B97F4A7C15;
+            var result = x;
+            result = (result ^ (result >> 30)) * 0xBF58476D1CE4E5B9;
+            result = (result ^ (result >> 27)) * 0x94D049BB133111EB;
+            s.* ^= result ^ (result >> 31);
+        }
+        self.lock.release();
+    }
+
+    const UserSpinlock = extern struct
+    {
+        state: Volatile(u8),
+
+        fn acquire(self: *@This()) void
+        {
+            @fence(.SeqCst);
+            while (self.state.atomic_compare_and_swap(0, 1) == null) {}
+            @fence(.SeqCst);
+        }
+
+        fn release(self: *@This()) void
+        {
+            @fence(.SeqCst);
+            if (self.state.read_volatile() == 0) KernelPanic("spinlock not acquired");
+            self.state.write_volatile(0);
+            @fence(.SeqCst);
+        }
+    };
+};
+
+var rng: RandomNumberGenerator = undefined;
+
+export fn EsRandomAddEntropy(x: u64) callconv(.C) void
+{
+    rng.add_entropy(x);
 }
 
 export fn KernelInitialise() callconv(.C) void

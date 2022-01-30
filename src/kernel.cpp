@@ -7107,63 +7107,9 @@ int8_t Scheduler::GetThreadEffectivePriority(Thread *thread) {
 }
 
 extern "C" void EarlyDelay1Ms();
-	//ProcessorOut8(IO_PIT_COMMAND, 0x30);
-	//ProcessorOut8(IO_PIT_DATA, 0xA9);
-	//ProcessorOut8(IO_PIT_DATA, 0x04);
+extern "C" void EsRandomAddEntropy(uint64_t x);
 
-	//while (true) {
-		//ProcessorOut8(IO_PIT_COMMAND, 0xE2);
-
-		//if (ProcessorIn8(IO_PIT_DATA) & (1 << 7)) {
-			//break;
-		//}
-	//}
-//}
-
-struct EsSpinlock {
-	volatile uint8_t state;
-};
-
-void EsSpinlockAcquire(EsSpinlock *spinlock) {
-	__sync_synchronize();
-	while (__sync_val_compare_and_swap(&spinlock->state, 0, 1));
-	__sync_synchronize();
-}
-
-void EsSpinlockRelease(EsSpinlock *spinlock) {
-	__sync_synchronize();
-
-	if (!spinlock->state) {
-		EsPanic("EsSpinlockRelease - Spinlock %x not acquired.\n", spinlock);
-	}
-
-	spinlock->state = 0;
-	__sync_synchronize();
-}
-
-struct RNGState {
-	uint64_t s[4];
-	EsSpinlock lock;
-};
-
-RNGState rngState;
-
-void EsRandomAddEntropy(uint64_t x) {
-	EsSpinlockAcquire(&rngState.lock);
-
-	for (uintptr_t i = 0; i < 4; i++) {
-		x += 0x9E3779B97F4A7C15;
-
-		uint64_t result = x;
-		result = (result ^ (result >> 30)) * 0xBF58476D1CE4E5B9;
-		result = (result ^ (result >> 27)) * 0x94D049BB133111EB;
-		rngState.s[i] ^= result ^ (result >> 31);
-	}
-
-	EsSpinlockRelease(&rngState.lock);
-}
-
-uint64_t timeStampTicksPerMs;
+extern uint64_t timeStampTicksPerMs;
 
 struct NewProcessorStorage {
 	struct CPULocalStorage *local;
