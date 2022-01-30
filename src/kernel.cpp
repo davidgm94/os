@@ -4105,7 +4105,7 @@ extern "C" void MMPhysicalFree(uintptr_t page /* Physical address. */,
 		bool mutexAlreadyAcquired = false /* Internal use. Pass false. */, 
 		size_t count = 1 /* Number of consecutive pages to free. */);
 
-bool MMPhysicalAllocateAndMap(size_t sizeBytes, size_t alignmentBytes, size_t maximumBits, bool zeroed, 
+extern "C" bool MMPhysicalAllocateAndMap(size_t sizeBytes, size_t alignmentBytes, size_t maximumBits, bool zeroed, 
 		uint64_t caching, uint8_t **virtualAddress, uintptr_t *physicalAddress);
 void MMPhysicalFreeAndUnmap(void *virtualAddress, uintptr_t physicalAddress);
 
@@ -6491,34 +6491,7 @@ void CCInitialise() {
 }
 
 extern "C" void PMZero(uintptr_t *pages, size_t pageCount, bool contiguous);
-
-extern uint8_t earlyZeroBuffer[K_PAGE_SIZE];
-
-void *MMMapPhysical(MMSpace *space, uintptr_t offset, size_t bytes, uint64_t caching) {
-	if (!space) space = kernelMMSpace;
-
-	uintptr_t offset2 = offset & (K_PAGE_SIZE - 1);
-	offset -= offset2;
-	if (offset2) bytes += K_PAGE_SIZE;
-
-	MMRegion *region;
-
-	{
-		KMutexAcquire(&space->reserveMutex);
-		EsDefer(KMutexRelease(&space->reserveMutex));
-
-		region = MMReserve(space, bytes, MM_REGION_PHYSICAL | MM_REGION_FIXED | caching);
-		if (!region) return nullptr;
-
-		region->data.physical.offset = offset;
-	}
-
-	for (uintptr_t i = 0; i < region->pageCount; i++) {
-		MMHandlePageFault(space, region->baseAddress + i * K_PAGE_SIZE, ES_FLAGS_DEFAULT);
-	}
-
-	return (uint8_t *) region->baseAddress + offset2;
-}
+extern "C" void *MMMapPhysical(MMSpace *space, uintptr_t offset, size_t bytes, uint64_t caching);
 
 bool MMPhysicalAllocateAndMap(size_t sizeBytes, size_t alignmentBytes, size_t maximumBits, bool zeroed, uint64_t caching, uint8_t **_virtualAddress, uintptr_t *_physicalAddress) {
 	if (!sizeBytes) sizeBytes = 1;
@@ -6558,43 +6531,6 @@ bool MMPhysicalAllocateAndMap(size_t sizeBytes, size_t alignmentBytes, size_t ma
 	*_virtualAddress = (uint8_t *) virtualAddress;
 	*_physicalAddress = physicalAddress;
 	return true;
-}
-
-void PMCopy(uintptr_t page, void *_source, size_t pageCount) {
-	uint8_t *source = (uint8_t *) _source;
-	KMutexAcquire(&pmm.pmManipulationLock);
-
-	repeat:;
-	size_t doCount = pageCount > PHYSICAL_MEMORY_MANIPULATION_REGION_PAGES ? PHYSICAL_MEMORY_MANIPULATION_REGION_PAGES : pageCount;
-	pageCount -= doCount;
-
-	{
-		MMSpace *vas = coreMMSpace;
-		void *region = pmm.pmManipulationRegion;
-
-		for (uintptr_t i = 0; i < doCount; i++) {
-			MMArchMapPage(vas, page + K_PAGE_SIZE * i, (uintptr_t) region + K_PAGE_SIZE * i, 
-					MM_MAP_PAGE_OVERWRITE | MM_MAP_PAGE_NO_NEW_TABLES);
-		}
-
-		KSpinlockAcquire(&pmm.pmManipulationProcessorLock);
-
-		for (uintptr_t i = 0; i < doCount; i++) {
-			ProcessorInvalidatePage((uintptr_t) region + i * K_PAGE_SIZE);
-		}
-
-		EsMemoryCopy(region, source, doCount * K_PAGE_SIZE);
-
-		KSpinlockRelease(&pmm.pmManipulationProcessorLock);
-	}
-
-	if (pageCount) {
-		page += PHYSICAL_MEMORY_MANIPULATION_REGION_PAGES * K_PAGE_SIZE;
-		source += PHYSICAL_MEMORY_MANIPULATION_REGION_PAGES * K_PAGE_SIZE;
-		goto repeat;
-	}
-
-	KMutexRelease(&pmm.pmManipulationLock);
 }
 
 void MMPhysicalInsertZeroedPage(uintptr_t page) {

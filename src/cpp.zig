@@ -6229,6 +6229,31 @@ export fn MMPhysicalAllocate(flags: Physical.Flags, count: u64, alignment: u64, 
 extern fn BitsetGet(bitset: *Bitset, count: u64, alignment: u64, below: u64) callconv(.C) u64;
 extern fn BitsetTake(bitset: *Bitset, index: u64) callconv(.C) void;
 
+export fn MMMapPhysical(space: *AddressSpace, asked_offset: u64, asked_byte_count: u64, caching: Region.Flags) callconv(.C) u64
+{
+    const offset2 = asked_offset & (page_size - 1);
+    const offset = asked_offset - offset2;
+    const byte_count = if (offset2 != 0) asked_byte_count + page_size else asked_byte_count;
+
+    const region = blk:
+    {
+        _ = space.reserve_mutex.acquire();
+        defer space.reserve_mutex.release();
+
+        const result = MMReserve(space, byte_count, caching.or_flag(.fixed).or_flag(.physical), 0) orelse return 0;
+        result.data.u.physical.offset = offset;
+        break :blk result;
+    };
+
+    var i: u64 = 0;
+    while (i < region.descriptor.page_count) : (i += 1)
+    {
+        _ = MMHandlePageFault(space, region.descriptor.base_address + i * page_size, HandlePageFaultFlags.empty());
+    }
+
+    return region.descriptor.base_address + offset2;
+}
+
 export fn KernelInitialise() callconv(.C) void
 {
     kernelProcess = &_kernelProcess;
