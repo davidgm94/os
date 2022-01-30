@@ -7524,6 +7524,21 @@ export fn ThreadPause(thread: *Thread, resume_after: bool) callconv(.C) void
     scheduler.dispatch_spinlock.release();
 }
 
+export fn ProcessPause(process: *Process, resume_after: bool) callconv(.C) void
+{
+    _ = process.threads_mutex.acquire();
+    var maybe_thread_item = process.threads.first;
+
+    while (maybe_thread_item) |thread_item|
+    {
+        const thread = thread_item.value.?;
+        maybe_thread_item = thread_item.next;
+        ThreadPause(thread, resume_after);
+    }
+
+    process.threads_mutex.release();
+}
+
 export fn KernelInitialise() callconv(.C) void
 {
     kernelProcess = &_kernelProcess;

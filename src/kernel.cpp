@@ -7332,19 +7332,7 @@ void Scheduler::Yield(InterruptContext *context) {
 }
 
 extern "C" void ThreadPause(Thread *thread, bool resume);
-
-void ProcessPause(Process *process, bool resume) {
-	KMutexAcquire(&process->threadsMutex);
-	LinkedItem<Thread> *thread = process->threads.firstItem;
-
-	while (thread) {
-		Thread *threadObject = thread->thisItem;
-		thread = thread->nextItem;
-		ThreadPause(threadObject, resume);
-	}
-
-	KMutexRelease(&process->threadsMutex);
-}
+extern "C" void ProcessPause(Process *process, bool resume);
 
 void ProcessCrash(Process *process, EsCrashReason *crashReason) {
 	if (process == kernelProcess) {
