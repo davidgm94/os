@@ -6388,35 +6388,6 @@ MMRegion *MMReserve(MMSpace *space, size_t bytes, unsigned flags, uintptr_t forc
 	return outputRegion;
 }
 
-MMRegion *MMFindAndPinRegion(MMSpace *space, uintptr_t address, uintptr_t size) {
-	if (address + size < address) {
-		return nullptr;
-	}
-
-	KMutexAcquire(&space->reserveMutex);
-	EsDefer(KMutexRelease(&space->reserveMutex));
-
-	MMRegion *region = MMFindRegion(space, address);
-
-	if (!region) {
-		return nullptr;
-	}
-
-	if (region->baseAddress > address) {
-		return nullptr;
-	}
-
-	if (region->baseAddress + region->pageCount * K_PAGE_SIZE < address + size) {
-		return nullptr;
-	}
-
-	if (!KWriterLockTake(&region->data.pin, K_LOCK_SHARED, true /* poll */)) {
-		return nullptr;
-	}
-
-	return region;
-}
-
 bool MMCommitRange(MMSpace *space, MMRegion *region, uintptr_t pageOffset, size_t pageCount) {
 	KMutexAssertLocked(&space->reserveMutex);
 

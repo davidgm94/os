@@ -4552,7 +4552,6 @@ export fn KThreadCreate(name: [*:0]const u8, entry: fn (u64) callconv(.C) void, 
 extern fn MMStandardAllocate(space: *AddressSpace, bytes: u64, flags: Region.Flags, base_address: u64, commit_all: bool) callconv(.C) u64;
 extern fn MMCommitRange(space: *AddressSpace, region: *Region, page_offset: u64, page_count: u64) callconv(.C) bool;
 extern fn OpenHandleToObject(object: u64, type: u32, flags: u32) callconv(.C) bool;
-extern fn MMFindAndPinRegion(address_space: *AddressSpace, address: u64, size: u64) callconv(.C) ?*Region;
 extern fn ArchInitialiseThread(kernel_stack: u64, kernel_stack_size: u64, thread: *Thread, start_address: u64, argument1: u64, argument2: u64, userland: bool, user_stack: u64, user_stack_size: u64) callconv(.C) *InterruptContext;
 
 export fn ThreadSpawn(name: [*:0]const u8, start_address: u64, argument1: u64, flags: Thread.Flags, maybe_process: ?*Process, argument2: u64) callconv(.C) ?*Thread
@@ -5987,6 +5986,31 @@ export fn ProcessKill(process: *Process) callconv(.C) void
         // @TODO @Desktop send message to the desktop
     }
 }
+
+// @TODO: MMReserve
+
+export fn MMFindAndPinRegion(space: *AddressSpace, address: u64, size: u64) callconv(.C) ?*Region
+{
+    {
+        var overflow_result: u64 = 0;
+        if (@addWithOverflow(u64, address, size, &overflow_result))
+        {
+            return null;
+        }
+    }
+
+    _ = space.reserve_mutex.acquire();
+    defer space.reserve_mutex.release();
+
+    const region = MMFindRegion(space, address) orelse return null;
+
+    if (region.descriptor.base_address > address) return null;
+    if (region.descriptor.base_address + region.descriptor.page_count * page_size < address + size) return null;
+    if (!region.data.pin.take_extended(WriterLock.shared, true)) return null;
+
+    return region;
+}
+
 
 export fn KernelInitialise() callconv(.C) void
 {
