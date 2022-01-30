@@ -6497,53 +6497,8 @@ void CCInitialise() {
 
 extern "C" void PMZero(uintptr_t *pages, size_t pageCount, bool contiguous);
 extern "C" void *MMMapPhysical(MMSpace *space, uintptr_t offset, size_t bytes, uint64_t caching);
-
 extern "C" void MMPhysicalInsertZeroedPage(uintptr_t page);
-
-void MMZeroPageThread() {
-	while (true) {
-		KEventWait(&pmm.zeroPageEvent);
-		KEventWait(&pmm.availableNotCritical);
-
-		bool done = false;
-
-		while (!done) {
-			uintptr_t pages[PHYSICAL_MEMORY_MANIPULATION_REGION_PAGES]; 
-			int i = 0;
-
-			{
-				KMutexAcquire(&pmm.pageFrameMutex);
-				EsDefer(KMutexRelease(&pmm.pageFrameMutex));
-
-				for (; i < PHYSICAL_MEMORY_MANIPULATION_REGION_PAGES; i++) {
-					if (pmm.firstFreePage) {
-						pages[i] = pmm.firstFreePage;
-						MMPhysicalActivatePages(pages[i], 1);
-					} else {
-						done = true;
-						break;
-					}
-
-					MMPageFrame *frame = pmm.pageFrames + pages[i];
-					frame->state = MMPageFrame::ACTIVE;
-					pmm.freeOrZeroedPageBitset.Take(pages[i]);
-				}
-			}
-
-			for (int j = 0; j < i; j++) pages[j] <<= K_PAGE_BITS;
-			if (i) PMZero(pages, i, false);
-
-			KMutexAcquire(&pmm.pageFrameMutex);
-			pmm.countActivePages -= i;
-
-			while (i--) {
-				MMPhysicalInsertZeroedPage(pages[i] >> K_PAGE_BITS);
-			}
-
-			KMutexRelease(&pmm.pageFrameMutex);
-		}
-	}
-}
+extern "C" void MMZeroPageThread();
 
 void MMObjectCacheTrimThread() {
 	MMObjectCache *cache = nullptr;

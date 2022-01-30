@@ -6298,6 +6298,69 @@ export fn MMPhysicalInsertZeroedPage(page: u64) callconv(.C) void
     MMUpdateAvailablePageCount(true);
 }
 
+export fn MMZeroPageThread() callconv(.C) void
+{
+    while (true)
+    {
+        _ = pmm.zero_page_event.wait();
+        _ = pmm.available_not_critical_event.wait();
+
+        var done = false;
+
+        while (!done)
+        {
+            var pages: [Physical.memory_manipulation_region_page_count]u64 = undefined;
+
+            var i = blk:
+            {
+                _ = pmm.pageframe_mutex.acquire();
+                defer pmm.pageframe_mutex.release();
+
+                for (pages) |*page, page_i|
+                {
+                    if (pmm.first_free_page != 0)
+                    {
+                        page.* = pmm.first_free_page;
+                        MMPhysicalActivatePages(page.*, 1);
+                    }
+                    else
+                    {
+                        done = true;
+                        break :blk page_i;
+                    }
+
+                    const frame = &pmm.pageframes[page.*];
+                    frame.state.write_volatile(.active);
+                    BitsetTake(&pmm.free_or_zeroed_page_bitset, pages[page_i]);
+                }
+
+                break :blk pages.len;
+            };
+
+            var j: u64 = 0;
+            while (j < i) : (j += 1)
+            {
+                pages[j] <<= page_bit_count;
+            }
+
+            if (i != 0) PMZero(&pages, i, false);
+
+            _ = pmm.pageframe_mutex.acquire();
+            pmm.active_page_count -= i;
+
+            while (true)
+            {
+                const breaker = i;
+                i -= 1;
+                if (breaker == 0) break;
+                MMPhysicalInsertZeroedPage(pages[i] >> page_bit_count);
+            }
+
+            pmm.pageframe_mutex.release();
+        }
+    }
+}
+
 export fn KernelInitialise() callconv(.C) void
 {
     kernelProcess = &_kernelProcess;
