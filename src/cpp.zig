@@ -6254,6 +6254,32 @@ export fn MMMapPhysical(space: *AddressSpace, asked_offset: u64, asked_byte_coun
     return region.descriptor.base_address + offset2;
 }
 
+export fn MMPhysicalAllocateAndMap(asked_size: u64, asked_alignment: u64, maximum_bits: u64, zeroed: bool, flags: Region.Flags, p_virtual_address: *u64, p_physical_address: *u64) callconv(.C) bool
+{
+    const size = if (asked_size == 0) @as(u64, 1) else asked_size;
+    const alignment = if (asked_alignment == 0) @as(u64, 1) else asked_alignment;
+
+    const no_below = maximum_bits == 0 or maximum_bits >= 64;
+
+    const size_in_pages = (size + page_size - 1) >> page_bit_count;
+    const physical_address = MMPhysicalAllocate(Physical.Flags.from_flags(.{ .can_fail, .commit_now }), size_in_pages, (alignment + page_size - 1) >> page_bit_count, if (no_below) 0 else @as(u64, 1) << @truncate(u6, maximum_bits));
+    if (physical_address == 0) return false;
+
+    const virtual_address = MMMapPhysical(&_kernelMMSpace, physical_address, size, flags);
+    if (virtual_address == 0)
+    {
+        MMPhysicalFree(physical_address, false, size_in_pages);
+        return false;
+    }
+
+    if (zeroed) EsMemoryZero(virtual_address, size);
+
+    p_virtual_address.* = virtual_address;
+    p_physical_address.* = physical_address;
+
+    return true;
+}
+
 export fn KernelInitialise() callconv(.C) void
 {
     kernelProcess = &_kernelProcess;

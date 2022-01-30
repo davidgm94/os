@@ -6493,46 +6493,6 @@ void CCInitialise() {
 extern "C" void PMZero(uintptr_t *pages, size_t pageCount, bool contiguous);
 extern "C" void *MMMapPhysical(MMSpace *space, uintptr_t offset, size_t bytes, uint64_t caching);
 
-bool MMPhysicalAllocateAndMap(size_t sizeBytes, size_t alignmentBytes, size_t maximumBits, bool zeroed, uint64_t caching, uint8_t **_virtualAddress, uintptr_t *_physicalAddress) {
-	if (!sizeBytes) sizeBytes = 1;
-	if (!alignmentBytes) alignmentBytes = 1;
-
-	bool noBelow = false;
-
-#ifdef ES_BITS_32
-	if (!maximumBits || maximumBits >= 32) noBelow = true;
-#endif
-
-#ifdef ES_BITS_64
-	if (!maximumBits || maximumBits >= 64) noBelow = true;
-#endif
-
-	uintptr_t sizePages = (sizeBytes + K_PAGE_SIZE - 1) >> K_PAGE_BITS;
-
-	uintptr_t physicalAddress = MMPhysicalAllocate(MM_PHYSICAL_ALLOCATE_CAN_FAIL | MM_PHYSICAL_ALLOCATE_COMMIT_NOW, 
-			sizePages, (alignmentBytes + K_PAGE_SIZE - 1) >> K_PAGE_BITS, 
-			noBelow ? 0 : ((size_t) 1 << maximumBits));
-
-	if (!physicalAddress) {
-		return false;
-	}
-
-	void *virtualAddress = MMMapPhysical(kernelMMSpace, physicalAddress, sizeBytes, caching);
-
-	if (!virtualAddress) {
-		MMPhysicalFree(physicalAddress, false, sizePages);
-		return false;
-	}
-
-	if (zeroed) {
-		EsMemoryZero(virtualAddress, sizeBytes);
-	}
-
-	*_virtualAddress = (uint8_t *) virtualAddress;
-	*_physicalAddress = physicalAddress;
-	return true;
-}
-
 void MMPhysicalInsertZeroedPage(uintptr_t page) {
 	if (GetCurrentThread() != pmm.zeroPageThread) {
 		KernelPanic("MMPhysicalInsertZeroedPage - Inserting a zeroed page not on the MMZeroPageThread.\n");
