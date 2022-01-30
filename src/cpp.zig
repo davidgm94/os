@@ -4550,7 +4550,6 @@ export fn KThreadCreate(name: [*:0]const u8, entry: fn (u64) callconv(.C) void, 
 }
 
 extern fn MMStandardAllocate(space: *AddressSpace, bytes: u64, flags: Region.Flags, base_address: u64, commit_all: bool) callconv(.C) u64;
-extern fn MMCommitRange(space: *AddressSpace, region: *Region, page_offset: u64, page_count: u64) callconv(.C) bool;
 extern fn OpenHandleToObject(object: u64, type: u32, flags: u32) callconv(.C) bool;
 extern fn ArchInitialiseThread(kernel_stack: u64, kernel_stack_size: u64, thread: *Thread, start_address: u64, argument1: u64, argument2: u64, userland: bool, user_stack: u64, user_stack_size: u64) callconv(.C) *InterruptContext;
 
@@ -6011,6 +6010,47 @@ export fn MMFindAndPinRegion(space: *AddressSpace, address: u64, size: u64) call
     return region;
 }
 
+export fn MMCommitRange(space: *AddressSpace, region: *Region, page_offset: u64, page_count: u64) callconv(.C) bool
+{
+    space.reserve_mutex.assert_locked();
+
+    if (region.flags.contains(.no_commit_tracking)) KernelPanic("region does not support commit tracking");
+    if (page_offset >= region.descriptor.page_count or page_count > region.descriptor.page_count - page_offset) KernelPanic("invalid region offset and page count");
+    if (!region.flags.contains(.normal)) KernelPanic("cannot commit into non-normal region");
+
+    var delta: i64 = 0;
+    _ = RangeSetSet(&region.data.u.normal.commit, page_offset, page_offset + page_count, &delta, false);
+
+    if (delta < 0) KernelPanic("Invalid delta calculation");
+    if (delta == 0) return true;
+
+    const delta_u = @intCast(u64, delta);
+
+    if (!MMCommit(delta_u * page_size, region.flags.contains(.fixed))) return false;
+    region.data.u.normal.commit_page_count += delta_u;
+    space.commit_count += delta_u;
+
+    if (region.data.u.normal.commit_page_count > region.descriptor.page_count) KernelPanic("invalid delta calculation increases region commit past page count");
+
+    if (!RangeSetSet(&region.data.u.normal.commit, page_offset, page_offset + page_count, null, true))
+    {
+        MMDecommit(delta_u * page_size, region.flags.contains(.fixed));
+        region.data.u.normal.commit_page_count -= delta_u;
+        space.commit_count -= delta_u;
+        return false;
+    }
+
+    if (region.flags.contains(.fixed))
+    {
+        var i = page_offset;
+        while (i < page_offset + page_count) : (i += 1)
+        {
+            if (!MMHandlePageFault(space, region.descriptor.base_address + i * page_size, HandlePageFaultFlags.from_flag(.lock_acquired))) KernelPanic("unable to fix pages");
+        }
+    }
+
+    return true;
+}
 
 export fn KernelInitialise() callconv(.C) void
 {

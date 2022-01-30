@@ -6388,65 +6388,6 @@ MMRegion *MMReserve(MMSpace *space, size_t bytes, unsigned flags, uintptr_t forc
 	return outputRegion;
 }
 
-bool MMCommitRange(MMSpace *space, MMRegion *region, uintptr_t pageOffset, size_t pageCount) {
-	KMutexAssertLocked(&space->reserveMutex);
-
-	if (region->flags & MM_REGION_NO_COMMIT_TRACKING) {
-		KernelPanic("MMCommitRange - Region does not support commit tracking.\n");
-	}
-
-	if (pageOffset >= region->pageCount || pageCount > region->pageCount - pageOffset) {
-		KernelPanic("MMCommitRange - Invalid region offset and page count.\n");
-	}
-
-	if (~region->flags & MM_REGION_NORMAL) {
-		KernelPanic("MMCommitRange - Cannot commit into non-normal region.\n");
-	}
-
-	intptr_t delta = 0;
-	region->data.normal.commit.Set(pageOffset, pageOffset + pageCount, &delta, false);
-
-	if (delta < 0) {
-		KernelPanic("MMCommitRange - Invalid delta calculation adding %x, %x to %x.\n", pageOffset, pageCount, region);
-	}
-
-	if (delta == 0) {
-		return true;
-	}
-
-	{
-		if (!MMCommit(delta * K_PAGE_SIZE, region->flags & MM_REGION_FIXED)) {
-			return false;
-		}
-
-		region->data.normal.commitPageCount += delta;
-		space->commit += delta;
-
-		if (region->data.normal.commitPageCount > region->pageCount) {
-			KernelPanic("MMCommitRange - Invalid delta calculation increases region %x commit past page count.\n", region);
-		}
-	}
-
-	if (!region->data.normal.commit.Set(pageOffset, pageOffset + pageCount, nullptr, true)) {
-		MMDecommit(delta * K_PAGE_SIZE, region->flags & MM_REGION_FIXED);
-		region->data.normal.commitPageCount -= delta;
-		space->commit -= delta;
-		return false;
-	}
-
-	if (region->flags & MM_REGION_FIXED) {
-		for (uintptr_t i = pageOffset; i < pageOffset + pageCount; i++) {
-			// TODO Don't call into MMHandlePageFault. I don't like MM_HANDLE_PAGE_FAULT_LOCK_ACQUIRED.
-
-			if (!MMHandlePageFault(space, region->baseAddress + i * K_PAGE_SIZE, MM_HANDLE_PAGE_FAULT_LOCK_ACQUIRED)) {
-				KernelPanic("MMCommitRange - Unable to fix pages.\n");
-			}
-		}
-	}
-
-	return true;
-}
-
 void *MMStandardAllocate(MMSpace *space, size_t bytes, uint32_t flags, void *baseAddress, bool commitAll)
 {
 	if (!space) space = kernelMMSpace;
