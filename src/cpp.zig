@@ -7569,6 +7569,20 @@ export fn ProcessCrash(process: *Process, crash_reason: *CrashReason) callconv(.
     ProcessPause(GetCurrentThread().?.process.?, false);
 }
 
+export fn MMPhysicalInsertFreePagesNext(page: u64) callconv(.C) void
+{
+    const frame = &pmm.pageframes[page];
+    frame.state.write_volatile(.free);
+
+    frame.u.list.next.write_volatile(pmm.first_free_page);
+    frame.u.list.previous = &pmm.first_free_page;
+    if (pmm.first_free_page != 0) pmm.pageframes[pmm.first_free_page].u.list.previous = &frame.u.list.next.value;
+    pmm.first_free_page = page;
+
+    BitsetPut(&pmm.free_or_zeroed_page_bitset, page);
+    pmm.free_page_count += 1;
+}
+
 export fn KernelInitialise() callconv(.C) void
 {
     kernelProcess = &_kernelProcess;

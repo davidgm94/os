@@ -7333,21 +7333,7 @@ void Scheduler::Yield(InterruptContext *context) {
 
 extern "C" void ThreadPause(Thread *thread, bool resume);
 extern "C" void ProcessPause(Process *process, bool resume);
-
-void MMPhysicalInsertFreePagesNext(uintptr_t page) {
-	MMPageFrame *frame = pmm.pageFrames + page;
-	frame->state = MMPageFrame::FREE;
-
-	{
-		frame->list.next = pmm.firstFreePage;
-		frame->list.previous = &pmm.firstFreePage;
-		if (pmm.firstFreePage) pmm.pageFrames[pmm.firstFreePage].list.previous = &frame->list.next;
-		pmm.firstFreePage = page;
-	}
-
-	pmm.freeOrZeroedPageBitset.Put(page);
-	pmm.countFreePages++;
-}
+extern "C" void MMPhysicalInsertFreePagesNext(uintptr_t page);
 
 uint64_t MMArchPopulatePageFrameDatabase() {
 	uint64_t commitLimit = 0;
