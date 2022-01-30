@@ -92,6 +92,8 @@ extern fn ProcessorDisableInterrupts() callconv(.C) void;
 extern fn ProcessorFakeTimerInterrupt() callconv(.C) noreturn;
 extern fn ProcessorInvalidatePage(page: u64) callconv(.C) void;
 extern fn ProcessorInvalidateAllPages() callconv(.C) void;
+extern fn ProcessorIn8(port: u16) callconv(.C) u8;
+extern fn ProcessorOut8(port: u16, value: u8) callconv(.C) void;
 extern fn GetLocalStorage() callconv(.C) ?*LocalStorage;
 extern fn GetCurrentThread() callconv(.C) ?*Thread;
 
@@ -7219,6 +7221,61 @@ export fn MMArchFreeVAS(space: *AddressSpace) callconv(.C) void
     MMUnreserve(&_coreMMSpace, l1_commit_region, false, false);
     _coreMMSpace.reserve_mutex.release();
     MMDecommit(space.arch.commited_page_table_count * page_size, true);
+}
+
+const IO_PIC_1_COMMAND = (0x0020);
+const IO_PIC_1_DATA = (0x0021);
+const IO_PIT_DATA = (0x0040);
+const IO_PIT_COMMAND = (0x0043);
+const IO_PS2_DATA = (0x0060);
+const IO_PC_SPEAKER = (0x0061);
+const IO_PS2_STATUS = (0x0064);
+const IO_PS2_COMMAND = (0x0064);
+const IO_RTC_INDEX  = (0x0070);
+const IO_RTC_DATA  = (0x0071);
+const IO_UNUSED_DELAY = (0x0080);
+const IO_PIC_2_COMMAND = (0x00A0);
+const IO_PIC_2_DATA = (0x00A1);
+const IO_BGA_INDEX = (0x01CE);
+const IO_BGA_DATA = (0x01CF);
+const IO_ATA_1 = (0x0170); // To 0x0177.;
+const IO_ATA_2 = (0x01F0); // To 0x01F7.;
+const IO_COM_4 = (0x02E8); // To 0x02EF.;
+const IO_COM_2 = (0x02F8); // To 0x02FF.;
+const IO_ATA_3 = (0x0376);
+const IO_VGA_AC_INDEX  = (0x03C0);
+const IO_VGA_AC_WRITE  = (0x03C0);
+const IO_VGA_AC_READ   = (0x03C1);
+const IO_VGA_MISC_WRITE  = (0x03C2);
+const IO_VGA_MISC_READ   = (0x03CC);
+const IO_VGA_SEQ_INDEX  = (0x03C4);
+const IO_VGA_SEQ_DATA   = (0x03C5);
+const IO_VGA_DAC_READ_INDEX   = (0x03C7);
+const IO_VGA_DAC_WRITE_INDEX  = (0x03C8);
+const IO_VGA_DAC_DATA         = (0x03C9);
+const IO_VGA_GC_INDEX  = (0x03CE);
+const IO_VGA_GC_DATA   = (0x03CF);
+const IO_VGA_CRTC_INDEX  = (0x03D4);
+const IO_VGA_CRTC_DATA   = (0x03D5);
+const IO_VGA_INSTAT_READ  = (0x03DA);
+const IO_COM_3 = (0x03E8); // To 0x03EF.;
+const IO_ATA_4 = (0x03F6);
+const IO_COM_1 = (0x03F8); // To 0x03FF.;
+const IO_PCI_CONFIG  = (0x0CF8);
+const IO_PCI_DATA    = (0x0CFC);
+
+export fn EarlyDelay1Ms() callconv(.C) void
+{
+    ProcessorOut8(IO_PIT_COMMAND, 0x30);
+    ProcessorOut8(IO_PIT_DATA, 0xa9);
+    ProcessorOut8(IO_PIT_DATA, 0x04);
+
+    while (true)
+    {
+        ProcessorOut8(IO_PIT_COMMAND, 0xe2);
+
+        if (ProcessorIn8(IO_PIT_DATA) & (1 << 7) != 0) break;
+    }
 }
 
 export fn KernelInitialise() callconv(.C) void

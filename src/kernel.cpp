@@ -7106,19 +7106,19 @@ int8_t Scheduler::GetThreadEffectivePriority(Thread *thread) {
 	return thread->priority;
 }
 
-void EarlyDelay1Ms() {
-	ProcessorOut8(IO_PIT_COMMAND, 0x30);
-	ProcessorOut8(IO_PIT_DATA, 0xA9);
-	ProcessorOut8(IO_PIT_DATA, 0x04);
+extern "C" void EarlyDelay1Ms();
+	//ProcessorOut8(IO_PIT_COMMAND, 0x30);
+	//ProcessorOut8(IO_PIT_DATA, 0xA9);
+	//ProcessorOut8(IO_PIT_DATA, 0x04);
 
-	while (true) {
-		ProcessorOut8(IO_PIT_COMMAND, 0xE2);
+	//while (true) {
+		//ProcessorOut8(IO_PIT_COMMAND, 0xE2);
 
-		if (ProcessorIn8(IO_PIT_DATA) & (1 << 7)) {
-			break;
-		}
-	}
-}
+		//if (ProcessorIn8(IO_PIT_DATA) & (1 << 7)) {
+			//break;
+		//}
+	//}
+//}
 
 struct EsSpinlock {
 	volatile uint8_t state;
