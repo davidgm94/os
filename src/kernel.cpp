@@ -6656,260 +6656,236 @@ struct ACPI {
 	KDevice *computer;
 };
 
-ACPI acpi;
+extern ACPI acpi;
 
-uint32_t ACPIIoApicReadRegister(ACPIIoApic *apic, uint32_t reg) {
-	apic->address[0] = reg; 
-	return apic->address[4];
-}
-
-void ACPIIoApicWriteRegister(ACPIIoApic *apic, uint32_t reg, uint32_t value) {
-	apic->address[0] = reg; 
-	apic->address[4] = value;
-}
-void ACPICheckTable(const ACPIDescriptorTable *table) {
-	if (!EsMemorySumBytes((uint8_t *) table, table->length)) {
-		return;
-	}
-
-	KernelPanic("ACPICheckTable - ACPI table with signature %s had invalid checksum: "
-			"length: %D, ID = %s, table = %s, OEM revision = %d, creator = %s, creator revision = %d.\n",
-			4, &table->signature, table->length, 8, &table->id, 8, &table->tableID, 
-			table->oemRevision, 4, &table->creatorID, table->creatorRevision);
-}
-
-void *ACPIMapPhysicalMemory(uintptr_t physicalAddress, size_t length) {
-	return MMMapPhysical(kernelMMSpace, physicalAddress, length, MM_REGION_NOT_CACHEABLE);
-}
-
-void *ACPIGetRSDP() {
-	return acpi.rsdp;
-}
-
-uint8_t ACPIGetCenturyRegisterIndex() {
-	return acpi.centuryRegisterIndex;
-}
+extern "C" uint32_t ACPIIoApicReadRegister(ACPIIoApic *apic, uint32_t reg);
+extern "C" void ACPIIoApicWriteRegister(ACPIIoApic *apic, uint32_t reg, uint32_t value);
+extern "C" void ACPICheckTable(const ACPIDescriptorTable *table);
+extern "C" void *ACPIMapPhysicalMemory(uintptr_t physicalAddress, size_t length);
+extern "C" void *ACPIGetRSDP();
+extern "C" uint8_t ACPIGetCenturyRegisterIndex();
 
 uintptr_t GetBootloaderInformationOffset();
 
 uintptr_t ArchFindRootSystemDescriptorPointer() {
-	uint64_t uefiRSDP = *((uint64_t *) (LOW_MEMORY_MAP_START + GetBootloaderInformationOffset() + 0x7FE8));
+    uint64_t uefiRSDP = *((uint64_t *) (LOW_MEMORY_MAP_START + GetBootloaderInformationOffset() + 0x7FE8));
 
-	if (uefiRSDP) {
-		return uefiRSDP;
-	}
+    if (uefiRSDP) {
+        return uefiRSDP;
+    }
 
-	PhysicalMemoryRegion searchRegions[2];
+    PhysicalMemoryRegion searchRegions[2];
 
-	searchRegions[0].baseAddress = (uintptr_t) (((uint16_t *) LOW_MEMORY_MAP_START)[0x40E] << 4) + LOW_MEMORY_MAP_START;
-	searchRegions[0].pageCount = 0x400;
-	searchRegions[1].baseAddress = (uintptr_t) 0xE0000 + LOW_MEMORY_MAP_START;
-	searchRegions[1].pageCount = 0x20000;
+    searchRegions[0].baseAddress = (uintptr_t) (((uint16_t *) LOW_MEMORY_MAP_START)[0x40E] << 4) + LOW_MEMORY_MAP_START;
+    searchRegions[0].pageCount = 0x400;
+    searchRegions[1].baseAddress = (uintptr_t) 0xE0000 + LOW_MEMORY_MAP_START;
+    searchRegions[1].pageCount = 0x20000;
 
-	for (uintptr_t i = 0; i < 2; i++) {
-		for (uintptr_t address = searchRegions[i].baseAddress;
-				address < searchRegions[i].baseAddress + searchRegions[i].pageCount;
-				address += 16) {
-			RootSystemDescriptorPointer *rsdp = (RootSystemDescriptorPointer *) address;
+    for (uintptr_t i = 0; i < 2; i++) {
+        for (uintptr_t address = searchRegions[i].baseAddress;
+                address < searchRegions[i].baseAddress + searchRegions[i].pageCount;
+                address += 16) {
+            RootSystemDescriptorPointer *rsdp = (RootSystemDescriptorPointer *) address;
 
-			if (rsdp->signature != SIGNATURE_RSDP) {
-				continue;
-			}
+            if (rsdp->signature != SIGNATURE_RSDP) {
+                continue;
+            }
 
-			if (rsdp->revision == 0) {
-				if (EsMemorySumBytes((uint8_t *) rsdp, 20)) {
-					continue;
-				}
+            if (rsdp->revision == 0) {
+                if (EsMemorySumBytes((uint8_t *) rsdp, 20)) {
+                    continue;
+                }
 
-				return (uintptr_t) rsdp - LOW_MEMORY_MAP_START;
-			} else if (rsdp->revision == 2) {
-				if (EsMemorySumBytes((uint8_t *) rsdp, sizeof(RootSystemDescriptorPointer))) {
-					continue;
-				}
+                return (uintptr_t) rsdp - LOW_MEMORY_MAP_START;
+            } else if (rsdp->revision == 2) {
+                if (EsMemorySumBytes((uint8_t *) rsdp, sizeof(RootSystemDescriptorPointer))) {
+                    continue;
+                }
 
-				return (uintptr_t) rsdp - LOW_MEMORY_MAP_START;
-			}
-		}
-	}
+                return (uintptr_t) rsdp - LOW_MEMORY_MAP_START;
+            }
+        }
+    }
 
-	return 0;
+    return 0;
 }
 
-void ACPIParseTables() {
-	acpi.rsdp = (RootSystemDescriptorPointer *) MMMapPhysical(kernelMMSpace, ArchFindRootSystemDescriptorPointer(), 16384, ES_FLAGS_DEFAULT);
+extern "C" void ACPIParseTables()
+{
+    acpi.rsdp = (RootSystemDescriptorPointer *) MMMapPhysical(kernelMMSpace, ArchFindRootSystemDescriptorPointer(), 16384, ES_FLAGS_DEFAULT);
 
-	ACPIDescriptorTable* madtHeader = nullptr;
-	ACPIDescriptorTable* sdt = nullptr; 
-	bool isXSDT = false;
+    ACPIDescriptorTable* madtHeader = nullptr;
+    ACPIDescriptorTable* sdt = nullptr; 
+    bool isXSDT = false;
 
-	if (acpi.rsdp) {
-		if (acpi.rsdp->revision == 2 && acpi.rsdp->xsdtAddress) {
-			isXSDT = true;
-			sdt = (ACPIDescriptorTable *) acpi.rsdp->xsdtAddress;
-		} else {
-			isXSDT = false;
-			sdt = (ACPIDescriptorTable *) (uintptr_t) acpi.rsdp->rsdtAddress;
-		}
+    if (acpi.rsdp) {
+        if (acpi.rsdp->revision == 2 && acpi.rsdp->xsdtAddress) {
+            isXSDT = true;
+            sdt = (ACPIDescriptorTable *) acpi.rsdp->xsdtAddress;
+        } else {
+            isXSDT = false;
+            sdt = (ACPIDescriptorTable *) (uintptr_t) acpi.rsdp->rsdtAddress;
+        }
 
-		sdt = (ACPIDescriptorTable *) MMMapPhysical(kernelMMSpace, (uintptr_t) sdt, 16384, ES_FLAGS_DEFAULT);
-	} else {
-		KernelPanic("ACPIInitialise - Could not find supported root system descriptor pointer.\nACPI support is required.\n");
-	}
+        sdt = (ACPIDescriptorTable *) MMMapPhysical(kernelMMSpace, (uintptr_t) sdt, 16384, ES_FLAGS_DEFAULT);
+    } else {
+        KernelPanic("ACPIInitialise - Could not find supported root system descriptor pointer.\nACPI support is required.\n");
+    }
 
-	if (((sdt->signature == SIGNATURE_XSDT && isXSDT) || (sdt->signature == SIGNATURE_RSDT && !isXSDT)) 
-			&& sdt->length < 16384 && !EsMemorySumBytes((uint8_t *) sdt, sdt->length)) {
-		// The SDT is valid.
-	} else {
-		KernelPanic("ACPIInitialise - Could not find a valid or supported system descriptor table.\nACPI support is required.\n");
-	}
+    if (((sdt->signature == SIGNATURE_XSDT && isXSDT) || (sdt->signature == SIGNATURE_RSDT && !isXSDT)) 
+            && sdt->length < 16384 && !EsMemorySumBytes((uint8_t *) sdt, sdt->length)) {
+        // The SDT is valid.
+    } else {
+        KernelPanic("ACPIInitialise - Could not find a valid or supported system descriptor table.\nACPI support is required.\n");
+    }
 
-	size_t tablesCount = (sdt->length - sizeof(ACPIDescriptorTable)) >> (isXSDT ? 3 : 2);
+    size_t tablesCount = (sdt->length - sizeof(ACPIDescriptorTable)) >> (isXSDT ? 3 : 2);
 
-	if (tablesCount < 1) {
-		KernelPanic("ACPIInitialise - The system descriptor table contains an unsupported number of tables (%d).\n", tablesCount);
-	} 
+    if (tablesCount < 1) {
+        KernelPanic("ACPIInitialise - The system descriptor table contains an unsupported number of tables (%d).\n", tablesCount);
+    } 
 
-	uintptr_t tableListAddress = (uintptr_t) sdt + ACPI_DESCRIPTOR_TABLE_HEADER_LENGTH;
+    uintptr_t tableListAddress = (uintptr_t) sdt + ACPI_DESCRIPTOR_TABLE_HEADER_LENGTH;
 
-	KernelLog(LOG_INFO, "ACPI", "table count", "ACPIInitialise - Found %d tables.\n", tablesCount);
+    KernelLog(LOG_INFO, "ACPI", "table count", "ACPIInitialise - Found %d tables.\n", tablesCount);
 
-	for (uintptr_t i = 0; i < tablesCount; i++) {
-		uintptr_t address;
+    for (uintptr_t i = 0; i < tablesCount; i++) {
+        uintptr_t address;
 
-		if (isXSDT) {
+        if (isXSDT) {
             uint64_t_unaligned* ptr = (uint64_t*) tableListAddress;
-			address = ptr[i];
-		} else {
+            address = ptr[i];
+        } else {
             uint32_t_unaligned* ptr = (uint32_t*) tableListAddress;
-			address = ptr[i];
-		}
+            address = ptr[i];
+        }
 
-		ACPIDescriptorTable *header = (ACPIDescriptorTable *) MMMapPhysical(kernelMMSpace, address, sizeof(ACPIDescriptorTable), ES_FLAGS_DEFAULT);
+        ACPIDescriptorTable *header = (ACPIDescriptorTable *) MMMapPhysical(kernelMMSpace, address, sizeof(ACPIDescriptorTable), ES_FLAGS_DEFAULT);
 
-		KernelLog(LOG_INFO, "ACPI", "table enumerated", "ACPIInitialise - Found ACPI table '%s'.\n", 4, &header->signature);
+        KernelLog(LOG_INFO, "ACPI", "table enumerated", "ACPIInitialise - Found ACPI table '%s'.\n", 4, &header->signature);
 
-		if (header->signature == SIGNATURE_MADT) {
-			madtHeader = (ACPIDescriptorTable *) MMMapPhysical(kernelMMSpace, address, header->length, ES_FLAGS_DEFAULT);
-			ACPICheckTable(madtHeader);
-		} else if (header->signature == SIGNATURE_FADT) {
-			ACPIDescriptorTable *fadt = (ACPIDescriptorTable *) MMMapPhysical(kernelMMSpace, address, header->length, ES_FLAGS_DEFAULT);
-			ACPICheckTable(fadt);
-			
-			if (header->length > 109) {
-				acpi.centuryRegisterIndex = ((uint8_t *) fadt)[108];
-				uint8_t bootArchitectureFlags = ((uint8_t *) fadt)[109];
-				acpi.ps2ControllerUnavailable = ~bootArchitectureFlags & (1 << 1);
-				acpi.vgaControllerUnavailable =  bootArchitectureFlags & (1 << 2);
-				KernelLog(LOG_INFO, "ACPI", "FADT", "PS/2 controller is %z; VGA controller is %z.\n",
-						acpi.ps2ControllerUnavailable ? "unavailble" : "present",
-						acpi.vgaControllerUnavailable ? "unavailble" : "present");
-			}
+        if (header->signature == SIGNATURE_MADT) {
+            madtHeader = (ACPIDescriptorTable *) MMMapPhysical(kernelMMSpace, address, header->length, ES_FLAGS_DEFAULT);
+            ACPICheckTable(madtHeader);
+        } else if (header->signature == SIGNATURE_FADT) {
+            ACPIDescriptorTable *fadt = (ACPIDescriptorTable *) MMMapPhysical(kernelMMSpace, address, header->length, ES_FLAGS_DEFAULT);
+            ACPICheckTable(fadt);
+            
+            if (header->length > 109) {
+                acpi.centuryRegisterIndex = ((uint8_t *) fadt)[108];
+                uint8_t bootArchitectureFlags = ((uint8_t *) fadt)[109];
+                acpi.ps2ControllerUnavailable = ~bootArchitectureFlags & (1 << 1);
+                acpi.vgaControllerUnavailable =  bootArchitectureFlags & (1 << 2);
+                KernelLog(LOG_INFO, "ACPI", "FADT", "PS/2 controller is %z; VGA controller is %z.\n",
+                        acpi.ps2ControllerUnavailable ? "unavailble" : "present",
+                        acpi.vgaControllerUnavailable ? "unavailble" : "present");
+            }
 
-			MMFree(kernelMMSpace, fadt);
-		} else if (header->signature == SIGNATURE_HPET) {
-			ACPIDescriptorTable *hpet = (ACPIDescriptorTable *) MMMapPhysical(kernelMMSpace, address, header->length, ES_FLAGS_DEFAULT);
-			ACPICheckTable(hpet);
-			
-			if (header->length > 52 && ((uint8_t *) header)[52] == 0) {
-				uint64_t baseAddress;
-				EsMemoryCopy(&baseAddress, (uint8_t *) header + 44, sizeof(uint64_t));
-				KernelLog(LOG_INFO, "ACPI", "HPET", "Found primary HPET with base address %x.\n", baseAddress);
-				acpi.hpetBaseAddress = (uint64_t *) MMMapPhysical(kernelMMSpace, baseAddress, 1024, ES_FLAGS_DEFAULT);
+            MMFree(kernelMMSpace, fadt);
+        } else if (header->signature == SIGNATURE_HPET) {
+            ACPIDescriptorTable *hpet = (ACPIDescriptorTable *) MMMapPhysical(kernelMMSpace, address, header->length, ES_FLAGS_DEFAULT);
+            ACPICheckTable(hpet);
+            
+            if (header->length > 52 && ((uint8_t *) header)[52] == 0) {
+                uint64_t baseAddress;
+                EsMemoryCopy(&baseAddress, (uint8_t *) header + 44, sizeof(uint64_t));
+                KernelLog(LOG_INFO, "ACPI", "HPET", "Found primary HPET with base address %x.\n", baseAddress);
+                acpi.hpetBaseAddress = (uint64_t *) MMMapPhysical(kernelMMSpace, baseAddress, 1024, ES_FLAGS_DEFAULT);
 
-				if (acpi.hpetBaseAddress) {
-					acpi.hpetBaseAddress[2] |= 1; // Start the main counter.
+                if (acpi.hpetBaseAddress) {
+                    acpi.hpetBaseAddress[2] |= 1; // Start the main counter.
 
-					acpi.hpetPeriod = acpi.hpetBaseAddress[0] >> 32;
-					uint8_t revisionID = acpi.hpetBaseAddress[0] & 0xFF;
-					uint64_t initialCount = acpi.hpetBaseAddress[30];
+                    acpi.hpetPeriod = acpi.hpetBaseAddress[0] >> 32;
+                    uint8_t revisionID = acpi.hpetBaseAddress[0] & 0xFF;
+                    uint64_t initialCount = acpi.hpetBaseAddress[30];
 
-					KernelLog(LOG_INFO, "ACPI", "HPET", "HPET has period of %d fs, revision ID %d, and initial count %d.\n",
-							acpi.hpetPeriod, revisionID, initialCount);
-				}
-			}
+                    KernelLog(LOG_INFO, "ACPI", "HPET", "HPET has period of %d fs, revision ID %d, and initial count %d.\n",
+                            acpi.hpetPeriod, revisionID, initialCount);
+                }
+            }
 
-			MMFree(kernelMMSpace, hpet);
-		}
+            MMFree(kernelMMSpace, hpet);
+        }
 
-		MMFree(kernelMMSpace, header);
-	}
+        MMFree(kernelMMSpace, header);
+    }
 
-	MultipleAPICDescriptionTable *madt = (MultipleAPICDescriptionTable *) ((uint8_t *) madtHeader + ACPI_DESCRIPTOR_TABLE_HEADER_LENGTH);
+    MultipleAPICDescriptionTable *madt = (MultipleAPICDescriptionTable *) ((uint8_t *) madtHeader + ACPI_DESCRIPTOR_TABLE_HEADER_LENGTH);
 
-	if (!madt) {
-		KernelPanic("ACPIInitialise - Could not find the MADT table.\nThis is required to use the APIC.\n");
-	}
+    if (!madt) {
+        KernelPanic("ACPIInitialise - Could not find the MADT table.\nThis is required to use the APIC.\n");
+    }
 
-	uintptr_t length = madtHeader->length - ACPI_DESCRIPTOR_TABLE_HEADER_LENGTH - sizeof(MultipleAPICDescriptionTable);
-	uintptr_t startLength = length;
-	uint8_t *data = (uint8_t *) (madt + 1);
+    uintptr_t length = madtHeader->length - ACPI_DESCRIPTOR_TABLE_HEADER_LENGTH - sizeof(MultipleAPICDescriptionTable);
+    uintptr_t startLength = length;
+    uint8_t *data = (uint8_t *) (madt + 1);
 
 #ifdef ES_ARCH_X86_64
-	acpi.lapicAddress = (uint32_t volatile *) ACPIMapPhysicalMemory(madt->lapicAddress, 0x10000);
+    acpi.lapicAddress = (uint32_t volatile *) ACPIMapPhysicalMemory(madt->lapicAddress, 0x10000);
 #endif
 
-	while (length && length <= startLength) {
-		uint8_t entryType = data[0];
-		uint8_t entryLength = data[1];
+    while (length && length <= startLength) {
+        uint8_t entryType = data[0];
+        uint8_t entryLength = data[1];
 
-		switch (entryType) {
-			case 0: {
-				// A processor and its LAPIC.
-				if ((data[4] & 1) == 0) goto nextEntry;
-				ArchCPU *processor = acpi.processors + acpi.processorCount;
-				processor->processorID = data[2];
-				processor->apicID = data[3];
-				acpi.processorCount++;
-			} break;
+        switch (entryType) {
+            case 0: {
+                // A processor and its LAPIC.
+                if ((data[4] & 1) == 0) goto nextEntry;
+                ArchCPU *processor = acpi.processors + acpi.processorCount;
+                processor->processorID = data[2];
+                processor->apicID = data[3];
+                acpi.processorCount++;
+            } break;
 
-			case 1: {
-				// An I/O APIC.
-				acpi.ioApics[acpi.ioapicCount].id = data[2];
-				acpi.ioApics[acpi.ioapicCount].address = (uint32_t volatile *) ACPIMapPhysicalMemory(((uint32_t_unaligned *) data)[1], 0x10000);
-				ACPIIoApicReadRegister(&acpi.ioApics[acpi.ioapicCount], 0); // Make sure it's mapped.
-				acpi.ioApics[acpi.ioapicCount].gsiBase = ((uint32_t_unaligned *) data)[2];
-				acpi.ioapicCount++;
-			} break;
+            case 1: {
+                // An I/O APIC.
+                acpi.ioApics[acpi.ioapicCount].id = data[2];
+                acpi.ioApics[acpi.ioapicCount].address = (uint32_t volatile *) ACPIMapPhysicalMemory(((uint32_t_unaligned *) data)[1], 0x10000);
+                ACPIIoApicReadRegister(&acpi.ioApics[acpi.ioapicCount], 0); // Make sure it's mapped.
+                acpi.ioApics[acpi.ioapicCount].gsiBase = ((uint32_t_unaligned *) data)[2];
+                acpi.ioapicCount++;
+            } break;
 
-			case 2: {
-				// An interrupt source override structure.
-				acpi.interruptOverrides[acpi.interruptOverrideCount].sourceIRQ = data[3];
-				acpi.interruptOverrides[acpi.interruptOverrideCount].gsiNumber = ((uint32_t_unaligned *) data)[1];
-				acpi.interruptOverrides[acpi.interruptOverrideCount].activeLow = (data[8] & 2) ? true : false;
-				acpi.interruptOverrides[acpi.interruptOverrideCount].levelTriggered = (data[8] & 8) ? true : false;
-				KernelLog(LOG_INFO, "ACPI", "interrupt override", "ACPIInitialise - Source IRQ %d is mapped to GSI %d%z%z.\n",
-						acpi.interruptOverrides[acpi.interruptOverrideCount].sourceIRQ,
-						acpi.interruptOverrides[acpi.interruptOverrideCount].gsiNumber,
-						acpi.interruptOverrides[acpi.interruptOverrideCount].activeLow ? ", active low" : ", active high",
-						acpi.interruptOverrides[acpi.interruptOverrideCount].levelTriggered ? ", level triggered" : ", edge triggered");
-				acpi.interruptOverrideCount++;
-			} break;
+            case 2: {
+                // An interrupt source override structure.
+                acpi.interruptOverrides[acpi.interruptOverrideCount].sourceIRQ = data[3];
+                acpi.interruptOverrides[acpi.interruptOverrideCount].gsiNumber = ((uint32_t_unaligned *) data)[1];
+                acpi.interruptOverrides[acpi.interruptOverrideCount].activeLow = (data[8] & 2) ? true : false;
+                acpi.interruptOverrides[acpi.interruptOverrideCount].levelTriggered = (data[8] & 8) ? true : false;
+                KernelLog(LOG_INFO, "ACPI", "interrupt override", "ACPIInitialise - Source IRQ %d is mapped to GSI %d%z%z.\n",
+                        acpi.interruptOverrides[acpi.interruptOverrideCount].sourceIRQ,
+                        acpi.interruptOverrides[acpi.interruptOverrideCount].gsiNumber,
+                        acpi.interruptOverrides[acpi.interruptOverrideCount].activeLow ? ", active low" : ", active high",
+                        acpi.interruptOverrides[acpi.interruptOverrideCount].levelTriggered ? ", level triggered" : ", edge triggered");
+                acpi.interruptOverrideCount++;
+            } break;
 
-			case 4: {
-				// A non-maskable interrupt.
-				acpi.lapicNMIs[acpi.lapicNMICount].processor = data[2];
-				acpi.lapicNMIs[acpi.lapicNMICount].lintIndex = data[5];
-				acpi.lapicNMIs[acpi.lapicNMICount].activeLow = (data[3] & 2) ? true : false;
-				acpi.lapicNMIs[acpi.lapicNMICount].levelTriggered = (data[3] & 8) ? true : false;
-				acpi.lapicNMICount++;
-			} break;
+            case 4: {
+                // A non-maskable interrupt.
+                acpi.lapicNMIs[acpi.lapicNMICount].processor = data[2];
+                acpi.lapicNMIs[acpi.lapicNMICount].lintIndex = data[5];
+                acpi.lapicNMIs[acpi.lapicNMICount].activeLow = (data[3] & 2) ? true : false;
+                acpi.lapicNMIs[acpi.lapicNMICount].levelTriggered = (data[3] & 8) ? true : false;
+                acpi.lapicNMICount++;
+            } break;
 
-			default: {
-				KernelLog(LOG_ERROR, "ACPI", "unrecognised MADT entry", "ACPIInitialise - Found unknown entry of type %d in MADT\n", entryType);
-			} break;
-		}
+            default: {
+                KernelLog(LOG_ERROR, "ACPI", "unrecognised MADT entry", "ACPIInitialise - Found unknown entry of type %d in MADT\n", entryType);
+            } break;
+        }
 
-		nextEntry:
-		length -= entryLength;
-		data += entryLength;
-	}
+        nextEntry:
+        length -= entryLength;
+        data += entryLength;
+    }
 
-	if (acpi.processorCount > 256 || acpi.ioapicCount > 16 || acpi.interruptOverrideCount > 256 || acpi.lapicNMICount > 32) {
-		KernelPanic("ACPIInitialise - Invalid number of processors (%d/%d), \n"
-			    "                    I/O APICs (%d/%d), interrupt overrides (%d/%d)\n"
-			    "                    and LAPIC NMIs (%d/%d)\n", 
-			    acpi.processorCount, 256, acpi.ioapicCount, 16, acpi.interruptOverrideCount, 256, acpi.lapicNMICount, 32);
-	}
+    if (acpi.processorCount > 256 || acpi.ioapicCount > 16 || acpi.interruptOverrideCount > 256 || acpi.lapicNMICount > 32) {
+        KernelPanic("ACPIInitialise - Invalid number of processors (%d/%d), \n"
+                "                    I/O APICs (%d/%d), interrupt overrides (%d/%d)\n"
+                "                    and LAPIC NMIs (%d/%d)\n", 
+                acpi.processorCount, 256, acpi.ioapicCount, 16, acpi.interruptOverrideCount, 256, acpi.lapicNMICount, 32);
+    }
 }
 
 size_t KGetCPUCount() {
