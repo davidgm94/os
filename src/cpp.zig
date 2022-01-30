@@ -6499,6 +6499,32 @@ export fn MMBalanceThread() callconv(.C) void
     }
 }
 
+export fn MMMapShared(space: *AddressSpace, shared_region: *SharedRegion, offset: u64, asked_byte_count: u64, flags: Region.Flags, base_address: u64) callconv(.C) u64
+{
+    _ = OpenHandleToObject(@ptrToInt(shared_region), KernelObjectType.shared_memory, 0);
+    _ = space.reserve_mutex.acquire();
+    defer space.reserve_mutex.release();
+
+    const byte_count: u64 = if (offset & (page_size - 1) != 0) asked_byte_count + (offset & (page_size - 1)) else asked_byte_count;
+    if (shared_region.size <= offset or shared_region.size < offset + byte_count)
+    {
+        CloseHandleToObject(@ptrToInt(shared_region), KernelObjectType.shared_memory, 0);
+        return 0;
+    }
+    const region = MMReserve(space, byte_count, flags.or_flag(.shared), base_address) orelse
+    {
+        CloseHandleToObject(@ptrToInt(shared_region), KernelObjectType.shared_memory, 0);
+        return 0;
+    };
+
+    if (!region.flags.contains(.shared)) KernelPanic("cannot commit into non-shared region");
+    if (region.data.u.shared.region != null) KernelPanic("a shared region has already been bound");
+
+    region.data.u.shared.region = shared_region;
+    region.data.u.shared.offset = offset & ~@as(u64, page_size - 1);
+    return region.descriptor.base_address + (offset & (page_size - 1));
+}
+
 export fn KernelInitialise() callconv(.C) void
 {
     kernelProcess = &_kernelProcess;

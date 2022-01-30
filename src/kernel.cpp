@@ -6501,33 +6501,7 @@ extern "C" void MMPhysicalInsertZeroedPage(uintptr_t page);
 extern "C" void MMZeroPageThread();
 extern "C" void MMObjectCacheTrimThread();
 extern "C" void MMBalanceThread();
-
-void *MMMapShared(MMSpace *space, MMSharedRegion *sharedRegion, uintptr_t offset, size_t bytes, uint32_t additionalFlags = ES_FLAGS_DEFAULT, void *baseAddress = nullptr) {
-	MMRegion *region;
-	OpenHandleToObject(sharedRegion, KERNEL_OBJECT_SHMEM);
-
-	KMutexAcquire(&space->reserveMutex);
-	EsDefer(KMutexRelease(&space->reserveMutex));
-
-	if (offset & (K_PAGE_SIZE - 1)) bytes += offset & (K_PAGE_SIZE - 1); 
-	if (sharedRegion->sizeBytes <= offset) goto fail;
-	if (sharedRegion->sizeBytes < offset + bytes) goto fail;
-
-	region = MMReserve(space, bytes, MM_REGION_SHARED | additionalFlags, (uintptr_t) baseAddress);
-	if (!region) goto fail;
-
-	if (!(region->flags & MM_REGION_SHARED)) KernelPanic("MMMapShared - Cannot commit into non-shared region.\n");
-	if (region->data.shared.region) KernelPanic("MMMapShared - A shared region has already been bound.\n");
-
-	region->data.shared.region = sharedRegion;
-	region->data.shared.offset = offset & ~(K_PAGE_SIZE - 1);
-
-	return (uint8_t *) region->baseAddress + (offset & (K_PAGE_SIZE - 1));
-
-	fail:;
-	CloseHandleToObject(sharedRegion, KERNEL_OBJECT_SHMEM);
-	return nullptr;
-}
+extern "C" void *MMMapShared(MMSpace *space, MMSharedRegion *sharedRegion, uintptr_t offset, size_t bytes, uint32_t additionalFlags = ES_FLAGS_DEFAULT, void *baseAddress = nullptr);
 
 bool MMFaultRange(uintptr_t address, uintptr_t byteCount, uint32_t flags = ES_FLAGS_DEFAULT) {
 	uintptr_t start = address & ~(K_PAGE_SIZE - 1);
