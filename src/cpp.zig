@@ -4550,7 +4550,7 @@ export fn KThreadCreate(name: [*:0]const u8, entry: fn (u64) callconv(.C) void, 
     return ThreadSpawn(name, @ptrToInt(entry), argument, Thread.Flags.empty(), null, 0) != null;
 }
 
-extern fn OpenHandleToObject(object: u64, type: u32, flags: u32) callconv(.C) bool;
+extern fn OpenHandleToObject(object: u64, type: KernelObjectType, flags: u32) callconv(.C) bool;
 extern fn ArchInitialiseThread(kernel_stack: u64, kernel_stack_size: u64, thread: *Thread, start_address: u64, argument1: u64, argument2: u64, userland: bool, user_stack: u64, user_stack_size: u64) callconv(.C) *InterruptContext;
 
 export fn ThreadSpawn(name: [*:0]const u8, start_address: u64, argument1: u64, flags: Thread.Flags, maybe_process: ?*Process, argument2: u64) callconv(.C) ?*Thread
@@ -4637,7 +4637,7 @@ export fn ThreadSpawn(name: [*:0]const u8, start_address: u64, argument1: u64, f
 
         // object process
         // @TODO
-        _ = OpenHandleToObject(@ptrToInt(process), 1, 0);
+        _ = OpenHandleToObject(@ptrToInt(process), KernelObjectType.process, 0);
 
         if (thread.type == .normal)
         {
@@ -5118,6 +5118,7 @@ pub const Physical = extern struct
         const low_available_page_threshold = 16777216 / page_size;
         const critical_available_page_threshold = 1048576 / page_size;
         const critical_remaining_commit_threshold = 1048576 / page_size;
+        const page_count_to_find_balance = 4194304 / page_size;
     };
 
     pub const Flags = Bitflag(enum(u32)
@@ -6417,6 +6418,84 @@ export fn MMObjectCacheTrimThread() callconv(.C) void
         {
             pmm.object_cache_list_mutex.release();
         }
+    }
+}
+
+export fn MMBalanceThread() callconv(.C) void
+{
+    var target_available_pages: u64 = 0;
+
+    while (true)
+    {
+        if (pmm.get_available_page_count() >= target_available_pages)
+        {
+            _ = pmm.available_low_event.wait();
+            target_available_pages = Physical.Allocator.low_available_page_threshold + Physical.Allocator.page_count_to_find_balance;
+        }
+
+        _ = scheduler.all_processes_mutex.acquire();
+        const process = if (pmm.next_process_to_balance) |p| p else scheduler.all_processes.first.?.value.?;
+        pmm.next_process_to_balance = if (process.all_item.next) |next| next.value else null;
+        _ = OpenHandleToObject(@ptrToInt(process), KernelObjectType.process, 0);
+        scheduler.all_processes_mutex.release();
+
+        const space = process.address_space;
+        ThreadSetTemporaryAddressSpace(space);
+        _ = space.reserve_mutex.acquire();
+        var maybe_item = if (pmm.next_region_to_balance) |r| &r.u.item.u.non_guard else space.used_regions_non_guard.first;
+
+        while (maybe_item != null and pmm.get_available_page_count() < target_available_pages)
+        {
+            const item = maybe_item.?;
+            const region = item.value.?;
+
+            _ = region.data.map_mutex.acquire();
+
+            var can_resume = false;
+
+            if (region.flags.contains(.file))
+            {
+                TODO();
+            }
+            else if (region.flags.contains(.cache))
+            {
+                _ = activeSessionManager.mutex.acquire();
+
+                var maybe_item2 = activeSessionManager.LRU_list.first;
+                while (maybe_item2 != null and pmm.get_available_page_count() < target_available_pages)
+                {
+                    const item2 = maybe_item2.?;
+                    const section = item2.value.?;
+                    if (section.cache != null and section.referenced_page_count != 0) CCDereferenceActiveSection(section, 0);
+                    maybe_item2 = item2.next;
+                }
+
+                activeSessionManager.mutex.release();
+            }
+
+            region.data.map_mutex.release();
+
+            if (pmm.get_available_page_count() >= target_available_pages and can_resume) break;
+
+            maybe_item = item.next;
+            pmm.balance_resume_position = 0;
+        }
+
+
+        if (maybe_item) |item|
+        {
+            pmm.next_region_to_balance = item.value;
+            pmm.next_process_to_balance = process;
+        }
+        else
+        {
+            pmm.next_region_to_balance = null;
+            pmm.balance_resume_position = 0;
+        }
+
+        space.reserve_mutex.release();
+        ThreadSetTemporaryAddressSpace(null);
+        CloseHandleToObject(@ptrToInt(process), KernelObjectType.process, 0);
     }
 }
 
