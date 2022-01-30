@@ -7173,48 +7173,7 @@ void Scheduler::MaybeUpdateActiveList(Thread *thread) {
 	activeThreads[effectivePriority].InsertStart(&thread->item);
 }
 
-uint64_t ArchGetTimeFromPITMs() {
-	// TODO This isn't working on real hardware, but EarlyDelay1Ms is?
-
-	// NOTE This will only work if called at least once every 50 ms.
-	// 	(The PIT only stores a 16-bit counter, which is depleted every 50 ms.)
-
-	static bool started = false;
-	static uint64_t cumulative = 0, last = 0;
-
-	if (!started) {
-		ProcessorOut8(IO_PIT_COMMAND, 0x30);
-		ProcessorOut8(IO_PIT_DATA, 0xFF);
-		ProcessorOut8(IO_PIT_DATA, 0xFF);
-		started = true;
-		last = 0xFFFF;
-		return 0;
-	} else {
-		ProcessorOut8(IO_PIT_COMMAND, 0x00);
-		uint16_t x = ProcessorIn8(IO_PIT_DATA);
-		x |= (ProcessorIn8(IO_PIT_DATA)) << 8;
-		cumulative += last - x;
-		if (x > last) cumulative += 0x10000;
-		last = x;
-		return cumulative * 1000 / 1193182;
-	}
-}
-
-uint64_t ArchGetTimeMs() {
-	// Update the time stamp counter synchronization value.
-	timeStampCounterSynchronizationValue = ((timeStampCounterSynchronizationValue & 0x8000000000000000) 
-			^ 0x8000000000000000) | ProcessorReadTimeStamp();
-
-#ifdef ES_ARCH_X86_64
-	if (acpi.hpetBaseAddress && acpi.hpetPeriod) {
-		__int128 fsToMs = 1000000000000;
-		__int128 reading = acpi.hpetBaseAddress[30];
-		return (uint64_t) (reading * (__int128) acpi.hpetPeriod / fsToMs);
-	}
-#endif
-
-	return ArchGetTimeFromPITMs();
-}
+extern "C" uint64_t ArchGetTimeFromPITMs();
 
 void Scheduler::Yield(InterruptContext *context) {
 	CPULocalStorage *local = GetLocalStorage();
@@ -7372,50 +7331,7 @@ void Scheduler::Yield(InterruptContext *context) {
 	KernelPanic("Scheduler::Yield - DoContextSwitch unexpectedly returned.\n");
 }
 
-void ThreadPause(Thread *thread, bool resume) {
-	KSpinlockAcquire(&scheduler.dispatchSpinlock);
-
-	if (thread->paused == !resume) {
-		return;
-	}
-
-	thread->paused = !resume;
-
-	if (!resume && thread->terminatableState == THREAD_TERMINATABLE) {
-		if (thread->state == THREAD_ACTIVE) {
-			if (thread->executing) {
-				if (thread == GetCurrentThread()) {
-					KSpinlockRelease(&scheduler.dispatchSpinlock);
-
-					// Yield.
-					ProcessorFakeTimerInterrupt();
-
-					if (thread->paused) {
-						KernelPanic("ThreadPause - Current thread incorrectly resumed.\n");
-					}
-				} else {
-					// The thread is executing, but on a different processor.
-					// Send them an IPI to stop.
-					ProcessorSendYieldIPI(thread);
-					// TODO The interrupt context might not be set at this point.
-				}
-			} else {
-				// Remove the thread from the active queue, and put it into the paused queue.
-				thread->item.RemoveFromList();
-				scheduler.AddActiveThread(thread, false);
-			}
-		} else {
-			// The thread doesn't need to be in the paused queue as it won't run anyway.
-			// If it is unblocked, then AddActiveThread will put it into the correct queue.
-		}
-	} else if (resume && thread->item.list == &scheduler.pausedThreads) {
-		// Remove the thread from the paused queue, and put it into the active queue.
-		scheduler.pausedThreads.Remove(&thread->item);
-		scheduler.AddActiveThread(thread, false);
-	}
-
-	KSpinlockRelease(&scheduler.dispatchSpinlock);
-}
+extern "C" void ThreadPause(Thread *thread, bool resume);
 
 void ProcessPause(Process *process, bool resume) {
 	KMutexAcquire(&process->threadsMutex);

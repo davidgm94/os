@@ -7441,6 +7441,88 @@ export fn ProcessorSendYieldIPI(thread: *Thread) callconv(.C) void
     ipiLock.release();
     while (!thread.received_yield_IPI.read_volatile()) {}
 }
+var get_time_from_PIT_ms_started = false;
+var get_time_from_PIT_ms_cumulative: u64 = 0;
+var get_time_from_PIT_ms_last: u64 = 0;
+
+export fn ArchGetTimeFromPITMs() callconv(.C) u64
+{
+    if (!get_time_from_PIT_ms_started)
+    {
+        ProcessorOut8(IO_PIT_COMMAND, 0x30);
+        ProcessorOut8(IO_PIT_DATA, 0xff);
+        ProcessorOut8(IO_PIT_DATA, 0xff);
+        get_time_from_PIT_ms_started = true;
+        get_time_from_PIT_ms_last = 0xffff;
+        return 0;
+    }
+    else
+    {
+        ProcessorOut8(IO_PIT_COMMAND, 0);
+        var x: u16 = ProcessorIn8(IO_PIT_DATA);
+        x |= @as(u16, ProcessorIn8(IO_PIT_DATA)) << 8;
+        get_time_from_PIT_ms_cumulative += get_time_from_PIT_ms_last - x;
+        if (x > get_time_from_PIT_ms_last) get_time_from_PIT_ms_cumulative += 0x10000;
+        get_time_from_PIT_ms_last = x;
+        return get_time_from_PIT_ms_cumulative * 1000 / 1193182;
+    }
+}
+
+export fn ArchGetTimeMs() callconv(.C) u64
+{
+    timeStampCounterSynchronizationValue.write_volatile(((timeStampCounterSynchronizationValue.read_volatile() & 0x8000000000000000) ^ 0x8000000000000000) | ProcessorReadTimeStamp());
+    if (acpi.HPET_base_address != null and acpi.HPET_period != 0)
+    {
+        const fs_to_ms = 1000000000000;
+        const reading: u128 = acpi.HPET_base_address.?[30];
+        return @intCast(u64, reading * acpi.HPET_period / fs_to_ms);
+    }
+
+    return ArchGetTimeFromPITMs();
+}
+
+export fn ThreadPause(thread: *Thread, resume_after: bool) callconv(.C) void
+{
+    scheduler.dispatch_spinlock.acquire();
+
+    if (thread.paused.read_volatile() == !resume_after) return;
+
+    thread.paused.write_volatile(!resume_after);
+
+    if (!resume_after and thread.terminatable_state.read_volatile() == .terminatable)
+    {
+        if (thread.state.read_volatile() == .active)
+        {
+            if (thread.executing.read_volatile())
+            {
+                if (thread == GetCurrentThread())
+                {
+                    scheduler.dispatch_spinlock.release();
+
+                    ProcessorFakeTimerInterrupt();
+
+                    if (thread.paused.read_volatile()) KernelPanic("current thread incorrectly resumed");
+                }
+                else
+                {
+                    ProcessorSendYieldIPI(thread);
+                }
+            }
+            else
+            {
+                thread.item.remove_from_list();
+                SchedulerAddActiveThread(thread, false);
+            }
+        }
+    }
+    else if (resume_after and thread.item.list == &scheduler.paused_threads)
+    {
+        scheduler.paused_threads.remove(&thread.item);
+        SchedulerAddActiveThread(thread, false);
+    }
+
+    scheduler.dispatch_spinlock.release();
+}
 
 export fn KernelInitialise() callconv(.C) void
 {
