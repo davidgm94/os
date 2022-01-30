@@ -71,6 +71,7 @@ extern fn ProcessorAreInterruptsEnabled() callconv(.C) bool;
 extern fn ProcessorEnableInterrupts() callconv(.C) void;
 extern fn ProcessorDisableInterrupts() callconv(.C) void;
 extern fn ProcessorFakeTimerInterrupt() callconv(.C) noreturn;
+extern fn ProcessorInvalidatePage(page: u64) callconv(.C) void;
 extern fn GetLocalStorage() callconv(.C) ?*LocalStorage;
 extern fn GetCurrentThread() callconv(.C) ?*Thread;
 
@@ -6080,6 +6081,46 @@ export fn MMPhysicalInsertFreePagesEnd() callconv(.C) void
 {
     if (pmm.free_page_count > Physical.Allocator.zero_page_threshold) _ = pmm.zero_page_event.set(true);
     MMUpdateAvailablePageCount(true);
+}
+
+export fn PMZero(asked_page_ptr: [*]u64, asked_page_count: u64, contiguous: bool) callconv(.C) void
+{
+    _ = pmm.manipulation_lock.acquire();
+
+    var page_count = asked_page_count;
+    var pages = asked_page_ptr;
+
+    while (true)
+    {
+        const do_count = if (page_count > Physical.memory_manipulation_region_page_count) Physical.memory_manipulation_region_page_count else page_count;
+        page_count -= do_count;
+
+        const region = @ptrToInt(pmm.manipulation_region);
+        var i: u64 = 0;
+        while (i < do_count) : (i += 1)
+        {
+            _ = MMArchMapPage(&_coreMMSpace, if (contiguous) pages[0] + (i << page_bit_count) else pages[i], region + page_size * i, MapPageFlags.from_flags(.{ .overwrite, .no_new_tables }));
+        }
+
+        pmm.manipulation_processor_lock.acquire();
+
+        i = 0;
+        while (i < do_count) : (i += 1)
+        {
+            ProcessorInvalidatePage(region + i * page_size);
+        }
+
+        EsMemoryZero(region, do_count * page_size);
+        pmm.manipulation_processor_lock.release();
+
+        if (page_count != 0)
+        {
+            if (!contiguous) pages = @intToPtr([*]u64, @ptrToInt(pages) + Physical.memory_manipulation_region_page_count);
+        }
+        else break;
+    }
+
+    pmm.manipulation_lock.release();
 }
 
 export fn KernelInitialise() callconv(.C) void

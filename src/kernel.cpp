@@ -6480,41 +6480,7 @@ void CCInitialise() {
 	activeSectionManager.writeBackThread->isPageGenerator = true;
 }
 
-void PMZero(uintptr_t *pages, size_t pageCount, bool contiguous) {
-	KMutexAcquire(&pmm.pmManipulationLock);
-
-	repeat:;
-	size_t doCount = pageCount > PHYSICAL_MEMORY_MANIPULATION_REGION_PAGES ? PHYSICAL_MEMORY_MANIPULATION_REGION_PAGES : pageCount;
-	pageCount -= doCount;
-
-	{
-		MMSpace *vas = coreMMSpace;
-		void *region = pmm.pmManipulationRegion;
-
-		for (uintptr_t i = 0; i < doCount; i++) {
-			MMArchMapPage(vas, contiguous ? pages[0] + (i << K_PAGE_BITS) : pages[i], 
-					(uintptr_t) region + K_PAGE_SIZE * i, MM_MAP_PAGE_OVERWRITE | MM_MAP_PAGE_NO_NEW_TABLES);
-		}
-
-		KSpinlockAcquire(&pmm.pmManipulationProcessorLock);
-
-		for (uintptr_t i = 0; i < doCount; i++) {
-			ProcessorInvalidatePage((uintptr_t) region + i * K_PAGE_SIZE);
-		}
-
-		EsMemoryZero(region, doCount * K_PAGE_SIZE);
-
-		KSpinlockRelease(&pmm.pmManipulationProcessorLock);
-	}
-
-	if (pageCount) {
-		if (!contiguous) pages += PHYSICAL_MEMORY_MANIPULATION_REGION_PAGES;
-		goto repeat;
-	}
-
-	// if (pageNumbers) EsPrint("w%d\n", pmm.pmManipulationLock.blockedThreads.count);
-	KMutexRelease(&pmm.pmManipulationLock);
-}
+extern "C" void PMZero(uintptr_t *pages, size_t pageCount, bool contiguous);
 
 alignas(K_PAGE_SIZE) uint8_t earlyZeroBuffer[K_PAGE_SIZE];
 
