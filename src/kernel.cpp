@@ -7334,47 +7334,6 @@ void Scheduler::Yield(InterruptContext *context) {
 extern "C" void ThreadPause(Thread *thread, bool resume);
 extern "C" void ProcessPause(Process *process, bool resume);
 
-void ProcessCrash(Process *process, EsCrashReason *crashReason) {
-	if (process == kernelProcess) {
-		KernelPanic("ProcessCrash - Kernel process has crashed (%d).\n", crashReason->errorCode);
-	}
-
-	if (process->type != PROCESS_NORMAL) {
-		KernelPanic("ProcessCrash - A critical process has crashed (%d).\n", crashReason->errorCode);
-	}
-
-	if (GetCurrentThread()->process != process) {
-		KernelPanic("ProcessCrash - Attempt to crash process from different process.\n");
-	}
-
-	KMutexAcquire(&process->crashMutex);
-
-	if (process->crashed) {
-		KMutexRelease(&process->crashMutex);
-		return;
-	}
-
-	process->crashed = true;
-
-	KernelLog(LOG_ERROR, "Scheduler", "process crashed", "Process %x has crashed! (%d)\n", process, crashReason->errorCode);
-
-	EsMemoryCopy(&process->crashReason, crashReason, sizeof(EsCrashReason));
-
-	if (!scheduler.shutdown) {
-		_EsMessageWithObject m;
-		EsMemoryZero(&m, sizeof(m));
-		m.message.type = ES_MSG_APPLICATION_CRASH;
-		m.message.crash.pid = process->id;
-		EsMemoryCopy(&m.message.crash.reason, crashReason, sizeof(EsCrashReason));
-		DesktopSendMessage(&m);
-	}
-
-	KMutexRelease(&process->crashMutex);
-
-	// TODO Shouldn't this be done before sending the desktop message?
-	ProcessPause(GetCurrentThread()->process, false);
-}
-
 void MMPhysicalInsertFreePagesNext(uintptr_t page) {
 	MMPageFrame *frame = pmm.pageFrames + page;
 	frame->state = MMPageFrame::FREE;

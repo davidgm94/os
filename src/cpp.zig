@@ -7539,6 +7539,36 @@ export fn ProcessPause(process: *Process, resume_after: bool) callconv(.C) void
     process.threads_mutex.release();
 }
 
+export fn ProcessCrash(process: *Process, crash_reason: *CrashReason) callconv(.C) void
+{
+    if (process == kernelProcess) KernelPanic("kernel process has crashed");
+    if (process.type != .normal) KernelPanic("A critical process has crashed");
+    if (GetCurrentThread().?.process != process)
+    {
+        KernelPanic("Attempt to crash process from different process");
+    }
+
+    _ = process.crash_mutex.acquire();
+
+    if (process.crashed)
+    {
+        process.crash_mutex.release();
+        return;
+    }
+
+    process.crashed = true;
+
+    EsMemoryCopy(@ptrToInt(&process.crash_reason), @ptrToInt(crash_reason), @sizeOf(CrashReason));
+
+    if (!scheduler.shutdown.read_volatile())
+    {
+        // Send message to desktop
+    }
+
+    process.crash_mutex.release();
+    ProcessPause(GetCurrentThread().?.process.?, false);
+}
+
 export fn KernelInitialise() callconv(.C) void
 {
     kernelProcess = &_kernelProcess;
