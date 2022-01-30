@@ -3291,7 +3291,7 @@ pub const CPU = extern struct
     APIC_ID: u8,
     boot_processor: bool,
     kernel_stack: *align(1) u64,
-    local_storage: *LocalStorage,
+    local_storage: ?*LocalStorage,
 };
 
 pub const SimpleList = extern struct
@@ -6952,6 +6952,68 @@ export fn ACPIGetCenturyRegisterIndex() callconv(.C) u8
 
 extern fn ACPIParseTables() callconv(.C) void;
 
+// @TODO: ArchInitialiseThread
+
+export fn LapicReadRegister(register: u32) callconv(.C) u32
+{
+    return acpi.LAPIC_address[register];
+}
+
+export fn LapicWriteRegister(register: u32, value: u32) callconv(.C) void
+{
+    acpi.LAPIC_address[register] = value;
+}
+
+const timer_interrupt = 0x40;
+export fn LapicNextTimer(ms: u64) callconv(.C) void
+{
+    LapicWriteRegister(0x320 >> 2, timer_interrupt | (1 << 17));
+    LapicWriteRegister(0x380 >> 2, @intCast(u32, acpi.LAPIC_ticks_per_ms * ms));
+}
+
+export fn LapicEndOfInterrupt() callconv(.C) void
+{
+    LapicWriteRegister(0xb0 >> 2, 0);
+}
+
+const kernel_panic_ipi = 0;
+export var pciConfigSpinlock: Spinlock = undefined;
+export var ipiLock: Spinlock = undefined;
+export fn ProcessorSendIPI(interrupt: u64, nmi: bool, processor_ID: i32) callconv(.C) u64
+{
+    if (interrupt != kernel_panic_ipi) ipiLock.assert_locked();
+
+    var ignored: u64 = 0;
+
+    for (acpi.processors) |*processor|
+    {
+        if (processor_ID != -1)
+        {
+            if (processor_ID != processor.kernel_processor_ID)
+            {
+                ignored += 1;
+                continue;
+            }
+        }
+        else
+        {
+            if (processor == GetLocalStorage().?.cpu or processor.local_storage == null or !processor.local_storage.?.scheduler_ready)
+            {
+                ignored += 1;
+                continue;
+            }
+        }
+
+        const destination = @intCast(u32, processor.APIC_ID) << 24;
+        const command = @intCast(u32, interrupt | (1 << 14) | if (nmi) @as(u32, 0x400) else @as(u32, 0));
+        LapicWriteRegister(0x310 >> 2, destination);
+        LapicWriteRegister(0x300 >> 2, command);
+
+        while (LapicReadRegister(0x300 >> 2) & (1 << 12) != 0) { }
+    }
+
+    return ignored;
+}
 
 export fn KernelInitialise() callconv(.C) void
 {
@@ -6973,6 +7035,7 @@ export fn KernelMain(_: u64) callconv(.C) void
     start_desktop_process();
     _ = shutdownEvent.wait();
 }
+
 export fn get_size_zig() callconv(.C) u64
 {
     return @sizeOf(Region);

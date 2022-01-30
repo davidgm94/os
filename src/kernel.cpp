@@ -7005,61 +7005,14 @@ volatile CallFunctionOnAllProcessorsCallbackFunction callFunctionOnAllProcessors
 volatile uintptr_t callFunctionOnAllProcessorsRemaining;
 //
 // Spinlock since some drivers need to access it in IRQs (e.g. ACPICA).
-KSpinlock pciConfigSpinlock; 
-KSpinlock ipiLock;
+extern KSpinlock pciConfigSpinlock; 
+extern KSpinlock ipiLock;
 
-uint32_t LapicReadRegister(uint32_t reg) {
-	return acpi.lapicAddress[reg];
-}
-
-void LapicWriteRegister(uint32_t reg, uint32_t value) {
-	acpi.lapicAddress[reg] = value;
-}
-
-void LapicNextTimer(size_t ms) {
-	LapicWriteRegister(0x320 >> 2, TIMER_INTERRUPT | (1 << 17)); 
-	LapicWriteRegister(0x380 >> 2, acpi.lapicTicksPerMs * ms); 
-}
-
-void LapicEndOfInterrupt() {
-	LapicWriteRegister(0xB0 >> 2, 0);
-}
-
-size_t ProcessorSendIPI(uintptr_t interrupt, bool nmi = false, int processorID = -1) {
-	// It's possible that another CPU is trying to send an IPI at the same time we want to send the panic IPI.
-	// TODO What should we do in this case?
-	if (interrupt != KERNEL_PANIC_IPI) KSpinlockAssertLocked(&ipiLock);
-
-	// Note: We send IPIs at a special priority that ProcessorDisableInterrupts doesn't mask.
-
-	size_t ignored = 0;
-
-	for (uintptr_t i = 0; i < acpi.processorCount; i++) {
-		ArchCPU *processor = acpi.processors + i;
-
-		if (processorID != -1) {
-			if (processorID != processor->kernelProcessorID) {
-				ignored++;
-				continue;
-			}
-		} else {
-			if (processor == GetLocalStorage()->archCPU || !processor->local || !processor->local->schedulerReady) {
-				ignored++;
-				continue;
-			}
-		}
-
-		uint32_t destination = acpi.processors[i].apicID << 24;
-		uint32_t command = interrupt | (1 << 14) | (nmi ? 0x400 : 0);
-		LapicWriteRegister(0x310 >> 2, destination);
-		LapicWriteRegister(0x300 >> 2, command); 
-
-		// Wait for the interrupt to be sent.
-		while (LapicReadRegister(0x300 >> 2) & (1 << 12));
-	}
-
-	return ignored;
-}
+extern "C" uint32_t LapicReadRegister(uint32_t reg);
+extern "C" void LapicWriteRegister(uint32_t reg, uint32_t value);
+extern "C" void LapicNextTimer(size_t ms);
+extern "C" void LapicEndOfInterrupt();
+extern "C" size_t ProcessorSendIPI(uintptr_t interrupt, bool nmi = false, int processorID = -1);
 
 void ArchCallFunctionOnAllProcessors(CallFunctionOnAllProcessorsCallbackFunction callback, bool includingThisProcessor) {
 	KSpinlockAssertLocked(&ipiLock);
