@@ -3920,6 +3920,11 @@ extern "C" void BitsetTake(Bitset* self, uintptr_t index)
     self->Take(index);
 }
 
+extern "C" void BitsetPut(Bitset* self, uintptr_t index)
+{
+    self->Put(index);
+}
+
 void Bitset::Initialise(size_t count, bool mapAll) {
 	singleCount = (count + 31) & ~31;
 	groupCount = singleCount / BITSET_GROUP_SIZE + 1;
@@ -6493,26 +6498,7 @@ void CCInitialise() {
 extern "C" void PMZero(uintptr_t *pages, size_t pageCount, bool contiguous);
 extern "C" void *MMMapPhysical(MMSpace *space, uintptr_t offset, size_t bytes, uint64_t caching);
 
-void MMPhysicalInsertZeroedPage(uintptr_t page) {
-	if (GetCurrentThread() != pmm.zeroPageThread) {
-		KernelPanic("MMPhysicalInsertZeroedPage - Inserting a zeroed page not on the MMZeroPageThread.\n");
-	}
-
-	MMPageFrame *frame = pmm.pageFrames + page;
-	frame->state = MMPageFrame::ZEROED;
-
-	{
-		frame->list.next = pmm.firstZeroedPage;
-		frame->list.previous = &pmm.firstZeroedPage;
-		if (pmm.firstZeroedPage) pmm.pageFrames[pmm.firstZeroedPage].list.previous = &frame->list.next;
-		pmm.firstZeroedPage = page;
-	}
-
-	pmm.countZeroedPages++;
-	pmm.freeOrZeroedPageBitset.Put(page);
-
-	MMUpdateAvailablePageCount(true);
-}
+extern "C" void MMPhysicalInsertZeroedPage(uintptr_t page);
 
 void MMZeroPageThread() {
 	while (true) {

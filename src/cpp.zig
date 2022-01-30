@@ -6228,6 +6228,7 @@ export fn MMPhysicalAllocate(flags: Physical.Flags, count: u64, alignment: u64, 
 
 extern fn BitsetGet(bitset: *Bitset, count: u64, alignment: u64, below: u64) callconv(.C) u64;
 extern fn BitsetTake(bitset: *Bitset, index: u64) callconv(.C) void;
+extern fn BitsetPut(bitset: *Bitset, index: u64) callconv(.C) void;
 
 export fn MMMapPhysical(space: *AddressSpace, asked_offset: u64, asked_byte_count: u64, caching: Region.Flags) callconv(.C) u64
 {
@@ -6278,6 +6279,23 @@ export fn MMPhysicalAllocateAndMap(asked_size: u64, asked_alignment: u64, maximu
     p_physical_address.* = physical_address;
 
     return true;
+}
+
+export fn MMPhysicalInsertZeroedPage(page: u64) callconv(.C) void
+{
+    if (GetCurrentThread() != pmm.zero_page_thread) KernelPanic("inserting a zeroed page not on the mmzeropagethread");
+
+    const frame = &pmm.pageframes[page];
+    frame.state.write_volatile(.zeroed);
+
+    frame.u.list.next.write_volatile(pmm.first_zeroed_page);
+    frame.u.list.previous = &pmm.first_zeroed_page;
+    if (pmm.first_zeroed_page != 0) pmm.pageframes[pmm.first_zeroed_page].u.list.previous = &frame.u.list.next.value;
+    pmm.first_zeroed_page = page;
+
+    pmm.zeroed_page_count += 1;
+    BitsetPut(&pmm.free_or_zeroed_page_bitset, page);
+    MMUpdateAvailablePageCount(true);
 }
 
 export fn KernelInitialise() callconv(.C) void
