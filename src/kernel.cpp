@@ -327,7 +327,6 @@ extern "C"
     void PCDisablePIC();
     void ProcessCrash(Process *process, EsCrashReason *crashReason);
     void MMInitialise();
-    void ArchInitialise();
     void ArchShutdown();
     void ArchNextTimer(size_t ms); // Schedule the next TIMER_INTERRUPT.
     uint64_t ArchGetTimeMs(); // Called by the scheduler on the boot processor every context switch.
@@ -3842,8 +3841,6 @@ extern "C" Thread* ThreadSpawn(const char *cName, uintptr_t startAddress, uintpt
 
 extern "C" bool KThreadCreate(const char *cName, void (*startAddress)(uintptr_t), uintptr_t argument = 0);
 
-extern "C" Process *ProcessSpawn(ProcessType processType);
-
 struct InterruptContext;
 struct CPULocalStorage;
 
@@ -7107,8 +7104,6 @@ int8_t Scheduler::GetThreadEffectivePriority(Thread *thread) {
 }
 
 extern "C" void EarlyDelay1Ms();
-extern "C" void EsRandomAddEntropy(uint64_t x);
-
 extern uint64_t timeStampTicksPerMs;
 
 struct NewProcessorStorage {
@@ -7116,90 +7111,7 @@ struct NewProcessorStorage {
 	uint32_t *gdt;
 };
 
-NewProcessorStorage AllocateNewProcessorStorage(ArchCPU *archCPU) {
-	NewProcessorStorage storage = {};
-	storage.local = (CPULocalStorage *) EsHeapAllocate(sizeof(CPULocalStorage), true, K_FIXED);
-#ifdef ES_ARCH_X86_64
-	storage.gdt = (uint32_t *) MMMapPhysical(kernelMMSpace, MMPhysicalAllocate(MM_PHYSICAL_ALLOCATE_COMMIT_NOW), K_PAGE_SIZE, ES_FLAGS_DEFAULT);
-#endif
-	storage.local->archCPU = archCPU;
-	archCPU->local = storage.local;
-	scheduler.CreateProcessorThreads(storage.local);
-	archCPU->kernelProcessorID = storage.local->processorID;
-	return storage;
-}
-
-void ArchInitialise() {
-	ACPIParseTables();
-
-	uint8_t bootstrapLapicID = (LapicReadRegister(0x20 >> 2) >> 24); 
-
-	ArchCPU *currentCPU = nullptr;
-
-	for (uintptr_t i = 0; i < acpi.processorCount; i++) {
-		if (acpi.processors[i].apicID == bootstrapLapicID) {
-			// That's us!
-			currentCPU = acpi.processors + i;
-			currentCPU->bootProcessor = true;
-			break;
-		}
-	}
-
-	if (!currentCPU) {
-		KernelPanic("ArchInitialise - Could not find the bootstrap processor\n");
-	}
-
-	// Calibrate the LAPIC's timer and processor's timestamp counter.
-	ProcessorDisableInterrupts();
-	uint64_t start = ProcessorReadTimeStamp();
-	LapicWriteRegister(0x380 >> 2, (uint32_t) -1); 
-	for (int i = 0; i < 8; i++) EarlyDelay1Ms(); // Average over 8ms
-	acpi.lapicTicksPerMs = ((uint32_t) -1 - LapicReadRegister(0x390 >> 2)) >> 4;
-	EsRandomAddEntropy(LapicReadRegister(0x390 >> 2));
-	uint64_t end = ProcessorReadTimeStamp();
-	timeStampTicksPerMs = (end - start) >> 3;
-	ProcessorEnableInterrupts();
-	// EsPrint("timeStampTicksPerMs = %d\n", timeStampTicksPerMs);
-
-	// Finish processor initialisation.
-	// This sets up interrupts, the timer, CPULocalStorage, the GDT and TSS,
-	// and registers the processor with the scheduler.
-
-	NewProcessorStorage storage = AllocateNewProcessorStorage(currentCPU);
-	SetupProcessor2(&storage);
-}
-
-Process *ProcessSpawn(ProcessType processType) {
-	if (scheduler.shutdown) return nullptr;
-
-	Process *process = processType == PROCESS_KERNEL ? kernelProcess : (Process *) PoolAdd(&scheduler.processPool, sizeof(Process));
-
-	if (!process) {
-		return nullptr;
-	}
-
-	process->vmm = processType == PROCESS_KERNEL ? kernelMMSpace : (MMSpace *) PoolAdd(&scheduler.mmSpacePool, sizeof(MMSpace));
-
-	if (!process->vmm) {
-		PoolRemove(&scheduler.processPool, process);
-		return nullptr;
-	}
-
-	process->id = __sync_fetch_and_add(&scheduler.nextProcessID, 1);
-	process->vmm->referenceCount = 1;
-	process->allItem.thisItem = process;
-	process->handles = 1;
-	process->handleTable.process = process;
-	process->permissions = ES_PERMISSION_ALL;
-	process->type = processType;
-
-	if (processType == PROCESS_KERNEL) {
-		EsCRTstrcpy(process->cExecutableName, "Kernel");
-		scheduler.allProcesses.InsertEnd(&process->allItem);
-	}
-
-	return process; 
-}
+extern "C" NewProcessorStorage AllocateNewProcessorStorage(ArchCPU *archCPU);
 
 Thread *Scheduler::PickThread(CPULocalStorage *local) {
 	KSpinlockAssertLocked(&dispatchSpinlock);

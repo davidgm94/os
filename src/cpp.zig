@@ -96,6 +96,7 @@ extern fn ProcessorInvalidatePage(page: u64) callconv(.C) void;
 extern fn ProcessorInvalidateAllPages() callconv(.C) void;
 extern fn ProcessorIn8(port: u16) callconv(.C) u8;
 extern fn ProcessorOut8(port: u16, value: u8) callconv(.C) void;
+extern fn ProcessorReadTimeStamp() callconv(.C) u64;
 extern fn GetLocalStorage() callconv(.C) ?*LocalStorage;
 extern fn GetCurrentThread() callconv(.C) ?*Thread;
 
@@ -1976,8 +1977,6 @@ pub const Process = extern struct
         //return self.spawn_thread(start_address, argument1, Thread.Flags.empty());
     //}
 };
-
-extern fn ProcessSpawn(process_type: Process.Type) callconv(.C) ?*Process;
 
 pub const Heap = extern struct
 {
@@ -4566,10 +4565,9 @@ extern fn start_desktop_process() callconv(.C) void;
 
 export var shutdownEvent: Event = undefined;
 
-
 extern fn MMInitialise() callconv(.C) void;
-extern fn ArchInitialise() callconv(.C) void;
 extern fn CreateMainThread() callconv(.C) void;
+extern fn SetupProcessor2(storage: *NewProcessorStorage) callconv(.C) void;
 export fn KThreadCreate(name: [*:0]const u8, entry: fn (u64) callconv(.C) void, argument: u64) callconv(.C) bool
 {
     return ThreadSpawn(name, @ptrToInt(entry), argument, Thread.Flags.empty(), null, 0) != null;
@@ -6999,7 +6997,7 @@ export fn ProcessorSendIPI(interrupt: u64, nmi: bool, processor_ID: i32) callcon
 
     var ignored: u64 = 0;
 
-    for (acpi.processors) |*processor|
+    for (acpi.processors[0..acpi.processor_count]) |*processor|
     {
         if (processor_ID != -1)
         {
@@ -7345,9 +7343,94 @@ pub const RandomNumberGenerator = extern struct
 
 var rng: RandomNumberGenerator = undefined;
 
-export fn EsRandomAddEntropy(x: u64) callconv(.C) void
+export var timeStampTicksPerMs: u64 = undefined;
+
+const NewProcessorStorage = extern struct
 {
-    rng.add_entropy(x);
+    local: *LocalStorage,
+    gdt: u64,
+
+    fn allocate(cpu: *CPU) @This()
+    {
+        var storage: @This() = undefined;
+        storage.local = @intToPtr(*LocalStorage, EsHeapAllocate(@sizeOf(LocalStorage), true, &heapFixed));
+        const gdt_physical_address = MMPhysicalAllocateWithFlags(Physical.Flags.from_flag(.commit_now));
+        storage.gdt = MMMapPhysical(&_kernelMMSpace, gdt_physical_address, page_size, Region.Flags.empty());
+        storage.local.cpu = cpu;
+        cpu.local_storage = storage.local;
+        SchedulerCreateProcessorThreads(storage.local);
+        cpu.kernel_processor_ID = @intCast(u8, storage.local.processor_ID);
+        return storage;
+    }
+};
+
+export fn ArchInitialise() callconv(.C) void
+{
+    ACPIParseTables();
+
+    const bootstrap_LAPIC_ID = @intCast(u8, LapicReadRegister(0x20 >> 2) >> 24);
+
+    const current_cpu = blk:
+    {
+        for (acpi.processors[0..acpi.processor_count]) |*processor|
+        {
+            if (processor.APIC_ID == bootstrap_LAPIC_ID)
+            {
+                processor.boot_processor = true;
+                break :blk processor;
+            }
+        }
+
+        KernelPanic("could not find the bootstrap processor");
+    };
+
+    ProcessorDisableInterrupts();
+    const start = ProcessorReadTimeStamp();
+    LapicWriteRegister(0x380 >> 2, std.math.maxInt(u32));
+    var i: u64 = 0;
+    while (i < 8) : (i += 1)
+    {
+        EarlyDelay1Ms();
+    }
+
+    acpi.LAPIC_ticks_per_ms = (std.math.maxInt(u32) - LapicReadRegister(0x390 >> 2)) >> 4;
+    rng.add_entropy(LapicReadRegister(0x390 >> 2));
+
+    const end = ProcessorReadTimeStamp();
+    timeStampTicksPerMs = (end - start) >> 3;
+    ProcessorEnableInterrupts();
+
+    var storage = NewProcessorStorage.allocate(current_cpu);
+    SetupProcessor2(&storage);
+}
+
+export fn ProcessSpawn(process_type: Process.Type) callconv(.C) ?*Process
+{
+    if (scheduler.shutdown.read_volatile()) return null;
+
+    const process = if (process_type == .kernel)  kernelProcess else (@intToPtr(?*Process, PoolAdd(&scheduler.process_pool, @sizeOf(Process))) orelse return null);
+
+    process.address_space = if (process_type == .kernel) &_kernelMMSpace else (@intToPtr(?*AddressSpace, PoolAdd(&scheduler.address_space_pool, @sizeOf(Process))) orelse 
+        {
+            PoolRemove(&scheduler.process_pool, @ptrToInt(process));
+            return null;
+        });
+
+    process.id = @atomicRmw(@TypeOf(scheduler.next_processor_id), &scheduler.next_process_id, .Add, 1, .SeqCst);
+    process.address_space.reference_count.write_volatile(1);
+    process.all_item.value = process;
+    process.handle_count.write_volatile(1);
+    process.handle_table.process = process;
+    process.permissions = Process.Permission.all();
+    process.type = process_type;
+
+    if (process_type == .kernel)
+    {
+        _ = EsCRTstrcpy(@ptrCast([*:0]u8, &process.executable_name), "Kernel");
+        scheduler.all_processes.insert_at_end(&process.all_item);
+    }
+
+    return process;
 }
 
 export fn KernelInitialise() callconv(.C) void
