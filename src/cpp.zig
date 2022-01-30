@@ -5347,7 +5347,6 @@ pub const UnmapPagesFlags = Bitflag(enum(u32)
 
 extern fn MMArchTranslateAddress(_: *AddressSpace, virtual_address: u64, write_access: bool) callconv(.C) u64;
 extern fn MMArchMapPage(space: *AddressSpace, physical_address: u64, virtual_address: u64, flags: MapPageFlags) callconv(.C) bool;
-extern fn MMPhysicalAllocate(flags: Physical.Flags, count: u64, alignment: u64, below: u64) callconv(.C) u64;
 fn MMPhysicalAllocateWithFlags(flags: Physical.Flags) u64
 {
     return MMPhysicalAllocate(flags, 1, 1, 0);
@@ -6122,6 +6121,113 @@ export fn PMZero(asked_page_ptr: [*]u64, asked_page_count: u64, contiguous: bool
 
     pmm.manipulation_lock.release();
 }
+
+export var earlyZeroBuffer: [page_size]u8 align(page_size) = undefined;
+
+extern fn MMArchEarlyAllocatePage() callconv(.C) u64;
+
+export fn MMPhysicalAllocate(flags: Physical.Flags, count: u64, alignment: u64, below: u64) callconv(.C) u64
+{
+    const mutex_already_acquired = flags.contains(.lock_acquired);
+    if (!mutex_already_acquired) _ = pmm.pageframe_mutex.acquire()
+    else pmm.pageframe_mutex.assert_locked();
+    defer if (!mutex_already_acquired) pmm.pageframe_mutex.release();
+
+    var commit_now = @intCast(i64, count * page_size);
+
+    if (flags.contains(.commit_now))
+    {
+        if (!MMCommit(@intCast(u64, commit_now), true)) return 0;
+    }
+    else commit_now = 0;
+
+    const simple = count == 1 and alignment == 1 and below == 0;
+
+    if (!pmm.pageframeDatabaseInitialised)
+    {
+        if (!simple) KernelPanic("non-simple allocation before initialization of the pageframe database");
+        const page = MMArchEarlyAllocatePage();
+        if (flags.contains(.zeroed))
+        {
+            _ = MMArchMapPage(&_coreMMSpace, page, @ptrToInt(&earlyZeroBuffer), MapPageFlags.from_flags(.{ .overwrite, .no_new_tables, .frame_lock_acquired }));
+            earlyZeroBuffer = zeroes(@TypeOf(earlyZeroBuffer));
+        }
+
+        return page;
+    }
+    else if (!simple)
+    {
+        const pages = BitsetGet(&pmm.free_or_zeroed_page_bitset, count, alignment, below);
+        if (pages != std.math.maxInt(u64))
+        {
+            MMPhysicalActivatePages(pages, count);
+            var address = pages << page_bit_count;
+            if (flags.contains(.zeroed)) PMZero(@ptrCast([*]u64, &address), count, true);
+            return address;
+        }
+        // else error
+    }
+    else
+    {
+        var not_zeroed = false;
+        var page = pmm.first_zeroed_page;
+
+        if (page == 0)
+        {
+            page = pmm.first_free_page;
+            not_zeroed = true;
+        }
+
+        if (page == 0)
+        {
+            page = pmm.last_standby_page;
+            not_zeroed = true;
+        }
+
+        if (page != 0)
+        {
+            const frame = &pmm.pageframes[page];
+
+            switch (frame.state.read_volatile())
+            {
+                .active => KernelPanic("corrupt page frame database"),
+                .standby =>
+                {
+                    if (frame.cache_reference.?.* != ((page << page_bit_count) | 1)) // MM_SHARED_ENTRY_PRESENT
+                    {
+                        KernelPanic("corrupt shared reference back pointer in frame");
+                    }
+
+                    frame.cache_reference.?.* = 0;
+                },
+                else =>
+                {
+                    BitsetTake(&pmm.free_or_zeroed_page_bitset, page);
+                }
+            }
+
+            MMPhysicalActivatePages(page, 1);
+
+            var address = page << page_bit_count;
+            if (not_zeroed and flags.contains(.zeroed)) PMZero(@ptrCast([*]u64, &address), 1, false);
+
+            return address;
+        }
+        // else fail
+    }
+
+    // failed
+    if (!flags.contains(.can_fail))
+    {
+        KernelPanic("out of memory");
+    }
+
+    MMDecommit(@intCast(u64, commit_now), true);
+    return 0;
+}
+
+extern fn BitsetGet(bitset: *Bitset, count: u64, alignment: u64, below: u64) callconv(.C) u64;
+extern fn BitsetTake(bitset: *Bitset, index: u64) callconv(.C) void;
 
 export fn KernelInitialise() callconv(.C) void
 {

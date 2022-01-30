@@ -3910,6 +3910,16 @@ struct Bitset {
 #endif
 };
 
+extern "C" uintptr_t BitsetGet(Bitset* self, size_t count, uintptr_t align, uintptr_t below)
+{
+    return self->Get(count, align, below);
+}
+
+extern "C" void BitsetTake(Bitset* self, uintptr_t index)
+{
+    self->Take(index);
+}
+
 void Bitset::Initialise(size_t count, bool mapAll) {
 	singleCount = (count + 31) & ~31;
 	groupCount = singleCount / BITSET_GROUP_SIZE + 1;
@@ -6482,99 +6492,7 @@ void CCInitialise() {
 
 extern "C" void PMZero(uintptr_t *pages, size_t pageCount, bool contiguous);
 
-alignas(K_PAGE_SIZE) uint8_t earlyZeroBuffer[K_PAGE_SIZE];
-
-uintptr_t MMPhysicalAllocate(unsigned flags, uintptr_t count, uintptr_t align, uintptr_t below) {
-	bool mutexAlreadyAcquired = flags & MM_PHYSICAL_ALLOCATE_LOCK_ACQUIRED;
-	if (!mutexAlreadyAcquired) KMutexAcquire(&pmm.pageFrameMutex);
-	else KMutexAssertLocked(&pmm.pageFrameMutex);
-	EsDefer(if (!mutexAlreadyAcquired) KMutexRelease(&pmm.pageFrameMutex););
-
-	intptr_t commitNow = count * K_PAGE_SIZE;
-
-	if (flags & MM_PHYSICAL_ALLOCATE_COMMIT_NOW) {
-		if (!MMCommit(commitNow, true)) return 0;
-	} else commitNow = 0;
-
-	bool simple = count == 1 && align == 1 && below == 0;
-
-	if (!pmm.pageFrameDatabaseInitialised) {
-		// Early page allocation before the page frame database is initialised.
-
-		if (!simple) {
-			KernelPanic("MMPhysicalAllocate - Non-simple allocation before initialisation of the page frame database.\n");
-		}
-
-		uintptr_t page = MMArchEarlyAllocatePage();
-
-		if (flags & MM_PHYSICAL_ALLOCATE_ZEROED) {
-			// TODO Hack!
-			MMArchMapPage(coreMMSpace, page, (uintptr_t) earlyZeroBuffer, 
-					MM_MAP_PAGE_OVERWRITE | MM_MAP_PAGE_NO_NEW_TABLES | MM_MAP_PAGE_FRAME_LOCK_ACQUIRED);
-			EsMemoryZero(earlyZeroBuffer, K_PAGE_SIZE);
-		}
-
-		return page;
-	} else if (!simple) {
-		// Slow path.
-		// TODO Use standby pages.
-
-		uintptr_t pages = pmm.freeOrZeroedPageBitset.Get(count, align, below);
-		if (pages == (uintptr_t) -1) goto fail;
-		MMPhysicalActivatePages(pages, count);
-		uintptr_t address = pages << K_PAGE_BITS;
-		if (flags & MM_PHYSICAL_ALLOCATE_ZEROED) PMZero(&address, count, true);
-		return address;
-	} else {
-		uintptr_t page = 0;
-		bool notZeroed = false;
-
-		if (!page) page = pmm.firstZeroedPage;
-		if (!page) page = pmm.firstFreePage, notZeroed = true;
-		if (!page) page = pmm.lastStandbyPage, notZeroed = true;
-		if (!page) goto fail;
-
-		MMPageFrame *frame = pmm.pageFrames + page;
-
-		if (frame->state == MMPageFrame::ACTIVE) {
-			KernelPanic("MMPhysicalAllocate - Corrupt page frame database (2).\n");
-		}
-
-		if (frame->state == MMPageFrame::STANDBY) {
-			// EsPrint("Clear RT %x\n", frame);
-
-			if (*frame->cacheReference != ((page << K_PAGE_BITS) | MM_SHARED_ENTRY_PRESENT)) {
-				KernelPanic("MMPhysicalAllocate - Corrupt shared reference back pointer in frame %x.\n", frame);
-			}
-
-			// Clear the entry in the CCCachedSection that referenced this standby frame.
-			*frame->cacheReference = 0;
-
-			// TODO If the CCCachedSection is empty, remove it from its CCSpace.
-		} else {
-			pmm.freeOrZeroedPageBitset.Take(page);
-		}
-
-		MMPhysicalActivatePages(page, 1);
-
-		// EsPrint("PAGE FRAME ALLOCATE: %x\n", page << K_PAGE_BITS);
-
-		uintptr_t address = page << K_PAGE_BITS;
-		if (notZeroed && (flags & MM_PHYSICAL_ALLOCATE_ZEROED)) PMZero(&address, 1, false);
-		// if (!notZeroed) PMCheckZeroed(address);
-		return address;
-	}
-
-	fail:;
-
-	if (!(flags & MM_PHYSICAL_ALLOCATE_CAN_FAIL)) {
-		EsPrint("Out of memory. Committed %d/%d fixed and %d pageable out of a maximum %d.\n", pmm.commitFixed, pmm.commitFixedLimit, pmm.commitPageable, pmm.commitLimit);
-		KernelPanic("MMPhysicalAllocate - Out of memory.\n");
-	}
-
-	MMDecommit(commitNow, true);
-	return 0;
-}
+extern uint8_t earlyZeroBuffer[K_PAGE_SIZE];
 
 void *MMMapPhysical(MMSpace *space, uintptr_t offset, size_t bytes, uint64_t caching) {
 	if (!space) space = kernelMMSpace;
