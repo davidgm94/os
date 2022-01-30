@@ -6888,13 +6888,8 @@ extern "C" void ACPIParseTables()
     }
 }
 
-size_t KGetCPUCount() {
-	return acpi.processorCount;
-}
-
-CPULocalStorage *KGetCPULocal(uintptr_t index) {
-	return acpi.processors[index].local;
-}
+extern "C" size_t KGetCPUCount();
+extern "C" CPULocalStorage *KGetCPULocal(uintptr_t index);
 
 struct InterruptContext {
 	uint64_t cr2, ds;
@@ -6997,12 +6992,12 @@ const char *const exceptionInformation[] = {
 #define INTERRUPT_VECTOR_MSI_START (0x70)
 #define INTERRUPT_VECTOR_MSI_COUNT (0x40)
 
-volatile uintptr_t tlbShootdownVirtualAddress;
-volatile size_t tlbShootdownPageCount;
+extern volatile uintptr_t tlbShootdownVirtualAddress;
+extern volatile size_t tlbShootdownPageCount;
 
 typedef void (*CallFunctionOnAllProcessorsCallbackFunction)();
-volatile CallFunctionOnAllProcessorsCallbackFunction callFunctionOnAllProcessorsCallback;
-volatile uintptr_t callFunctionOnAllProcessorsRemaining;
+extern volatile CallFunctionOnAllProcessorsCallbackFunction callFunctionOnAllProcessorsCallback;
+extern volatile uintptr_t callFunctionOnAllProcessorsRemaining;
 //
 // Spinlock since some drivers need to access it in IRQs (e.g. ACPICA).
 extern KSpinlock pciConfigSpinlock; 
@@ -7014,57 +7009,33 @@ extern "C" void LapicNextTimer(size_t ms);
 extern "C" void LapicEndOfInterrupt();
 extern "C" size_t ProcessorSendIPI(uintptr_t interrupt, bool nmi = false, int processorID = -1);
 
-void ArchCallFunctionOnAllProcessors(CallFunctionOnAllProcessorsCallbackFunction callback, bool includingThisProcessor) {
-	KSpinlockAssertLocked(&ipiLock);
-
-	if (KGetCPUCount() > 1) {
-		callFunctionOnAllProcessorsCallback = callback;
-		callFunctionOnAllProcessorsRemaining = KGetCPUCount();
-		size_t ignored = ProcessorSendIPI(CALL_FUNCTION_ON_ALL_PROCESSORS_IPI);
-		__sync_fetch_and_sub(&callFunctionOnAllProcessorsRemaining, ignored);
-		while (callFunctionOnAllProcessorsRemaining);
-		static volatile size_t totalIgnored = 0;
-		totalIgnored += ignored;
-	}
-
-	if (includingThisProcessor) callback();
-}
+extern "C" void ArchCallFunctionOnAllProcessors(CallFunctionOnAllProcessorsCallbackFunction callback, bool includingThisProcessor);
 
 #define INVALIDATE_ALL_PAGES_THRESHOLD (1024)
 
-void TLBShootdownCallback() {
-	uintptr_t page = tlbShootdownVirtualAddress;
+extern "C" void TLBShootdownCallback();
 
-	if (tlbShootdownPageCount > INVALIDATE_ALL_PAGES_THRESHOLD) { 
-		ProcessorInvalidateAllPages();
-	} else {
-		for (uintptr_t i = 0; i < tlbShootdownPageCount; i++, page += K_PAGE_SIZE) {
-			ProcessorInvalidatePage(page);
-		}
-	}
-}
+extern uint8_t pciIRQLines[0x100 /* slots */][4 /* pins */];
 
-uint8_t pciIRQLines[0x100 /* slots */][4 /* pins */];
-
-MSIHandler msiHandlers[INTERRUPT_VECTOR_MSI_COUNT];
-IRQHandler irqHandlers[0x40];
-KSpinlock irqHandlersLock; // Also for msiHandlers.
+extern MSIHandler msiHandlers[INTERRUPT_VECTOR_MSI_COUNT];
+extern IRQHandler irqHandlers[0x40];
+extern KSpinlock irqHandlersLock; // Also for msiHandlers.
 
 extern volatile uint64_t timeStampCounterSynchronizationValue;
 
-PhysicalMemoryRegion *physicalMemoryRegions;
-size_t physicalMemoryRegionsCount;
-size_t physicalMemoryRegionsPagesCount;
-size_t physicalMemoryOriginalPagesCount;
-size_t physicalMemoryRegionsIndex;
-uintptr_t physicalMemoryHighest;
+extern PhysicalMemoryRegion *physicalMemoryRegions;
+extern size_t physicalMemoryRegionsCount;
+extern size_t physicalMemoryRegionsPagesCount;
+extern size_t physicalMemoryOriginalPagesCount;
+extern size_t physicalMemoryRegionsIndex;
+extern uintptr_t physicalMemoryHighest;
 
-EsUniqueIdentifier installationID; // The identifier of this OS installation, given to us by the bootloader.
-uint32_t bootloaderID;
-uintptr_t bootloaderInformationOffset;
+extern EsUniqueIdentifier installation_ID; // The identifier of this OS installation, given to us by the bootloader.
+extern uint32_t bootloader_ID;
+extern uintptr_t bootloader_information_offset;
 
 uintptr_t GetBootloaderInformationOffset() {
-	return bootloaderInformationOffset;
+	return bootloader_information_offset;
 }
 
 // Recursive page table mapping in slot 0x1FE, so that the top 2GB are available for mcmodel kernel.
@@ -7075,41 +7046,8 @@ uintptr_t GetBootloaderInformationOffset() {
 #define ENTRIES_PER_PAGE_TABLE (512)
 #define ENTRIES_PER_PAGE_TABLE_BITS (9)
 
-void MMArchFreeVAS(MMSpace* space)
-{
-	for (uintptr_t i = 0; i < 256; i++) {
-		if (!PAGE_TABLE_L4[i]) continue;
 
-		for (uintptr_t j = i * ENTRIES_PER_PAGE_TABLE; j < (i + 1) * ENTRIES_PER_PAGE_TABLE; j++) {
-			if (!PAGE_TABLE_L3[j]) continue;
-
-			for (uintptr_t k = j * ENTRIES_PER_PAGE_TABLE; k < (j + 1) * ENTRIES_PER_PAGE_TABLE; k++) {
-				if (!PAGE_TABLE_L2[k]) continue;
-				MMPhysicalFree(PAGE_TABLE_L2[k] & ~(K_PAGE_SIZE - 1));
-				space->data.pageTablesActive--;
-			}
-
-			MMPhysicalFree(PAGE_TABLE_L3[j] & ~(K_PAGE_SIZE - 1));
-			space->data.pageTablesActive--;
-		}
-
-		MMPhysicalFree(PAGE_TABLE_L4[i] & ~(K_PAGE_SIZE - 1));
-		space->data.pageTablesActive--;
-	}
-
-	if (space->data.pageTablesActive) {
-		KernelPanic("MMArchFreeVAS - Space %x still has %d page tables active.\n", space, space->data.pageTablesActive);
-	}
-
-	KMutexAcquire(&coreMMSpace->reserveMutex);
-	MMRegion *l1CommitRegion = MMFindRegion(coreMMSpace, (uintptr_t) space->data.l1Commit);
-	MMArchUnmapPages(coreMMSpace, l1CommitRegion->baseAddress, l1CommitRegion->pageCount, MM_UNMAP_PAGES_FREE);
-	MMUnreserve(coreMMSpace, l1CommitRegion, false /* we manually unmap pages above, so we can free them */);
-	KMutexRelease(&coreMMSpace->reserveMutex);
-	MMDecommit(space->data.pageTablesCommitted * K_PAGE_SIZE, true);
-}
-
-uint8_t coreL1Commit[(0xFFFF800200000000 - 0xFFFF800100000000) >> (/* ENTRIES_PER_PAGE_TABLE_BITS */ 9 + K_PAGE_BITS + 3)];
+extern uint8_t core_L1_commit[(0xFFFF800200000000 - 0xFFFF800100000000) >> (/* ENTRIES_PER_PAGE_TABLE_BITS */ 9 + K_PAGE_BITS + 3)];
 
 #define IO_PIC_1_COMMAND		(0x0020)
 #define IO_PIC_1_DATA			(0x0021)
@@ -7734,7 +7672,7 @@ void MMArchInitialise() {
 		}
 	}
 
-	coreMMSpace->data.l1Commit = coreL1Commit;
+	coreMMSpace->data.l1Commit = core_L1_commit;
 	KMutexAcquire(&coreMMSpace->reserveMutex);
 	kernelMMSpace->data.l1Commit = (uint8_t *) MMReserve(coreMMSpace, L1_COMMIT_SIZE_BYTES, MM_REGION_NORMAL | MM_REGION_NO_COMMIT_TRACKING | MM_REGION_FIXED)->baseAddress;
 	KMutexRelease(&coreMMSpace->reserveMutex);
@@ -7827,7 +7765,7 @@ uintptr_t MMArchEarlyAllocatePage() {
 }
 
 void PCProcessMemoryMap() {
-	physicalMemoryRegions = (PhysicalMemoryRegion *) (LOW_MEMORY_MAP_START + 0x60000 + bootloaderInformationOffset);
+	physicalMemoryRegions = (PhysicalMemoryRegion *) (LOW_MEMORY_MAP_START + 0x60000 + bootloader_information_offset);
 
 	for (uintptr_t i = 0; physicalMemoryRegions[i].baseAddress; i++) {
 		PhysicalMemoryRegion region = physicalMemoryRegions[i];
@@ -10709,7 +10647,7 @@ struct PCIDevice
         enable_features(K_PCI_FEATURE_INTERRUPTS);
 
         intptr_t line = interrupt_line;
-        if (bootloaderID == 2) line = -1;
+        if (bootloader_ID == 2) line = -1;
 
         if (KRegisterIRQ(line, IRQ_handler, context, cOwnerName, this)) return true;
 

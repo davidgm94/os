@@ -91,6 +91,7 @@ extern fn ProcessorEnableInterrupts() callconv(.C) void;
 extern fn ProcessorDisableInterrupts() callconv(.C) void;
 extern fn ProcessorFakeTimerInterrupt() callconv(.C) noreturn;
 extern fn ProcessorInvalidatePage(page: u64) callconv(.C) void;
+extern fn ProcessorInvalidateAllPages() callconv(.C) void;
 extern fn GetLocalStorage() callconv(.C) ?*LocalStorage;
 extern fn GetCurrentThread() callconv(.C) ?*Thread;
 
@@ -2471,8 +2472,9 @@ pub const ArchAddressSpace = extern struct
     const L2_commit_size = 1 << 14;
     const L3_commit_size = 1 << 5;
 
-    var core_L1_commit: [(0xFFFF800200000000 - 0xFFFF800100000000) >> (entry_per_page_table_bit_count + page_bit_count + 3)]u8 = undefined;
 };
+
+export var core_L1_commit: [(0xFFFF800200000000 - 0xFFFF800100000000) >> (entry_per_page_table_bit_count + page_bit_count + 3)]u8 = undefined;
 
 pub const AddressSpace = extern struct
 {
@@ -5140,6 +5142,8 @@ pub const Physical = extern struct
         const page_count_to_find_balance = 4194304 / page_size;
     };
 
+    pub const MemoryRegion = Region.Descriptor;
+
     pub const Flags = Bitflag(enum(u32)
         {
             can_fail = 0,
@@ -5967,8 +5971,6 @@ export fn MMSpaceDestroy(space: *AddressSpace) callconv(.C) void
 
     MMArchFreeVAS(space);
 }
-
-extern fn MMArchFreeVAS(space: *AddressSpace) callconv(.C) void;
 
 export fn KThreadTerminate() callconv(.C) void
 {
@@ -6952,6 +6954,15 @@ export fn ACPIGetCenturyRegisterIndex() callconv(.C) u8
 
 extern fn ACPIParseTables() callconv(.C) void;
 
+export fn KGetCPUCount() callconv(.C) u64
+{
+    return acpi.processor_count;
+}
+
+export fn KGetCPULocal(index: u64) callconv(.C) ?*LocalStorage
+{
+    return acpi.processors[index].local_storage;
+}
 // @TODO: ArchInitialiseThread
 
 export fn LapicReadRegister(register: u32) callconv(.C) u32
@@ -6964,7 +6975,6 @@ export fn LapicWriteRegister(register: u32, value: u32) callconv(.C) void
     acpi.LAPIC_address[register] = value;
 }
 
-const timer_interrupt = 0x40;
 export fn LapicNextTimer(ms: u64) callconv(.C) void
 {
     LapicWriteRegister(0x320 >> 2, timer_interrupt | (1 << 17));
@@ -6976,9 +6986,9 @@ export fn LapicEndOfInterrupt() callconv(.C) void
     LapicWriteRegister(0xb0 >> 2, 0);
 }
 
-const kernel_panic_ipi = 0;
 export var pciConfigSpinlock: Spinlock = undefined;
 export var ipiLock: Spinlock = undefined;
+
 export fn ProcessorSendIPI(interrupt: u64, nmi: bool, processor_ID: i32) callconv(.C) u64
 {
     if (interrupt != kernel_panic_ipi) ipiLock.assert_locked();
@@ -7013,6 +7023,202 @@ export fn ProcessorSendIPI(interrupt: u64, nmi: bool, processor_ID: i32) callcon
     }
 
     return ignored;
+}
+
+export var tlbShootdownVirtualAddress: Volatile(u64) = undefined;
+export var tlbShootdownPageCount: Volatile(u64) = undefined;
+
+const CallFunctionOnAllProcessorsCallback = fn() callconv(.C) void;
+export var callFunctionOnAllProcessorsCallback: CallFunctionOnAllProcessorsCallback = undefined;
+export var callFunctionOnAllProcessorsRemaining: Volatile(u64) = undefined;
+
+const timer_interrupt = 0x40;
+const yield_ipi = 0x41;
+const irq_base = 0x50;
+const call_function_on_all_processors_ipi = 0xf0;
+const tlb_shootdown_ipi = 0xf1;
+const kernel_panic_ipi = 0;
+
+const interrupt_vector_msi_start = 0x70;
+const interrupt_vector_msi_count = 0x40;
+
+export fn ArchCallFunctionOnAllProcessors(callback: CallFunctionOnAllProcessorsCallback, including_this_processor: bool) callconv(.C) void
+{
+    ipiLock.assert_locked();
+
+    const cpu_count = KGetCPUCount();
+    if (cpu_count > 1)
+    {
+        callFunctionOnAllProcessorsCallback = callback;
+        callFunctionOnAllProcessorsRemaining.write_volatile(cpu_count);
+        const ignored = ProcessorSendIPI(call_function_on_all_processors_ipi, false, -1);
+        _ = callFunctionOnAllProcessorsRemaining.atomic_fetch_sub(ignored);
+        while (callFunctionOnAllProcessorsRemaining.read_volatile() != 0) { }
+        // @TODO: do some stats here but static variables inside functions don't translate well to Zig. Figure out the way to port it properly
+    }
+    
+    if (including_this_processor) callback();
+}
+
+const invalidate_all_pages_threshold = 1024;
+
+export fn TLBShootdownCallback() callconv(.C) void
+{
+    const page_count = tlbShootdownPageCount.read_volatile();
+    if (page_count > invalidate_all_pages_threshold)
+    {
+        ProcessorInvalidateAllPages();
+    }
+    else
+    {
+        var i: u64 = 0;
+        var page = tlbShootdownVirtualAddress.read_volatile();
+
+        while (i < page_count) : ({i += 1; page += page_size; })
+        {
+            ProcessorInvalidatePage(page);
+        }
+    }
+}
+
+const KIRQHandler = fn(interrupt_index: u64, context: u64) callconv(.C) bool;
+const MSIHandler = extern struct
+{
+    callback: KIRQHandler,
+    context: u64,
+};
+
+const IRQHandler = extern struct
+{
+    callback: KIRQHandler,
+    context: u64,
+    line: i64,
+    pci_device: u64, // @ABICompatibility
+    owner_name: u64, // @ABICompatibility
+};
+
+export var pciIRQLines: [0x100][4]u8 = undefined;
+export var msiHandlers: [interrupt_vector_msi_count]MSIHandler = undefined;
+export var irqHandlers: [0x40]IRQHandler = undefined;
+export var irqHandlersLock: Spinlock = undefined;
+
+
+export var physicalMemoryRegions: [*]Physical.MemoryRegion = undefined;
+export var physicalMemoryRegionsCount: u64 = undefined;
+export var physicalMemoryRegionsPagesCount: u64 = undefined;
+export var physicalMemoryOriginalPagesCount: u64 = undefined;
+export var physicalMemoryRegionsIndex: u64 = undefined;
+export var physicalMemoryHighest: u64 = undefined;
+
+const PageTables = extern struct
+{
+    fn read(comptime level: Level, indices: Indices) u64
+    {
+        return read_at_index(level, indices[@enumToInt(level)]);
+    }
+
+    fn read_at_index(comptime level: Level, index: u64) u64
+    {
+        return switch (level)
+        {
+            .level1 => @intToPtr(*volatile u64, 0xFFFFFF0000000000 + index * @sizeOf(u64)).*,
+            .level2 => @intToPtr(*volatile u64, 0xFFFFFF7F80000000 + index * @sizeOf(u64)).*,
+            .level3 => @intToPtr(*volatile u64, 0xFFFFFF7FBFC00000 + index * @sizeOf(u64)).*,
+            .level4 => @intToPtr(*volatile u64, 0xFFFFFF7FBFDFE000 + index * @sizeOf(u64)).*,
+        };
+    }
+
+    //fn write(level: Level, indices: Indices, value: u64) void
+    //{
+        //write_at_index(level, indices[@enumToInt(level)], value);
+    //}
+
+    //fn write_at_index(comptime level: Level, index: u64, value: u64) void
+    //{
+        //const levels = [4][*]volatile u64
+        //{
+            //@intToPtr([*]volatile u64, 0xFFFFFF0000000000),
+            //@intToPtr([*]volatile u64, 0xFFFFFF7F80000000),
+            //@intToPtr([*]volatile u64, 0xFFFFFF7FBFC00000),
+            //@intToPtr([*]volatile u64, 0xFFFFFF7FBFDFE000),
+        //};
+        //levels[@enumToInt(level)][index] = value;
+    //}
+
+    //fn take_address_of_element(comptime level: Level, index: u64) u64
+    //{
+        //const levels = [4][*]volatile u64
+        //{
+            //@intToPtr([*]volatile u64, 0xFFFFFF0000000000),
+            //@intToPtr([*]volatile u64, 0xFFFFFF7F80000000),
+            //@intToPtr([*]volatile u64, 0xFFFFFF7FBFC00000),
+            //@intToPtr([*]volatile u64, 0xFFFFFF7FBFDFE000),
+        //};
+        //return @ptrToInt(&levels[@enumToInt(level)][index]);
+    //}
+
+    const Indices = [PageTables.Level.count]u64;
+    fn compute_indices(virtual_address: u64) callconv(.Inline) Indices
+    {
+        var indices: Indices = undefined;
+        inline for (comptime std.enums.values(PageTables.Level)) |value|
+        {
+            indices[@enumToInt(value)] = virtual_address >> (page_bit_count + entry_per_page_table_bit_count * @enumToInt(value));
+        }
+
+        return indices;
+    }
+    const Level = enum(u8)
+    {
+        level1 = 0,
+        level2 = 1,
+        level3 = 2,
+        level4 = 3,
+
+        const count = std.enums.values(PageTables.Level).len;
+    };
+};
+
+export fn MMArchFreeVAS(space: *AddressSpace) callconv(.C) void
+{
+    var i: u64 = 0;
+    while (i < 256) : (i += 1)
+    {
+        if (PageTables.read_at_index(.level4, i) == 0) continue;
+
+        var j = i * entry_per_page_table_count;
+        while (j < (i + 1) * entry_per_page_table_count) : (j += 1)
+        {
+            if (PageTables.read_at_index(.level3, j) == 0) continue;
+
+            var k = j * entry_per_page_table_count;
+            while (k < (j + 1) * entry_per_page_table_count) : (k += 1)
+            {
+                if (PageTables.read_at_index(.level2, k) == 0) continue;
+
+                MMPhysicalFree(PageTables.read_at_index(.level2, k) & ~@as(u64, page_size - 1), false, 1);
+                space.arch.active_page_table_count -= 1;
+            }
+
+            MMPhysicalFree(PageTables.read_at_index(.level3, j) & ~@as(u64, page_size - 1), false, 1);
+            space.arch.active_page_table_count -= 1;
+        }
+
+        MMPhysicalFree(PageTables.read_at_index(.level4, i) & ~@as(u64, page_size - 1), false, 1);
+        space.arch.active_page_table_count -= 1;
+    }
+
+    if (space.arch.active_page_table_count != 0)
+    {
+        KernelPanic("space has still active page tables");
+    }
+
+    _ = _coreMMSpace.reserve_mutex.acquire();
+    const l1_commit_region = MMFindRegion(&_coreMMSpace, @ptrToInt(space.arch.commit.L1)).?;
+    MMArchUnmapPages(&_coreMMSpace, l1_commit_region.descriptor.base_address, l1_commit_region.descriptor.page_count, UnmapPagesFlags.from_flag(.free), 0, null);
+    MMUnreserve(&_coreMMSpace, l1_commit_region, false, false);
+    _coreMMSpace.reserve_mutex.release();
+    MMDecommit(space.arch.commited_page_table_count * page_size, true);
 }
 
 export fn KernelInitialise() callconv(.C) void
