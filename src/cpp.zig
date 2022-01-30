@@ -97,6 +97,7 @@ extern fn ProcessorInvalidateAllPages() callconv(.C) void;
 extern fn ProcessorIn8(port: u16) callconv(.C) u8;
 extern fn ProcessorOut8(port: u16, value: u8) callconv(.C) void;
 extern fn ProcessorReadTimeStamp() callconv(.C) u64;
+extern fn ProcessorReadCR3() callconv(.C) u64;
 extern fn GetLocalStorage() callconv(.C) ?*LocalStorage;
 extern fn GetCurrentThread() callconv(.C) ?*Thread;
 
@@ -7114,19 +7115,19 @@ export var physicalMemoryHighest: u64 = undefined;
 
 const PageTables = extern struct
 {
-    fn read(comptime level: Level, indices: Indices) u64
-    {
-        return read_at_index(level, indices[@enumToInt(level)]);
-    }
+    //fn access(comptime level: Level, indices: Indices) u64
+    //{
+        //return access_at_index(level, indices[@enumToInt(level)]);
+    //}
 
-    fn read_at_index(comptime level: Level, index: u64) u64
+    fn access_at_index(comptime level: Level, index: u64) *volatile u64
     {
         return switch (level)
         {
-            .level1 => @intToPtr(*volatile u64, 0xFFFFFF0000000000 + index * @sizeOf(u64)).*,
-            .level2 => @intToPtr(*volatile u64, 0xFFFFFF7F80000000 + index * @sizeOf(u64)).*,
-            .level3 => @intToPtr(*volatile u64, 0xFFFFFF7FBFC00000 + index * @sizeOf(u64)).*,
-            .level4 => @intToPtr(*volatile u64, 0xFFFFFF7FBFDFE000 + index * @sizeOf(u64)).*,
+            .level1 => @intToPtr(*volatile u64, 0xFFFFFF0000000000 + index * @sizeOf(u64)),
+            .level2 => @intToPtr(*volatile u64, 0xFFFFFF7F80000000 + index * @sizeOf(u64)),
+            .level3 => @intToPtr(*volatile u64, 0xFFFFFF7FBFC00000 + index * @sizeOf(u64)),
+            .level4 => @intToPtr(*volatile u64, 0xFFFFFF7FBFDFE000 + index * @sizeOf(u64)),
         };
     }
 
@@ -7186,27 +7187,27 @@ export fn MMArchFreeVAS(space: *AddressSpace) callconv(.C) void
     var i: u64 = 0;
     while (i < 256) : (i += 1)
     {
-        if (PageTables.read_at_index(.level4, i) == 0) continue;
+        if (PageTables.access_at_index(.level4, i).* == 0) continue;
 
         var j = i * entry_per_page_table_count;
         while (j < (i + 1) * entry_per_page_table_count) : (j += 1)
         {
-            if (PageTables.read_at_index(.level3, j) == 0) continue;
+            if (PageTables.access_at_index(.level3, j).* == 0) continue;
 
             var k = j * entry_per_page_table_count;
             while (k < (j + 1) * entry_per_page_table_count) : (k += 1)
             {
-                if (PageTables.read_at_index(.level2, k) == 0) continue;
+                if (PageTables.access_at_index(.level2, k).* == 0) continue;
 
-                MMPhysicalFree(PageTables.read_at_index(.level2, k) & ~@as(u64, page_size - 1), false, 1);
+                MMPhysicalFree(PageTables.access_at_index(.level2, k).* & ~@as(u64, page_size - 1), false, 1);
                 space.arch.active_page_table_count -= 1;
             }
 
-            MMPhysicalFree(PageTables.read_at_index(.level3, j) & ~@as(u64, page_size - 1), false, 1);
+            MMPhysicalFree(PageTables.access_at_index(.level3, j).* & ~@as(u64, page_size - 1), false, 1);
             space.arch.active_page_table_count -= 1;
         }
 
-        MMPhysicalFree(PageTables.read_at_index(.level4, i) & ~@as(u64, page_size - 1), false, 1);
+        MMPhysicalFree(PageTables.access_at_index(.level4, i).* & ~@as(u64, page_size - 1), false, 1);
         space.arch.active_page_table_count -= 1;
     }
 
@@ -7581,6 +7582,57 @@ export fn MMPhysicalInsertFreePagesNext(page: u64) callconv(.C) void
 
     BitsetPut(&pmm.free_or_zeroed_page_bitset, page);
     pmm.free_page_count += 1;
+}
+
+export fn MMArchPopulatePageFrameDatabase() callconv(.C) u64
+{
+    var commit_limit: u64 = 0;
+
+    for (physicalMemoryRegions[0..physicalMemoryRegionsCount]) |*region|
+    {
+        const base = region.base_address >> page_bit_count;
+        const count = region.page_count;
+        commit_limit += count;
+
+        var i: u64 = 0;
+        while (i < count) : (i += 1)
+        {
+            MMPhysicalInsertFreePagesNext(base + i);
+        }
+    }
+
+    physicalMemoryRegionsPagesCount = 0;
+    return commit_limit;
+}
+
+export fn MMArchGetPhysicalMemoryHighest() callconv(.C) u64
+{
+    return physicalMemoryHighest;
+}
+
+export fn MMArchInitialise() callconv(.C) void
+{
+    const cr3 = ProcessorReadCR3();
+    _kernelMMSpace.arch.cr3 = cr3;
+    _coreMMSpace.arch.cr3 = cr3;
+
+    mmCoreRegions[0].descriptor.base_address = core_address_space_start;
+    mmCoreRegions[0].descriptor.page_count = core_address_space_size / page_size;
+
+    var i: u64 = 0x100;
+    while (i < 0x200) : (i += 1)
+    {
+        if (PageTables.access_at_index(.level4, i).* == 0)
+        {
+            PageTables.access_at_index(.level4, i).* = MMPhysicalAllocateWithFlags(Physical.Flags.empty()) | 0b11;
+            EsMemoryZero(@ptrToInt(PageTables.access_at_index(.level3, i * 0x200)), page_size);
+        }
+    }
+
+    _coreMMSpace.arch.commit.L1 = &core_L1_commit;
+    _ = _coreMMSpace.reserve_mutex.acquire();
+    _kernelMMSpace.arch.commit.L1 = @intToPtr([*]u8, MMReserve(&_coreMMSpace, ArchAddressSpace.L1_commit_size, Region.Flags.from_flags(.{ .normal, .no_commit_tracking, .fixed }), 0).?.descriptor.base_address);
+    _coreMMSpace.reserve_mutex.release();
 }
 
 export fn KernelInitialise() callconv(.C) void

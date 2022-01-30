@@ -7334,49 +7334,8 @@ void Scheduler::Yield(InterruptContext *context) {
 extern "C" void ThreadPause(Thread *thread, bool resume);
 extern "C" void ProcessPause(Process *process, bool resume);
 extern "C" void MMPhysicalInsertFreePagesNext(uintptr_t page);
-
-uint64_t MMArchPopulatePageFrameDatabase() {
-	uint64_t commitLimit = 0;
-
-	for (uintptr_t i = 0; i < physicalMemoryRegionsCount; i++) {
-		uintptr_t base = physicalMemoryRegions[i].baseAddress >> K_PAGE_BITS;
-		uintptr_t count = physicalMemoryRegions[i].pageCount;
-		commitLimit += count;
-
-		for (uintptr_t j = 0; j < count; j++) {
-			MMPhysicalInsertFreePagesNext(base + j);
-		}
-	}
-
-	physicalMemoryRegionsPagesCount = 0;
-	return commitLimit;
-}
-
-uintptr_t MMArchGetPhysicalMemoryHighest() {
-	return physicalMemoryHighest;
-}
-
-void MMArchInitialise() {
-	coreMMSpace->data.cr3 = kernelMMSpace->data.cr3 = ProcessorReadCR3();
-
-	mmCoreRegions[0].baseAddress = MM_CORE_SPACE_START;
-	mmCoreRegions[0].pageCount = MM_CORE_SPACE_SIZE / K_PAGE_SIZE;
-
-#ifdef ES_ARCH_X86_64
-	for (uintptr_t i = 0x100; i < 0x200; i++) {
-		if (PAGE_TABLE_L4[i] == 0) {
-			// We don't need to commit anything because the PMM isn't ready yet.
-			PAGE_TABLE_L4[i] = MMPhysicalAllocate(ES_FLAGS_DEFAULT) | 3; 
-			EsMemoryZero((void *) (PAGE_TABLE_L3 + i * 0x200), K_PAGE_SIZE);
-		}
-	}
-
-	coreMMSpace->data.l1Commit = core_L1_commit;
-	KMutexAcquire(&coreMMSpace->reserveMutex);
-	kernelMMSpace->data.l1Commit = (uint8_t *) MMReserve(coreMMSpace, L1_COMMIT_SIZE_BYTES, MM_REGION_NORMAL | MM_REGION_NO_COMMIT_TRACKING | MM_REGION_FIXED)->baseAddress;
-	KMutexRelease(&coreMMSpace->reserveMutex);
-#endif
-}
+extern "C" uint64_t MMArchPopulatePageFrameDatabase();
+extern "C" uintptr_t MMArchGetPhysicalMemoryHighest();
 
 bool MMArchCommitPageTables(MMSpace *space, MMRegion *region) {
 	KMutexAssertLocked(&space->reserveMutex);
