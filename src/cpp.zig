@@ -6150,8 +6150,6 @@ export fn PMZero(asked_page_ptr: [*]u64, asked_page_count: u64, contiguous: bool
 
 export var earlyZeroBuffer: [page_size]u8 align(page_size) = undefined;
 
-extern fn MMArchEarlyAllocatePage() callconv(.C) u64;
-
 export fn MMPhysicalAllocate(flags: Physical.Flags, count: u64, alignment: u64, below: u64) callconv(.C) u64
 {
     const mutex_already_acquired = flags.contains(.lock_acquired);
@@ -7633,6 +7631,134 @@ export fn MMArchInitialise() callconv(.C) void
     _ = _coreMMSpace.reserve_mutex.acquire();
     _kernelMMSpace.arch.commit.L1 = @intToPtr([*]u8, MMReserve(&_coreMMSpace, ArchAddressSpace.L1_commit_size, Region.Flags.from_flags(.{ .normal, .no_commit_tracking, .fixed }), 0).?.descriptor.base_address);
     _coreMMSpace.reserve_mutex.release();
+}
+export fn MMArchEarlyAllocatePage() callconv(.C) u64
+{
+    const index = blk:
+    {
+
+        for (physicalMemoryRegions[0..physicalMemoryRegionsCount]) |*region, region_i|
+        {
+            if (region.page_count != 0)
+            {
+                break :blk physicalMemoryRegionsIndex + region_i;
+            }
+        }
+
+        KernelPanic("Unable to early allocate a page\n");
+    };
+
+    const region = &physicalMemoryRegions[index];
+    const page = region.base_address;
+
+    region.base_address += page_size;
+    region.page_count -= 1;
+    physicalMemoryRegionsPagesCount -= 1;
+    physicalMemoryRegionsIndex = index;
+
+    return page;
+}
+
+export fn MMArchCommitPageTables(space: *AddressSpace, region: *Region) callconv(.C) bool
+{
+    _ = space.reserve_mutex.assert_locked();
+
+    const base = (region.descriptor.base_address - @as(u64, if (space == &_coreMMSpace) core_address_space_start else 0)) & 0x7FFFFFFFF000;
+    const end = base + (region.descriptor.page_count << page_bit_count);
+    var needed: u64 = 0;
+
+    var i = base;
+    while (i < end)
+    {
+        const shifter: u64 = page_bit_count + entry_per_page_table_bit_count * 3;
+        const index = i >> shifter;
+        const increment = space.arch.commit.L3[index >> 3] & (@as(u8, 1) << @truncate(u3, index & 0b111)) == 0;
+        needed += @boolToInt(increment);
+        i = (index << shifter) + (1 << shifter);
+    }
+
+    i = base;
+    while (i < end)
+    {
+        const shifter: u64 = page_bit_count + entry_per_page_table_bit_count * 2;
+        const index = i >> shifter;
+        const increment = space.arch.commit.L2[index >> 3] & (@as(u8, 1) << @truncate(u3, index & 0b111)) == 0;
+        needed += @boolToInt(increment);
+        i = (index << shifter) + (1 << shifter);
+    }
+
+    var previous_index_l2i: u64 = std.math.maxInt(u64);
+    i = base;
+    while (i < end)
+    {
+        const shifter: u64 = page_bit_count + entry_per_page_table_bit_count;
+        const index = i >> shifter;
+        const index_l2i = index >> 15;
+
+        if (space.arch.commit.commit_L1[index_l2i >> 3] & (@as(u8, 1) << @truncate(u3, index_l2i & 0b111)) == 0)
+        {
+            if (previous_index_l2i != index_l2i)
+            {
+                needed += 2;
+            }
+            else
+            {
+                needed += 1;
+            }
+        }
+        else
+        {
+            const increment = space.arch.commit.L1[index >> 3] & (@as(u8, 1) << @truncate(u3, index & 0b111)) == 0;
+            needed += @boolToInt(increment);
+        }
+
+        previous_index_l2i = index_l2i;
+        i = index << shifter;
+        i += 1 << shifter;
+    }
+
+    if (needed != 0)
+    {
+        if (!MMCommit(needed * page_size, true))
+        {
+            return false;
+        }
+        space.arch.commited_page_table_count += needed;
+    }
+
+    i = base;
+    while (i < end)
+    {
+        const shifter: u64 = page_bit_count + entry_per_page_table_bit_count * 3;
+        const index = i >> shifter;
+        space.arch.commit.L3[index >> 3] |= @as(u8, 1) << @truncate(u3, index & 0b111);
+        i = index << shifter;
+        i += 1 << shifter;
+    }
+
+    i = base;
+    while (i < end)
+    {
+        const shifter: u64 = page_bit_count + entry_per_page_table_bit_count * 2;
+        const index = i >> shifter;
+        space.arch.commit.L2[index >> 3] |= @as(u8, 1) << @truncate(u3, index & 0b111);
+        i = index << shifter;
+        i += 1 << shifter;
+    }
+
+    i = base;
+    while (i < end)
+    {
+        const shifter: u64 = page_bit_count + entry_per_page_table_bit_count;
+        const index = i >> shifter;
+        const index_L2i = index >> 15;
+        space.arch.commit.commit_L1[index_L2i >> 3] |= @as(u8, 1) << @truncate(u3, index_L2i & 0b111);
+        space.arch.commit.L1[index >> 3] |= @as(u8, 1) << @truncate(u3, index & 0b111);
+        i = index << shifter;
+        i += 1 << shifter;
+    }
+
+    return true;
 }
 
 export fn KernelInitialise() callconv(.C) void
