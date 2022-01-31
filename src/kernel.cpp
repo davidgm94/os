@@ -285,7 +285,6 @@ struct Thread;
 struct Process;
 struct EsCrashReason;
 struct InterruptContext;
-struct NewProcessorStorage;
 
 extern "C" uintptr_t _KThreadTerminate;
 extern "C"
@@ -7100,15 +7099,7 @@ int8_t Scheduler::GetThreadEffectivePriority(Thread *thread) {
 	return thread->priority;
 }
 
-extern "C" void EarlyDelay1Ms();
 extern uint64_t timeStampTicksPerMs;
-
-struct NewProcessorStorage {
-	struct CPULocalStorage *local;
-	uint32_t *gdt;
-};
-
-extern "C" NewProcessorStorage AllocateNewProcessorStorage(ArchCPU *archCPU);
 
 Thread *Scheduler::PickThread(CPULocalStorage *local) {
 	KSpinlockAssertLocked(&dispatchSpinlock);
@@ -7328,9 +7319,6 @@ void Scheduler::Yield(InterruptContext *context) {
 	KernelPanic("Scheduler::Yield - DoContextSwitch unexpectedly returned.\n");
 }
 
-extern "C" void ThreadPause(Thread *thread, bool resume);
-extern "C" void ProcessPause(Process *process, bool resume);
-extern "C" void MMPhysicalInsertFreePagesNext(uintptr_t page);
 extern "C" uint64_t MMArchPopulatePageFrameDatabase();
 extern "C" uintptr_t MMArchGetPhysicalMemoryHighest();
 extern "C" bool MMArchIsBufferInUserRange(uintptr_t baseAddress, size_t byteCount);
@@ -8680,79 +8668,13 @@ uint8_t HandleTable::ResolveHandle(Handle *outHandle, EsHandle inHandle, KernelO
 #define SYSCALL(_name_) uintptr_t _name_(uintptr_t argument0, uintptr_t argument1, uintptr_t argument2, uintptr_t argument3, Thread* currentThread, Process* currentProcess, MMSpace* currentVMM, uintptr_t *userStackPointer, bool *fatalError)
 
 typedef SYSCALL(SyscallFunction);
-SYSCALL(syscall_process_exit);
+extern "C" SYSCALL(syscall_process_exit);
 SyscallFunction* syscallFunctions[ES_SYSCALL_COUNT + 1] =
 {
     [ES_SYSCALL_PROCESS_EXIT] = syscall_process_exit,
 };
 
-uintptr_t DoSyscall(EsSyscallType index, uintptr_t argument0, uintptr_t argument1, uintptr_t argument2, uintptr_t argument3,
-		bool batched, bool *fatal, uintptr_t *userStackPointer) {
-	// Interrupts need to be enabled during system calls,
-	// because many of them block on mutexes or events.
-	ProcessorEnableInterrupts();
-
-	Thread *currentThread = GetCurrentThread();
-	Process *currentProcess = currentThread->process;
-	MMSpace *currentVMM = currentProcess->vmm;
-
-	if (!batched) {
-		if (currentThread->terminating) {
-			// The thread has been terminated.
-			// Yield the scheduler so it can be removed.
-			ProcessorFakeTimerInterrupt();
-		}
-
-		if (currentThread->terminatableState != THREAD_TERMINATABLE) {
-			KernelPanic("DoSyscall - Current thread %x was not terminatable (was %d).\n", 
-					currentThread, currentThread->terminatableState);
-		}
-
-		currentThread->terminatableState = THREAD_IN_SYSCALL;
-	}
-
-	EsError returnValue = ES_FATAL_ERROR_UNKNOWN_SYSCALL;
-	bool fatalError = true;
-
-	if (index < ES_SYSCALL_COUNT) {
-		SyscallFunction* function = syscallFunctions[index];
-
-		if (batched && index == ES_SYSCALL_BATCH) {
-			// This could cause a stack overflow, so it's a fatal error.
-		} else if (function) {
-			returnValue = (EsError) function(argument0, argument1, argument2, argument3, 
-					currentThread, currentProcess, currentVMM, userStackPointer, &fatalError);
-		}
-	}
-
-	if (fatal) *fatal = false;
-
-	if (fatalError) {
-		if (fatal) {
-			*fatal = true;
-		} else {
-			EsCrashReason reason;
-			EsMemoryZero(&reason, sizeof(EsCrashReason));
-			reason.errorCode = (EsFatalError) returnValue;
-			reason.duringSystemCall = index;
-			KernelLog(LOG_ERROR, "Syscall", "syscall failure", 
-					"Process crashed during system call [%x, %x, %x, %x, %x]\n", index, argument0, argument1, argument2, argument3);
-			ProcessCrash(currentProcess, &reason);
-		}
-	}
-
-	if (!batched) {
-		currentThread->terminatableState = THREAD_TERMINATABLE;
-
-		if (currentThread->terminating || currentThread->paused) {
-			// The thread has been terminated or paused.
-			// Yield the scheduler so it can be removed or sent to the paused thread queue.
-			ProcessorFakeTimerInterrupt();
-		}
-	}
-	
-	return returnValue;
-}
+extern "C" uintptr_t DoSyscall(EsSyscallType index, uintptr_t argument0, uintptr_t argument1, uintptr_t argument2, uintptr_t argument3, bool batched, bool *fatal, uintptr_t *userStackPointer);
 
 uintptr_t Syscall(uintptr_t argument0, uintptr_t argument1, uintptr_t argument2, uintptr_t returnAddress, uintptr_t argument3, uintptr_t argument4, uintptr_t *userStackPointer) {
 	(void) returnAddress;

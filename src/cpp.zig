@@ -8235,6 +8235,82 @@ export fn MMCheckUnusable(physical_start: u64, byte_count: u64) callconv(.C) voi
     }
 }
 
+const SyscallFn = fn (argument0: u64, argument1: u64, argument2: u64, argument3: u64, current_thread: *Thread, current_process: *Process, current_address_space: *AddressSpace, user_stack_pointer: ?*u64, fatal_error: ?*bool) callconv(.C) u64;
+
+const SyscallType = enum(u32)
+{
+    exit = 0,
+    batch = 1,
+    const count = std.enums.values(SyscallType).len;
+};
+const syscall_functions = [SyscallType.count + 1]SyscallFn
+{
+    syscall_process_exit,
+    undefined,
+    undefined,
+};
+
+extern fn syscall_process_exit (argument0: u64, argument1: u64, argument2: u64, argument3: u64, current_thread: *Thread, current_process: *Process, current_address_space: *AddressSpace, user_stack_pointer: ?*u64, fatal_error: ?*bool) callconv(.C) u64;
+
+export fn DoSyscall(index: SyscallType, argument0: u64, argument1: u64, argument2: u64, argument3: u64, batched: bool, fatal: ?*bool, user_stack_pointer: ?*u64) callconv(.C) u64
+{
+    ProcessorEnableInterrupts();
+
+    const current_thread = GetCurrentThread().?;
+    const current_process = current_thread.process.?;
+    const current_address_space = current_process.address_space;
+
+    if (!batched)
+    {
+        if (current_thread.terminating.read_volatile())
+        {
+            ProcessorFakeTimerInterrupt();
+        }
+
+        if (current_thread.terminatable_state.read_volatile() != .terminatable) KernelPanic("Current thread was not terminatable");
+
+        current_thread.terminatable_state.write_volatile(.in_syscall);
+    }
+
+    var return_value: u64 = @enumToInt(FatalError.unknown_syscall);
+    var fatal_error = true;
+
+    const function = syscall_functions[@enumToInt(index)];
+    if (batched and index == .batch)
+    {
+
+    }
+    else
+    {
+        return_value = function(argument0, argument1, argument2, argument3, current_thread, current_process, current_address_space, user_stack_pointer, &fatal_error);
+    }
+
+    if (fatal) |fatal_u| fatal_u.* = false;
+
+    if (fatal_error)
+    {
+        if (fatal) |fatal_u| fatal_u.* = true
+        else
+        {
+            var reason = zeroes(CrashReason);
+            reason.error_code = @intToEnum(FatalError, return_value);
+            reason.during_system_call = @bitCast(i32, @enumToInt(index));
+            ProcessCrash(current_process, &reason);
+        }
+    }
+
+    if (!batched)
+    {
+        current_thread.terminatable_state.write_volatile(.terminatable);
+        if (current_thread.terminating.read_volatile() or current_thread.paused.read_volatile())
+        {
+            ProcessorFakeTimerInterrupt();
+        }
+    }
+
+    return return_value;
+}
+
 export fn KernelInitialise() callconv(.C) void
 {
     kernelProcess = &_kernelProcess;
