@@ -8028,6 +8028,18 @@ export fn MMArchHandlePageFault(fault_address: u64, flags: HandlePageFaultFlags)
     return false;
 }
 
+export fn ContextSanityCheck(context: *InterruptContext) callconv(.C) void
+{
+    if (context.cs > 0x100 or
+        context.ds > 0x100 or
+        context.ss > 0x100 or
+        (context.rip >= 0x1000000000000 and context.rip < 0xFFFF000000000000) or
+        (context.rip < 0xFFFF800000000000 and context.cs == 0x48))
+    {
+        KernelPanic("Context sanity check failed");
+    }
+}
+
 export fn KernelInitialise() callconv(.C) void
 {
     kernelProcess = &_kernelProcess;

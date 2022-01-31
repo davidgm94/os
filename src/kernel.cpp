@@ -7335,14 +7335,7 @@ extern "C" void MMPhysicalInsertFreePagesNext(uintptr_t page);
 extern "C" uint64_t MMArchPopulatePageFrameDatabase();
 extern "C" uintptr_t MMArchGetPhysicalMemoryHighest();
 extern "C" bool MMArchIsBufferInUserRange(uintptr_t baseAddress, size_t byteCount);
-
-void ContextSanityCheck(InterruptContext *context) {
-	if (!context || context->cs > 0x100 || context->ds > 0x100 || context->ss > 0x100 
-			|| (context->rip >= 0x1000000000000 && context->rip < 0xFFFF000000000000)
-			|| (context->rip < 0xFFFF800000000000 && context->cs == 0x48)) {
-		KernelPanic("ContextSanityCheck - Corrupt context (%x/%x/%x/%x)\nRIP = %x, RSP = %x\n", context, context->cs, context->ds, context->ss, context->rip, context->rsp);
-	}
-}
+extern "C" void ContextSanityCheck(InterruptContext *context);
 
 bool PostContextSwitch(InterruptContext *context, MMSpace *oldAddressSpace) {
 	if (scheduler.dispatchSpinlock.interruptsEnabled) {
