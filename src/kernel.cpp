@@ -8393,14 +8393,7 @@ extern "C" void MMArchInvalidatePages(uintptr_t virtualAddressStart, uintptr_t p
 	KSpinlockRelease(&ipiLock);
 }
 
-void MMCheckUnusable(uintptr_t physicalStart, size_t bytes) {
-	for (uintptr_t i = physicalStart / K_PAGE_SIZE; i < (physicalStart + bytes + K_PAGE_SIZE - 1) / K_PAGE_SIZE
-			&& i < pmm.pageFrameDatabaseCount; i++) {
-		if (pmm.pageFrames[i].state != MMPageFrame::UNUSABLE) {
-			KernelPanic("MMCheckUnusable - Page frame at address %x should be unusable.\n", i * K_PAGE_SIZE);
-		}
-	}
-}
+extern "C" void MMCheckUnusable(uintptr_t physicalStart, size_t bytes);
 
 void KernelPanic(const char *format, ...) {
 	ProcessorDisableInterrupts();

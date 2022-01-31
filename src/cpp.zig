@@ -8226,6 +8226,15 @@ export fn MMPhysicalFree(asked_page: u64, mutex_already_acquired: bool, count: u
     if (!mutex_already_acquired) pmm.pageframe_mutex.release();
 }
 
+export fn MMCheckUnusable(physical_start: u64, byte_count: u64) callconv(.C) void
+{
+    var i = physical_start / page_size;
+    while (i < (physical_start + byte_count + page_size - 1) / page_size and i < pmm.pageframeDatabaseCount) : (i += 1)
+    {
+        if (pmm.pageframes[i].state.read_volatile() != .unusable) KernelPanic("Pageframe at address should be unusable");
+    }
+}
+
 export fn KernelInitialise() callconv(.C) void
 {
     kernelProcess = &_kernelProcess;
