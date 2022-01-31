@@ -100,6 +100,8 @@ extern fn ProcessorReadTimeStamp() callconv(.C) u64;
 extern fn ProcessorReadCR3() callconv(.C) u64;
 extern fn ProcessorDebugOutputByte(byte: u8) callconv(.C) void;
 extern fn ProcessorSetThreadStorage(tls_address: u64) callconv(.C) void;
+extern fn ProcessorSetLocalStorage(local_storage: *LocalStorage) callconv(.C) void;
+extern fn ProcessorInstallTSS(gdt: u64, tss: u64) callconv(.C) void;
 extern fn GetLocalStorage() callconv(.C) ?*LocalStorage;
 extern fn GetCurrentThread() callconv(.C) ?*Thread;
 
@@ -4570,7 +4572,6 @@ export var shutdownEvent: Event = undefined;
 
 extern fn MMInitialise() callconv(.C) void;
 extern fn CreateMainThread() callconv(.C) void;
-extern fn SetupProcessor2(storage: *NewProcessorStorage) callconv(.C) void;
 export fn KThreadCreate(name: [*:0]const u8, entry: fn (u64) callconv(.C) void, argument: u64) callconv(.C) bool
 {
     return ThreadSpawn(name, @ptrToInt(entry), argument, Thread.Flags.empty(), null, 0) != null;
@@ -8099,6 +8100,37 @@ export fn AsyncTaskThread() callconv(.C) void
             ProcessorFakeTimerInterrupt();
         }
     }
+}
+
+export fn SetupProcessor2(storage: *NewProcessorStorage) callconv(.C) void
+{
+    for (acpi.LAPIC_NMIs[0..acpi.LAPIC_NMI_count]) |*nmi|
+    {
+        if (nmi.processor == 0xff or nmi.processor == storage.local.cpu.?.processor_ID)
+        {
+            const register_index = (0x350 + (@intCast(u32, nmi.lint_index) << 4)) >> 2;
+            var value: u32 = 2 | (1 << 10);
+            if (nmi.active_low) value |= 1 << 13;
+            if (nmi.level_triggered) value |= 1 << 15;
+            LapicWriteRegister(register_index, value);
+        }
+    }
+
+    LapicWriteRegister(0x350 >> 2, LapicReadRegister(0x350 >> 2) & ~@as(u32, 1 << 16));
+    LapicWriteRegister(0x360 >> 2, LapicReadRegister(0x360 >> 2) & ~@as(u32, 1 << 16));
+    LapicWriteRegister(0x080 >> 2, 0);
+    if (LapicReadRegister(0x30 >> 2) & 0x80000000 != 0) LapicWriteRegister(0x410 >> 2, 0);
+    LapicEndOfInterrupt();
+
+    LapicWriteRegister(0x3e0 >> 2, 2);
+    ProcessorSetLocalStorage(storage.local);
+
+    const gdt = storage.gdt;
+    const bootstrap_GDT = @intToPtr(*align(1) u64, (@ptrToInt(&processorGDTR) + @sizeOf(u16))).*;
+    EsMemoryCopy(gdt, bootstrap_GDT, 2048);
+    const tss = gdt + 2048;
+    storage.local.cpu.?.kernel_stack = @intToPtr(*align(1) u64, tss + @sizeOf(u32));
+    ProcessorInstallTSS(gdt, tss);
 }
 
 export fn KernelInitialise() callconv(.C) void

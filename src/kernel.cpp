@@ -303,7 +303,6 @@ extern "C"
     uintptr_t ProcessorGetRSP();
     uintptr_t ProcessorGetRBP();
     void ProcessorDebugOutputByte(uint8_t byte);
-    void SetupProcessor2(NewProcessorStorage *storage);
     void processorGDTR();
     bool PostContextSwitch(InterruptContext *context, MMSpace *oldAddressSpace);
     void InterruptHandler(InterruptContext *context);
@@ -7346,46 +7345,6 @@ void Scheduler::CreateProcessorThreads(CPULocalStorage *local) {
 	if (local->processorID >= K_MAX_PROCESSORS) { 
 		KernelPanic("Scheduler::CreateProcessorThreads - Maximum processor count (%d) exceeded.\n", local->processorID);
 	}
-}
-
-void SetupProcessor2(NewProcessorStorage *storage) {
-	// Setup the local interrupts for the current processor.
-		
-	for (uintptr_t i = 0; i < acpi.lapicNMICount; i++) {
-		if (acpi.lapicNMIs[i].processor == 0xFF
-				|| acpi.lapicNMIs[i].processor == storage->local->archCPU->processorID) {
-			uint32_t registerIndex = (0x350 + (acpi.lapicNMIs[i].lintIndex << 4)) >> 2;
-			uint32_t value = 2 | (1 << 10); // NMI exception interrupt vector.
-			if (acpi.lapicNMIs[i].activeLow) value |= 1 << 13;
-			if (acpi.lapicNMIs[i].levelTriggered) value |= 1 << 15;
-			LapicWriteRegister(registerIndex, value);
-		}
-	}
-
-	LapicWriteRegister(0x350 >> 2, LapicReadRegister(0x350 >> 2) & ~(1 << 16));
-	LapicWriteRegister(0x360 >> 2, LapicReadRegister(0x360 >> 2) & ~(1 << 16));
-	LapicWriteRegister(0x080 >> 2, 0);
-	if (LapicReadRegister(0x30 >> 2) & 0x80000000) LapicWriteRegister(0x410 >> 2, 0);
-	LapicEndOfInterrupt();
-
-	// Configure the LAPIC's timer.
-
-	LapicWriteRegister(0x3E0 >> 2, 2); // Divisor = 16
-
-	// Create the processor's local storage.
-
-	ProcessorSetLocalStorage(storage->local);
-
-	// Setup a GDT and TSS for the processor.
-
-#ifdef ES_ARCH_X86_64
-	uint32_t *gdt = storage->gdt;
-	void *bootstrapGDT = (void *) (((uint64_t_unaligned *) ((uint16_t *) processorGDTR + 1))[0]);
-	EsMemoryCopy(gdt, bootstrapGDT, 2048);
-	uint32_t *tss = (uint32_t *) ((uint8_t *) storage->gdt + 2048);
-	storage->local->archCPU->kernelStack = (uint64_t_unaligned *) (tss + 1);
-	ProcessorInstallTSS(gdt, tss);
-#endif
 }
 
 bool debugKeyPressed;
