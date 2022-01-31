@@ -99,6 +99,7 @@ extern fn ProcessorOut8(port: u16, value: u8) callconv(.C) void;
 extern fn ProcessorReadTimeStamp() callconv(.C) u64;
 extern fn ProcessorReadCR3() callconv(.C) u64;
 extern fn ProcessorDebugOutputByte(byte: u8) callconv(.C) void;
+extern fn ProcessorSetThreadStorage(tls_address: u64) callconv(.C) void;
 extern fn GetLocalStorage() callconv(.C) ?*LocalStorage;
 extern fn GetCurrentThread() callconv(.C) ?*Thread;
 
@@ -8039,6 +8040,38 @@ export fn ContextSanityCheck(context: *InterruptContext) callconv(.C) void
         KernelPanic("Context sanity check failed");
     }
 }
+
+export fn PostContextSwitch(context: *InterruptContext, old_address_space: *AddressSpace) callconv(.C) bool
+{
+    if (scheduler.dispatch_spinlock.interrupts_enabled.read_volatile()) KernelPanic ("Interrupts were enabled");
+
+    scheduler.dispatch_spinlock.release_ex(true);
+
+    const current_thread = GetCurrentThread().?;
+    const local = GetLocalStorage().?;
+    local.cpu.?.kernel_stack.* = current_thread.kernel_stack;
+
+    const new_thread = current_thread.cpu_time_slices.read_volatile() == 1;
+    LapicEndOfInterrupt();
+    ContextSanityCheck(context);
+    ProcessorSetThreadStorage(current_thread.tls_address);
+    MMSpaceCloseReference(old_address_space);
+    current_thread.last_known_execution_address = context.rip;
+
+    if (ProcessorAreInterruptsEnabled()) KernelPanic("interrupts were enabled");
+
+    if (local.spinlock_count != 0) KernelPanic("spinlock_count is not zero");
+
+    current_thread.timer_adjust_ticks += ProcessorReadTimeStamp() - local.current_thread.?.last_interrupt_timestamp;
+
+    if (current_thread.timer_adjust_address != 0 and MMArchIsBufferInUserRange(current_thread.timer_adjust_address, @sizeOf(u64)))
+    {
+        _ = MMArchSafeCopy(current_thread.timer_adjust_address, @ptrToInt(&local.current_thread.?.timer_adjust_ticks), @sizeOf(u64));
+    }
+
+    return new_thread;
+}
+extern fn MMArchSafeCopy(destination_address: u64, source_address: u64, byte_count: u64) callconv(.C) bool;
 
 export fn KernelInitialise() callconv(.C) void
 {
