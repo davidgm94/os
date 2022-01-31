@@ -7336,41 +7336,6 @@ extern "C" uint64_t MMArchPopulatePageFrameDatabase();
 extern "C" uintptr_t MMArchGetPhysicalMemoryHighest();
 extern "C" bool MMArchIsBufferInUserRange(uintptr_t baseAddress, size_t byteCount);
 
-bool MMArchHandlePageFault(uintptr_t address, uint32_t flags) {
-	// EsPrint("Fault %x\n", address);
-	address &= ~(K_PAGE_SIZE - 1);
-	bool forSupervisor = flags & MM_HANDLE_PAGE_FAULT_FOR_SUPERVISOR;
-
-	if (!ProcessorAreInterruptsEnabled()) {
-		KernelPanic("MMArchHandlePageFault - Page fault with interrupts disabled.\n");
-	}
-
-	if (address < K_PAGE_SIZE) {
-	} else if (address >= LOW_MEMORY_MAP_START && address < LOW_MEMORY_MAP_START + LOW_MEMORY_LIMIT && forSupervisor) {
-		// We want to access a physical page within the first 4GB.
-		MMArchMapPage(kernelMMSpace, address - LOW_MEMORY_MAP_START, address, MM_MAP_PAGE_COMMIT_TABLES_NOW);
-		return true;
-	} else if (address >= MM_CORE_REGIONS_START && address < MM_CORE_REGIONS_START + MM_CORE_REGIONS_COUNT * sizeof(MMRegion) && forSupervisor) {
-		// This is where coreMMSpace stores its regions.
-		// Allocate physical memory and map it.
-		MMArchMapPage(kernelMMSpace, MMPhysicalAllocate(MM_PHYSICAL_ALLOCATE_ZEROED), address, MM_MAP_PAGE_COMMIT_TABLES_NOW);
-		return true;
-	} else if (address >= MM_CORE_SPACE_START && address < MM_CORE_SPACE_START + MM_CORE_SPACE_SIZE && forSupervisor) {
-		return MMHandlePageFault(coreMMSpace, address, flags);
-	} else if (address >= MM_KERNEL_SPACE_START && address < MM_KERNEL_SPACE_START + MM_KERNEL_SPACE_SIZE && forSupervisor) {
-		return MMHandlePageFault(kernelMMSpace, address, flags);
-	} else if (address >= MM_MODULES_START && address < MM_MODULES_START + MM_MODULES_SIZE && forSupervisor) {
-		return MMHandlePageFault(kernelMMSpace, address, flags);
-	} else {
-		Thread *thread = GetCurrentThread();
-		MMSpace *space = thread->temporaryAddressSpace;
-		if (!space) space = thread->process->vmm;
-		return MMHandlePageFault(space, address, flags);
-	}
-
-	return false;
-}
-
 void ContextSanityCheck(InterruptContext *context) {
 	if (!context || context->cs > 0x100 || context->ds > 0x100 || context->ss > 0x100 
 			|| (context->rip >= 0x1000000000000 && context->rip < 0xFFFF000000000000)

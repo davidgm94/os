@@ -6559,8 +6559,6 @@ export fn MMFaultRange(address: u64, byte_count: u64, flags: HandlePageFaultFlag
     return true;
 }
 
-extern fn MMArchHandlePageFault(address: u64, flags: HandlePageFaultFlags) callconv(.C) bool;
-
 // @TODO: MMInitialise
 
 export fn MMSpaceCloseReference(space: *AddressSpace) callconv(.C) void
@@ -7969,6 +7967,65 @@ export fn MMArchTranslateAddress(virtual_address: u64, write_access: bool) callc
     if (write_access and physical_address & 2 == 0) return 0;
     if (physical_address & 1 == 0) return 0;
     return physical_address & 0x0000FFFFFFFFF000;
+}
+
+export fn MMArchHandlePageFault(fault_address: u64, flags: HandlePageFaultFlags) bool
+{
+    const virtual_address = fault_address & ~@as(u64, page_size - 1);
+    const for_supervisor = flags.contains(.for_supervisor);
+
+    if (!ProcessorAreInterruptsEnabled())
+    {
+        KernelPanic("Page fault with interrupts disabled\n");
+    }
+
+    const fault_in_very_low_memory = virtual_address < page_size;
+    if (!fault_in_very_low_memory)
+    {
+        if (virtual_address >= low_memory_map_start and virtual_address < low_memory_map_start + low_memory_limit and for_supervisor)
+        {
+            const physical_address = virtual_address - low_memory_map_start;
+            const map_page_flags = MapPageFlags.from_flag(.commit_tables_now);
+          _ = MMArchMapPage(&_kernelMMSpace, physical_address, virtual_address, map_page_flags);
+            return true;
+        }
+        else if (virtual_address >= core_memory_region_start and virtual_address < core_memory_region_start + core_memory_region_count * @sizeOf(Region) and for_supervisor)
+        {
+            const physical_allocation_flags = Physical.Flags.from_flag(.zeroed);
+            const physical_address = MMPhysicalAllocateWithFlags(physical_allocation_flags);
+            const map_page_flags = MapPageFlags.from_flag(.commit_tables_now);
+            _ = MMArchMapPage(&_kernelMMSpace, physical_address, virtual_address, map_page_flags);
+            return true;
+        }
+        else if (virtual_address >= core_address_space_start and virtual_address < core_address_space_start + core_address_space_size and for_supervisor)
+        {
+            return MMHandlePageFault(&_coreMMSpace, virtual_address, flags);
+        }
+        else if (virtual_address >= kernel_address_space_start and virtual_address < kernel_address_space_start + kernel_address_space_size and for_supervisor)
+        {
+            return MMHandlePageFault(&_kernelMMSpace, virtual_address, flags);
+        }
+        else if (virtual_address >= modules_start and virtual_address < modules_start + modules_size and for_supervisor)
+        {
+            return MMHandlePageFault(&_kernelMMSpace, virtual_address, flags);
+        }
+        else
+        {
+            // @Unsafe
+            if (GetCurrentThread()) |current_thread|
+            {
+                const space = if (current_thread.temporary_address_space) |temporary_address_space| @ptrCast(*AddressSpace, temporary_address_space)
+                else current_thread.process.?.address_space;
+                return MMHandlePageFault(space, virtual_address, flags);
+            }
+            else
+            {
+                KernelPanic("unreachable path\n");
+            }
+        }
+    }
+
+    return false;
 }
 
 export fn KernelInitialise() callconv(.C) void
