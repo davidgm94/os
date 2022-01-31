@@ -7349,22 +7349,6 @@ void Scheduler::CreateProcessorThreads(CPULocalStorage *local) {
 
 bool debugKeyPressed;
 
-void DriversDumpStateRecurse(KDevice *device) {
-	if (device->dumpState) {
-		device->dumpState(device);
-	}
-
-	for (uintptr_t i = 0; i < device->children.Length(); i++) {
-		DriversDumpStateRecurse(device->children[i]);
-	}
-}
-
-void DriversDumpState() {
-	KMutexAcquire(&deviceTreeMutex);
-	DriversDumpStateRecurse(deviceTreeRoot);
-	KMutexRelease(&deviceTreeMutex);
-}
-
 //struct KGraphicsTarget : KDevice {
 struct KGraphicsTarget {
 	size_t screenWidth, screenHeight;
@@ -8393,7 +8377,7 @@ void EsPrint(const char *format, ...) {
 	va_end(arguments);
 }
 
-void MMArchInvalidatePages(uintptr_t virtualAddressStart, uintptr_t pageCount) {
+extern "C" void MMArchInvalidatePages(uintptr_t virtualAddressStart, uintptr_t pageCount) {
 	// This must be done with spinlock acquired, otherwise this processor could change.
 
 	// TODO Only send the IPI to the processors that are actually executing threads with the virtual address space.
@@ -8409,135 +8393,98 @@ void MMArchInvalidatePages(uintptr_t virtualAddressStart, uintptr_t pageCount) {
 	KSpinlockRelease(&ipiLock);
 }
 
-bool MMUnmapFilePage(uintptr_t frameNumber) {
-	KMutexAssertLocked(&pmm.pageFrameMutex);
-	MMPageFrame *frame = pmm.pageFrames + frameNumber;
+//void MMArchUnmapPages(MMSpace *space, uintptr_t virtualAddressStart, uintptr_t pageCount, unsigned flags, size_t unmapMaximum, uintptr_t *resumePosition) {
+	//// We can't let anyone use the unmapped pages until they've been invalidated on all processors.
+	//// This also synchronises modified bit updating.
+	//KMutexAcquire(&pmm.pageFrameMutex);
+	//EsDefer(KMutexRelease(&pmm.pageFrameMutex));
 
-	if (frame->state != MMPageFrame::ACTIVE || !frame->active.references) {
-		KernelPanic("MMUnmapFilePage - Corrupt page frame database (%d/%x).\n", frameNumber, frame);
-	}
+	//KMutexAcquire(&space->data.mutex);
+	//EsDefer(KMutexRelease(&space->data.mutex));
 
-	// Decrease the reference count.
-	frame->active.references--;
+//#ifdef ES_ARCH_X86_64
+	//uintptr_t tableBase = virtualAddressStart & 0x0000FFFFFFFFF000;
+//#else
+	//uintptr_t tableBase = virtualAddressStart & 0xFFFFF000;
+//#endif
+	//uintptr_t start = resumePosition ? *resumePosition : 0;
 
-	if (frame->active.references) {
-		return false;
-	}
+	//// TODO Freeing newly empty page tables.
+	//// 	- What do we need to invalidate when we do this?
 
-	// If there are no more references, then the frame can be moved to the standby or modified list.
+	//for (uintptr_t i = start; i < pageCount; i++) {
+		//uintptr_t virtualAddress = (i << K_PAGE_BITS) + tableBase;
 
-	// EsPrint("Unmap file page: %x\n", frameNumber << K_PAGE_BITS);
+//#ifdef ES_ARCH_X86_64
+		//if ((PAGE_TABLE_L4[virtualAddress >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 3)] & 1) == 0) {
+			//i -= (virtualAddress >> K_PAGE_BITS) % (1 << (ENTRIES_PER_PAGE_TABLE_BITS * 3));
+			//i += (1 << (ENTRIES_PER_PAGE_TABLE_BITS * 3));
+			//continue;
+		//}
 
-	frame->state = MMPageFrame::STANDBY;
-	pmm.countStandbyPages++;
+		//if ((PAGE_TABLE_L3[virtualAddress >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 2)] & 1) == 0) {
+			//i -= (virtualAddress >> K_PAGE_BITS) % (1 << (ENTRIES_PER_PAGE_TABLE_BITS * 2));
+			//i += (1 << (ENTRIES_PER_PAGE_TABLE_BITS * 2));
+			//continue;
+		//}
+//#endif
 
-	if (*frame->cacheReference != ((frameNumber << K_PAGE_BITS) | MM_SHARED_ENTRY_PRESENT)) {
-		KernelPanic("MMUnmapFilePage - Corrupt shared reference back pointer in frame %x.\n", frame);
-	}
+		//if ((PAGE_TABLE_L2[virtualAddress >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 1)] & 1) == 0) {
+			//i -= (virtualAddress >> K_PAGE_BITS) % (1 << (ENTRIES_PER_PAGE_TABLE_BITS * 1));
+			//i += (1 << (ENTRIES_PER_PAGE_TABLE_BITS * 1));
+			//continue;
+		//}
 
-	frame->list.next = pmm.firstStandbyPage;
-	frame->list.previous = &pmm.firstStandbyPage;
-	if (pmm.firstStandbyPage) pmm.pageFrames[pmm.firstStandbyPage].list.previous = &frame->list.next;
-	if (!pmm.lastStandbyPage) pmm.lastStandbyPage = frameNumber;
-	pmm.firstStandbyPage = frameNumber;
+		//uintptr_t indexL1 = virtualAddress >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 0);
 
-	MMUpdateAvailablePageCount(true);
+		//uintptr_t translation = PAGE_TABLE_L1[indexL1];
 
-	pmm.countActivePages--;
-	return true;
-}
+		//if (!(translation & 1)) {
+			//// The page wasn't mapped.
+			//continue;
+		//}
 
-void MMArchUnmapPages(MMSpace *space, uintptr_t virtualAddressStart, uintptr_t pageCount, unsigned flags, size_t unmapMaximum, uintptr_t *resumePosition) {
-	// We can't let anyone use the unmapped pages until they've been invalidated on all processors.
-	// This also synchronises modified bit updating.
-	KMutexAcquire(&pmm.pageFrameMutex);
-	EsDefer(KMutexRelease(&pmm.pageFrameMutex));
+		//bool copy = translation & (1 << 9);
 
-	KMutexAcquire(&space->data.mutex);
-	EsDefer(KMutexRelease(&space->data.mutex));
+		//if (copy && (flags & MM_UNMAP_PAGES_BALANCE_FILE) && (~flags & MM_UNMAP_PAGES_FREE_COPIED)) {
+			//// Ignore copied pages when balancing file mappings.
+			//continue;
+		//}
 
-#ifdef ES_ARCH_X86_64
-	uintptr_t tableBase = virtualAddressStart & 0x0000FFFFFFFFF000;
-#else
-	uintptr_t tableBase = virtualAddressStart & 0xFFFFF000;
-#endif
-	uintptr_t start = resumePosition ? *resumePosition : 0;
+		//if ((~translation & (1 << 5)) || (~translation & (1 << 6))) {
+			//// See MMArchMapPage for a discussion of why these bits must be set.
+			//KernelPanic("MMArchUnmapPages - Page found without accessed or dirty bit set (virtualAddress: %x, translation: %x).\n", 
+					//virtualAddress, translation);
+		//}
 
-	// TODO Freeing newly empty page tables.
-	// 	- What do we need to invalidate when we do this?
+		//PAGE_TABLE_L1[indexL1] = 0;
 
-	for (uintptr_t i = start; i < pageCount; i++) {
-		uintptr_t virtualAddress = (i << K_PAGE_BITS) + tableBase;
+//#ifdef ES_ARCH_X86_64
+		//uintptr_t physicalAddress = translation & 0x0000FFFFFFFFF000;
+//#else
+		//uintptr_t physicalAddress = translation & 0xFFFFF000;
+//#endif
 
-#ifdef ES_ARCH_X86_64
-		if ((PAGE_TABLE_L4[virtualAddress >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 3)] & 1) == 0) {
-			i -= (virtualAddress >> K_PAGE_BITS) % (1 << (ENTRIES_PER_PAGE_TABLE_BITS * 3));
-			i += (1 << (ENTRIES_PER_PAGE_TABLE_BITS * 3));
-			continue;
-		}
+		//if ((flags & MM_UNMAP_PAGES_FREE) || ((flags & MM_UNMAP_PAGES_FREE_COPIED) && copy)) {
+			//MMPhysicalFree(physicalAddress, true);
+		//} else if (flags & MM_UNMAP_PAGES_BALANCE_FILE) {
+			//// It's safe to do this before page invalidation,
+			//// because the page fault handler is synchronised with the same mutexes acquired above.
 
-		if ((PAGE_TABLE_L3[virtualAddress >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 2)] & 1) == 0) {
-			i -= (virtualAddress >> K_PAGE_BITS) % (1 << (ENTRIES_PER_PAGE_TABLE_BITS * 2));
-			i += (1 << (ENTRIES_PER_PAGE_TABLE_BITS * 2));
-			continue;
-		}
-#endif
+			////if (MMUnmapFilePage(physicalAddress >> K_PAGE_BITS)) {
+				////if (resumePosition) {
+					////if (!unmapMaximum--) {
+						///[>resumePosition = i;
+						////break;
+					////}
+				////}
+			////}
+            //KernelPanic("Not implemented");
+		//}
+	//}
 
-		if ((PAGE_TABLE_L2[virtualAddress >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 1)] & 1) == 0) {
-			i -= (virtualAddress >> K_PAGE_BITS) % (1 << (ENTRIES_PER_PAGE_TABLE_BITS * 1));
-			i += (1 << (ENTRIES_PER_PAGE_TABLE_BITS * 1));
-			continue;
-		}
-
-		uintptr_t indexL1 = virtualAddress >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 0);
-
-		uintptr_t translation = PAGE_TABLE_L1[indexL1];
-
-		if (!(translation & 1)) {
-			// The page wasn't mapped.
-			continue;
-		}
-
-		bool copy = translation & (1 << 9);
-
-		if (copy && (flags & MM_UNMAP_PAGES_BALANCE_FILE) && (~flags & MM_UNMAP_PAGES_FREE_COPIED)) {
-			// Ignore copied pages when balancing file mappings.
-			continue;
-		}
-
-		if ((~translation & (1 << 5)) || (~translation & (1 << 6))) {
-			// See MMArchMapPage for a discussion of why these bits must be set.
-			KernelPanic("MMArchUnmapPages - Page found without accessed or dirty bit set (virtualAddress: %x, translation: %x).\n", 
-					virtualAddress, translation);
-		}
-
-		PAGE_TABLE_L1[indexL1] = 0;
-
-#ifdef ES_ARCH_X86_64
-		uintptr_t physicalAddress = translation & 0x0000FFFFFFFFF000;
-#else
-		uintptr_t physicalAddress = translation & 0xFFFFF000;
-#endif
-
-		if ((flags & MM_UNMAP_PAGES_FREE) || ((flags & MM_UNMAP_PAGES_FREE_COPIED) && copy)) {
-			MMPhysicalFree(physicalAddress, true);
-		} else if (flags & MM_UNMAP_PAGES_BALANCE_FILE) {
-			// It's safe to do this before page invalidation,
-			// because the page fault handler is synchronised with the same mutexes acquired above.
-
-			if (MMUnmapFilePage(physicalAddress >> K_PAGE_BITS)) {
-				if (resumePosition) {
-					if (!unmapMaximum--) {
-						*resumePosition = i;
-						break;
-					}
-				}
-			}
-		}
-	}
-
-	MMArchInvalidatePages(virtualAddressStart, pageCount);
-}
+	//MMArchInvalidatePages(virtualAddressStart, pageCount);
+//}
 
 void MMPhysicalFree(uintptr_t page, bool mutexAlreadyAcquired, size_t count) {
 	if (!page) KernelPanic("MMPhysicalFree - Invalid page.\n");
@@ -8586,7 +8533,8 @@ void KernelPanic(const char *format, ...) {
 	scheduler.panic = true; 
 
 	if (debugKeyPressed) {
-		DriversDumpState();
+        // @TODO
+        while (true) {}
 	}
 
 	StartDebugOutput();

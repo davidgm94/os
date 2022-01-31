@@ -5208,8 +5208,6 @@ export fn MMDecommitRange(space: *AddressSpace, region: *Region, page_offset: u6
     return true;
 }
 
-extern fn MMArchUnmapPages(address_space: *AddressSpace, virtual_address_start: u64, page_count: u64, flags: UnmapPagesFlags, unmap_maximum: u64, resume_position: ?*u64) callconv(.C) void;
-
 const ActiveSession = extern struct
 {
     load_complete_event: Event,
@@ -8132,6 +8130,79 @@ export fn SetupProcessor2(storage: *NewProcessorStorage) callconv(.C) void
     storage.local.cpu.?.kernel_stack = @intToPtr(*align(1) u64, tss + @sizeOf(u32));
     ProcessorInstallTSS(gdt, tss);
 }
+
+export fn MMArchUnmapPages(space: *AddressSpace, virtual_address_start: u64, page_count: u64, flags: UnmapPagesFlags, unmap_maximum: u64, resume_position: ?*u64) callconv(.C) void
+{
+    _ = pmm.pageframe_mutex.acquire();
+    defer pmm.pageframe_mutex.release();
+
+    _ = space.arch.mutex.acquire();
+    space.arch.mutex.release();
+
+    const table_base = virtual_address_start & 0x0000FFFFFFFFF000;
+    const start: u64 = if (resume_position) |rp| rp.* else 0;
+
+    var page = start;
+    while (page < page_count) : (page += 1)
+    {
+        const virtual_address = (page << page_bit_count) + table_base;
+        const indices = PageTables.compute_indices(virtual_address);
+
+        comptime var level: PageTables.Level = .level4;
+        if (PageTables.access(level, indices).* & 1 == 0)
+        {
+            page -= (virtual_address >> page_bit_count) % (1 << (entry_per_page_table_bit_count * @enumToInt(level)));
+            page += 1 << (entry_per_page_table_bit_count * @enumToInt(level));
+            continue;
+        }
+
+        level = .level3;
+        if (PageTables.access(level, indices).* & 1 == 0)
+        {
+            page -= (virtual_address >> page_bit_count) % (1 << (entry_per_page_table_bit_count * @enumToInt(level)));
+            page += 1 << (entry_per_page_table_bit_count * @enumToInt(level));
+            continue;
+        }
+
+        level = .level2;
+        if (PageTables.access(level, indices).* & 1 == 0)
+        {
+            page -= (virtual_address >> page_bit_count) % (1 << (entry_per_page_table_bit_count * @enumToInt(level)));
+            page += 1 << (entry_per_page_table_bit_count * @enumToInt(level));
+            continue;
+        }
+
+        const translation = PageTables.access(.level1, indices).*;
+
+        if (translation & 1 == 0) continue; // the page wasnt mapped
+
+        const copy = (translation & (1 << 9)) != 0;
+
+        if (copy and flags.contains(.balance_file) and !flags.contains(.free_copied)) continue; // Ignore copied pages when balancing file mappings
+
+        if ((~translation & (1 << 5) != 0) or (~translation & (1 << 6) != 0))
+        {
+            KernelPanic("page found without accessed or dirty bit set");
+        }
+
+        PageTables.access(.level1, indices).* = 0;
+        const physical_address = translation & 0x0000FFFFFFFFF000;
+
+        if (flags.contains(.free) or (flags.contains(.free_copied) and copy))
+        {
+            MMPhysicalFree(physical_address, true, 1);
+        }
+        else if (flags.contains(.balance_file))
+        {
+            _ = unmap_maximum;
+            TODO();
+        }
+    }
+
+    MMArchInvalidatePages(virtual_address_start, page_count);
+}
+
+extern fn MMArchInvalidatePages(virtual_address_start: u64, page_count: u64) callconv(.C) void;
 
 export fn KernelInitialise() callconv(.C) void
 {
