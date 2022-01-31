@@ -8669,17 +8669,6 @@ uint8_t HandleTable::ResolveHandle(Handle *outHandle, EsHandle inHandle, KernelO
 
 typedef SYSCALL(SyscallFunction);
 extern "C" SYSCALL(syscall_process_exit);
-SyscallFunction* syscallFunctions[ES_SYSCALL_COUNT + 1] =
-{
-    [ES_SYSCALL_PROCESS_EXIT] = syscall_process_exit,
-};
-
-extern "C" uintptr_t DoSyscall(EsSyscallType index, uintptr_t argument0, uintptr_t argument1, uintptr_t argument2, uintptr_t argument3, bool batched, bool *fatal, uintptr_t *userStackPointer);
-
-uintptr_t Syscall(uintptr_t argument0, uintptr_t argument1, uintptr_t argument2, uintptr_t returnAddress, uintptr_t argument3, uintptr_t argument4, uintptr_t *userStackPointer) {
-	(void) returnAddress;
-	return DoSyscall((EsSyscallType) argument0, argument1, argument2, argument3, argument4, false, nullptr, userStackPointer);
-}
 
 void process_exit(Process* process, int32_t status)
 {

@@ -8250,7 +8250,6 @@ const syscall_functions = [SyscallType.count + 1]SyscallFn
     undefined,
 };
 
-extern fn syscall_process_exit (argument0: u64, argument1: u64, argument2: u64, argument3: u64, current_thread: *Thread, current_process: *Process, current_address_space: *AddressSpace, user_stack_pointer: ?*u64, fatal_error: ?*bool) callconv(.C) u64;
 
 export fn DoSyscall(index: SyscallType, argument0: u64, argument1: u64, argument2: u64, argument3: u64, batched: bool, fatal: ?*bool, user_stack_pointer: ?*u64) callconv(.C) u64
 {
@@ -8310,6 +8309,54 @@ export fn DoSyscall(index: SyscallType, argument0: u64, argument1: u64, argument
 
     return return_value;
 }
+
+export fn Syscall(argument0: u64, argument1: u64, argument2: u64, return_address: u64, argument3: u64, argument4: u64, user_stack_pointer: ?*u64) callconv(.C) u64
+{
+    _ = return_address;
+    return DoSyscall(@intToEnum(SyscallType, argument0), argument1, argument2, argument3, argument4, false, null, user_stack_pointer);
+}
+
+export fn process_exit(process: *Process, status: i32) callconv(.C) void
+{
+    _ = process.threads_mutex.acquire();
+
+    process.exit_status = status;
+    process.prevent_new_threads = true;
+
+    const current_thread = GetCurrentThread().?;
+    const is_current_process = process == current_thread.process;
+    var found_current_thread = false;
+    var maybe_thread_item = process.threads.first;
+
+    while (maybe_thread_item) |thread_item|
+    {
+        const thread = thread_item.value.?;
+        maybe_thread_item = thread_item.next;
+
+        if (thread != current_thread)
+        {
+            thread_exit(thread);
+        }
+        else if (is_current_process)
+        {
+            found_current_thread = true;
+        }
+        else
+        {
+            KernelPanic("found current thread in the wrong process");
+        }
+    }
+
+    process.threads_mutex.release();
+
+    if (!found_current_thread and is_current_process) KernelPanic("could not find current thread in the current process")
+    else if (is_current_process)
+    {
+        thread_exit(current_thread);
+    }
+}
+
+extern fn syscall_process_exit (argument0: u64, argument1: u64, argument2: u64, argument3: u64, current_thread: *Thread, current_process: *Process, current_address_space: *AddressSpace, user_stack_pointer: ?*u64, fatal_error: ?*bool) callconv(.C) u64;
 
 export fn KernelInitialise() callconv(.C) void
 {
