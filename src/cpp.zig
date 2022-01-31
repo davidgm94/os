@@ -5375,8 +5375,6 @@ pub const UnmapPagesFlags = Bitflag(enum(u32)
     }
 );
 
-extern fn MMArchTranslateAddress(_: *AddressSpace, virtual_address: u64, write_access: bool) callconv(.C) u64;
-extern fn MMArchMapPage(space: *AddressSpace, physical_address: u64, virtual_address: u64, flags: MapPageFlags) callconv(.C) bool;
 fn MMPhysicalAllocateWithFlags(flags: Physical.Flags) u64
 {
     return MMPhysicalAllocate(flags, 1, 1, 0);
@@ -5415,7 +5413,7 @@ export fn MMHandlePageFault(space: *AddressSpace, asked_address: u64, flags: Han
     _ = region.data.map_mutex.acquire();
     defer region.data.map_mutex.release();
 
-    if (MMArchTranslateAddress(space, address, flags.contains(.write)) != 0) return true;
+    if (MMArchTranslateAddress(address, flags.contains(.write)) != 0) return true;
 
     var copy_on_write = false;
     var mark_modified = false;
@@ -7114,10 +7112,10 @@ export var physicalMemoryHighest: u64 = undefined;
 
 const PageTables = extern struct
 {
-    //fn access(comptime level: Level, indices: Indices) u64
-    //{
-        //return access_at_index(level, indices[@enumToInt(level)]);
-    //}
+    fn access(comptime level: Level, indices: Indices) *volatile u64
+    {
+        return access_at_index(level, indices[@enumToInt(level)]);
+    }
 
     fn access_at_index(comptime level: Level, index: u64) *volatile u64
     {
@@ -7837,6 +7835,140 @@ export fn MMArchCommitPageTables(space: *AddressSpace, region: *Region) callconv
     }
 
     return true;
+}
+
+fn handle_missing_page_table(space: *AddressSpace, comptime level: PageTables.Level, indices: PageTables.Indices, flags: MapPageFlags) callconv(.Inline) void
+{
+    assert(level != .level1);
+
+    if (PageTables.access(level, indices).* & 1 == 0)
+    {
+        if (flags.contains(.no_new_tables)) KernelPanic("no new tables flag set but a table was missing\n");
+
+        const physical_allocation_flags = Physical.Flags.from_flag(.lock_acquired);
+        const physical_allocation = MMPhysicalAllocateWithFlags(physical_allocation_flags) | 0b111;
+        PageTables.access(level, indices).* = physical_allocation;
+        const previous_level = comptime @intToEnum(PageTables.Level, @enumToInt(level) - 1);
+
+        const page = @ptrToInt(PageTables.access_at_index(previous_level, indices[@enumToInt(previous_level)]));
+        ProcessorInvalidatePage(page);
+        const page_slice = @intToPtr([*]u8, page & ~@as(u64, page_size - 1))[0..page_size];
+        std.mem.set(u8, page_slice, 0);
+        space.arch.active_page_table_count += 1;
+    }
+}
+
+export fn MMArchMapPage(space: *AddressSpace, asked_physical_address: u64, asked_virtual_address: u64, flags: MapPageFlags) callconv(.C) bool
+{
+    if ((asked_virtual_address | asked_physical_address) & (page_size - 1) != 0)
+    {
+        KernelPanic("Mapping pages that are not aligned\n");
+    }
+
+    if (pmm.pageframeDatabaseCount != 0 and (asked_physical_address >> page_bit_count) < pmm.pageframeDatabaseCount)
+    {
+        const frame_state = pmm.pageframes[asked_physical_address >> page_bit_count].state.read_volatile();
+        if (frame_state != .active and frame_state != .unusable)
+        {
+            KernelPanic("Physical pageframe not marked as active or unusable\n");
+        }
+    }
+
+    if (asked_physical_address == 0) KernelPanic("Attempt to map physical page 0\n");
+    if (asked_virtual_address == 0) KernelPanic("Attempt to map virtual page 0\n");
+
+    if (asked_virtual_address < 0xFFFF800000000000 and ProcessorReadCR3() != space.arch.cr3)
+    {
+        KernelPanic("Attempt to map page into another address space\n");
+    }
+
+    const acquire_framelock = !flags.contains(.no_new_tables) and !flags.contains(.frame_lock_acquired);
+    if (acquire_framelock) _ = pmm.pageframe_mutex.acquire();
+    defer if (acquire_framelock) pmm.pageframe_mutex.release();
+
+    const acquire_spacelock = !flags.contains(.no_new_tables);
+    if (acquire_spacelock) _ = space.arch.mutex.acquire();
+    defer if (acquire_spacelock) space.arch.mutex.release();
+
+    const physical_address = asked_physical_address & 0xFFFFFFFFFFFFF000;
+    const virtual_address = asked_virtual_address & 0x0000FFFFFFFFF000;
+
+    const indices = PageTables.compute_indices(virtual_address);
+
+    if (space != &_coreMMSpace and space != &_kernelMMSpace)
+    {
+        const index_L4 = indices[@enumToInt(PageTables.Level.level4)];
+        if (space.arch.commit.L3[index_L4 >> 3] & (@as(u8, 1) << @truncate(u3, index_L4 & 0b111)) == 0) KernelPanic("attempt to map using uncommited L3 page table\n");
+
+        const index_L3 = indices[@enumToInt(PageTables.Level.level3)];
+        if (space.arch.commit.L2[index_L3 >> 3] & (@as(u8, 1) << @truncate(u3, index_L3 & 0b111)) == 0) KernelPanic("attempt to map using uncommited L3 page table\n");
+
+        const index_L2 = indices[@enumToInt(PageTables.Level.level2)];
+        if (space.arch.commit.L1[index_L2 >> 3] & (@as(u8, 1) << @truncate(u3, index_L2 & 0b111)) == 0) KernelPanic("attempt to map using uncommited L3 page table\n");
+    }
+
+    handle_missing_page_table(space, .level4, indices, flags);
+    handle_missing_page_table(space, .level3, indices, flags);
+    handle_missing_page_table(space, .level2, indices, flags);
+
+    const old_value = PageTables.access(.level1, indices).*;
+    var value = physical_address | 0b11;
+
+    if (flags.contains(.write_combining)) value |= 16;
+    if (flags.contains(.not_cacheable)) value |= 24;
+    if (flags.contains(.user)) value |= 7 else value |= 1 << 8;
+    if (flags.contains(.read_only)) value &= ~@as(u64, 2);
+    if (flags.contains(.copied)) value |= 1 << 9;
+
+    value |= (1 << 5);
+    value |= (1 << 6);
+
+    if (old_value & 1 != 0 and !flags.contains(.overwrite))
+    {
+        if (flags.contains(.ignore_if_mapped))
+        {
+            return false;
+        }
+
+        if (old_value & ~@as(u64, page_size - 1) != physical_address)
+        {
+            KernelPanic("attempt to map page tha has already been mapped\n");
+        }
+
+        if (old_value == value)
+        {
+            KernelPanic("attempt to rewrite page translation\n");
+        }
+        else
+        {
+            const page_become_writable = old_value & 2 == 0 and value & 2 != 0;
+            if (!page_become_writable)
+            {
+                KernelPanic("attempt to change flags mapping address\n");
+            }
+        }
+    }
+
+    PageTables.access(.level1, indices).* = value;
+
+    ProcessorInvalidatePage(asked_virtual_address);
+
+    return true;
+}
+
+export fn MMArchTranslateAddress(virtual_address: u64, write_access: bool) callconv(.C) u64
+{
+    const address = virtual_address & 0x0000FFFFFFFFF000;
+    const indices = PageTables.compute_indices(address);
+    if (PageTables.access(.level4, indices).* & 1 == 0) return 0;
+    if (PageTables.access(.level3, indices).* & 1 == 0) return 0;
+    if (PageTables.access(.level2, indices).* & 1 == 0) return 0;
+
+    const physical_address = PageTables.access(.level1, indices).*;
+
+    if (write_access and physical_address & 2 == 0) return 0;
+    if (physical_address & 1 == 0) return 0;
+    return physical_address & 0x0000FFFFFFFFF000;
 }
 
 export fn KernelInitialise() callconv(.C) void

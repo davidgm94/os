@@ -4215,7 +4215,7 @@ struct KPCIDevice : KDevice {
 extern "C" MMRegion *MMFindRegion(MMSpace *space, uintptr_t address);
 extern "C" void MMDecommit(uint64_t bytes, bool fixed);
 extern "C" bool MMDecommitRange(MMSpace *space, MMRegion *region, uintptr_t pageOffset, size_t pageCount);
-extern "C" uintptr_t MMArchTranslateAddress(MMSpace *, uintptr_t virtualAddress, bool writeAccess =false);
+extern "C" uintptr_t MMArchTranslateAddress(uintptr_t virtualAddress, bool writeAccess =false);
 
 #define CC_ACTIVE_SECTION_SIZE                    ((EsFileOffset) 262144)
 
@@ -4976,7 +4976,7 @@ copy:;
              }
 
              for (uintptr_t i = start; i < end; i += K_PAGE_SIZE) {
-                 uintptr_t physicalAddress = MMArchTranslateAddress(kernelMMSpace, (uintptr_t) sectionBase + i, false);
+                 uintptr_t physicalAddress = MMArchTranslateAddress((uintptr_t) sectionBase + i, false);
                  KMutexAcquire(&pmm.pageFrameMutex);
                  MMPageFrame *frame = &pmm.pageFrames[physicalAddress / K_PAGE_SIZE];
 
@@ -5069,7 +5069,7 @@ struct KDMABuffer {
 
         size_t transfer_byte_count = K_PAGE_SIZE;
         uintptr_t virtual_address = virtualAddress + offsetBytes; 
-        uintptr_t physical_address = MMArchTranslateAddress(kernelMMSpace, virtual_address);
+        uintptr_t physical_address = MMArchTranslateAddress(virtual_address);
         uintptr_t offset_into_page = virtual_address & (K_PAGE_SIZE - 1);
 
         if (physical_address == 0) KernelPanic("Page in buffer unmapped\n");
@@ -7335,172 +7335,6 @@ extern "C" void MMPhysicalInsertFreePagesNext(uintptr_t page);
 extern "C" uint64_t MMArchPopulatePageFrameDatabase();
 extern "C" uintptr_t MMArchGetPhysicalMemoryHighest();
 extern "C" bool MMArchIsBufferInUserRange(uintptr_t baseAddress, size_t byteCount);
-
-bool MMArchMapPage(MMSpace *space, uintptr_t physicalAddress, uintptr_t virtualAddress, unsigned flags) {
-	// TODO Use the no-execute bit.
-
-	if ((physicalAddress | virtualAddress) & (K_PAGE_SIZE - 1)) {
-		KernelPanic("MMArchMapPage - Address not page aligned.\n");
-	}
-
-	if (pmm.pageFrames && (physicalAddress >> K_PAGE_BITS) < pmm.pageFrameDatabaseCount) {
-		if (pmm.pageFrames[physicalAddress >> K_PAGE_BITS].state != MMPageFrame::ACTIVE
-				&& pmm.pageFrames[physicalAddress >> K_PAGE_BITS].state != MMPageFrame::UNUSABLE) {
-			KernelPanic("MMArchMapPage - Physical page frame %x not marked as ACTIVE or UNUSABLE.\n", physicalAddress);
-		}
-	}
-
-	if (!physicalAddress) {
-		KernelPanic("MMArchMapPage - Attempt to map physical page 0.\n");
-	} else if (!virtualAddress) {
-		KernelPanic("MMArchMapPage - Attempt to map virtual page 0.\n");
-#ifdef ES_ARCH_X86_64
-	} else if (virtualAddress < 0xFFFF800000000000 && ProcessorReadCR3() != space->data.cr3) {
-#else
-	} else if (virtualAddress < 0xC0000000 && ProcessorReadCR3() != space->data.cr3) {
-#endif
-		KernelPanic("MMArchMapPage - Attempt to map page into other address space.\n");
-	}
-
-	bool acquireFrameLock = !(flags & (MM_MAP_PAGE_NO_NEW_TABLES | MM_MAP_PAGE_FRAME_LOCK_ACQUIRED));
-	if (acquireFrameLock) KMutexAcquire(&pmm.pageFrameMutex);
-	EsDefer(if (acquireFrameLock) KMutexRelease(&pmm.pageFrameMutex););
-
-	bool acquireSpaceLock = ~flags & MM_MAP_PAGE_NO_NEW_TABLES;
-	if (acquireSpaceLock) KMutexAcquire(&space->data.mutex);
-	EsDefer(if (acquireSpaceLock) KMutexRelease(&space->data.mutex));
-
-	// EsPrint("\tMap, %x -> %x\n", virtualAddress, physicalAddress);
-
-	uintptr_t oldVirtualAddress = virtualAddress;
-#ifdef ES_ARCH_X86_64
-	physicalAddress &= 0xFFFFFFFFFFFFF000;
-	virtualAddress  &= 0x0000FFFFFFFFF000;
-#endif
-
-#ifdef ES_ARCH_X86_64
-	uintptr_t indexL4 = virtualAddress >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 3);
-	uintptr_t indexL3 = virtualAddress >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 2);
-#endif
-	uintptr_t indexL2 = virtualAddress >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 1);
-	uintptr_t indexL1 = virtualAddress >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 0);
-
-	if (space != coreMMSpace && space != kernelMMSpace /* Don't check the kernel's space since the bootloader's tables won't be committed. */) {
-#ifdef ES_ARCH_X86_64
-		if (!(space->data.l3Commit[indexL4 >> 3] & (1 << (indexL4 & 7)))) KernelPanic("MMArchMapPage - Attempt to map using uncommitted L3 page table.\n");
-		if (!(space->data.l2Commit[indexL3 >> 3] & (1 << (indexL3 & 7)))) KernelPanic("MMArchMapPage - Attempt to map using uncommitted L2 page table.\n");
-#endif
-		if (!(space->data.l1Commit[indexL2 >> 3] & (1 << (indexL2 & 7)))) KernelPanic("MMArchMapPage - Attempt to map using uncommitted L1 page table.\n");
-	}
-
-#ifdef ES_ARCH_X86_64
-	if ((PAGE_TABLE_L4[indexL4] & 1) == 0) {
-		if (flags & MM_MAP_PAGE_NO_NEW_TABLES) KernelPanic("MMArchMapPage - NO_NEW_TABLES flag set, but a table was missing.\n");
-		PAGE_TABLE_L4[indexL4] = MMPhysicalAllocate(MM_PHYSICAL_ALLOCATE_LOCK_ACQUIRED) | 7;
-		ProcessorInvalidatePage((uintptr_t) (PAGE_TABLE_L3 + indexL3)); // Not strictly necessary.
-		EsMemoryZero((void *) ((uintptr_t) (PAGE_TABLE_L3 + indexL3) & ~(K_PAGE_SIZE - 1)), K_PAGE_SIZE);
-		space->data.pageTablesActive++;
-	}
-
-	if ((PAGE_TABLE_L3[indexL3] & 1) == 0) {
-		if (flags & MM_MAP_PAGE_NO_NEW_TABLES) KernelPanic("MMArchMapPage - NO_NEW_TABLES flag set, but a table was missing.\n");
-		PAGE_TABLE_L3[indexL3] = MMPhysicalAllocate(MM_PHYSICAL_ALLOCATE_LOCK_ACQUIRED) | 7;
-		ProcessorInvalidatePage((uintptr_t) (PAGE_TABLE_L2 + indexL2)); // Not strictly necessary.
-		EsMemoryZero((void *) ((uintptr_t) (PAGE_TABLE_L2 + indexL2) & ~(K_PAGE_SIZE - 1)), K_PAGE_SIZE);
-		space->data.pageTablesActive++;
-	}
-#endif
-
-	if ((PAGE_TABLE_L2[indexL2] & 1) == 0) {
-		if (flags & MM_MAP_PAGE_NO_NEW_TABLES) KernelPanic("MMArchMapPage - NO_NEW_TABLES flag set, but a table was missing.\n");
-		PAGE_TABLE_L2[indexL2] = MMPhysicalAllocate(MM_PHYSICAL_ALLOCATE_LOCK_ACQUIRED) | 7;
-		ProcessorInvalidatePage((uintptr_t) (PAGE_TABLE_L1 + indexL1)); // Not strictly necessary.
-		EsMemoryZero((void *) ((uintptr_t) (PAGE_TABLE_L1 + indexL1) & ~(K_PAGE_SIZE - 1)), K_PAGE_SIZE);
-		space->data.pageTablesActive++;
-	}
-
-	uintptr_t oldValue = PAGE_TABLE_L1[indexL1];
-	uintptr_t value = physicalAddress | 3;
-
-#ifdef ES_ARCH_X86_64
-	if (flags & MM_MAP_PAGE_WRITE_COMBINING) value |= 16; // This only works because we modified the PAT in SetupProcessor1.
-#else
-	if (flags & MM_MAP_PAGE_WRITE_COMBINING) KernelPanic("MMArchMapPage - Write combining is unimplemented.\n"); // TODO.
-#endif
-	if (flags & MM_MAP_PAGE_NOT_CACHEABLE) value |= 24;
-	if (flags & MM_MAP_PAGE_USER) value |= 7;
-	else value |= 1 << 8; // Global.
-	if (flags & MM_MAP_PAGE_READ_ONLY) value &= ~2;
-	if (flags & MM_MAP_PAGE_COPIED) value |= 1 << 9; // Ignored by the CPU.
-
-	// When the CPU accesses or writes to a page, 
-	// it will modify the table entry to set the accessed or dirty bits respectively,
-	// but it uses its TLB entry as the assumed previous value of the entry.
-	// When unmapping pages we can't atomically remove an entry and do the TLB shootdown.
-	// This creates a race condition:
-	// 1. CPU 0 maps a page table entry. The dirty bit is not set.
-	// 2. CPU 1 reads from the page. A TLB entry is created with the dirty bit not set.
-	// 3. CPU 0 unmaps the entry.
-	// 4. CPU 1 writes to the page. As the TLB entry has the dirty bit cleared, it sets the entry to its cached entry ORed with the dirty bit.
-	// 5. CPU 0 invalidates the entry.
-	// That is, CPU 1 didn't realize the page was unmapped when it wrote out its entry, so the page becomes mapped again.
-	// To prevent this, we mark all pages with the dirty and accessed bits when we initially map them.
-	// (We don't use these bits for anything, anyway. They're basically useless on SMP systems, as far as I can tell.)
-	// That said, a CPU won't overwrite and clear a dirty bit when writing out its accessed flag (tested on Qemu);
-	// see here https://stackoverflow.com/questions/69024372/.
-	// Tl;dr: if a CPU ever sees an entry without these bits set, it can overwrite the entry with junk whenever it feels like it.
-	// TODO Should we be marking page tables as dirty/accessed? (Including those made by the 32-bit AND 64-bit bootloader and MMArchInitialise).
-	// 	When page table trimming is implemented, we'll probably need to do this.
-	value |= (1 << 5) | (1 << 6);
-
-	if ((oldValue & 1) && !(flags & MM_MAP_PAGE_OVERWRITE)) {
-		if (flags & MM_MAP_PAGE_IGNORE_IF_MAPPED) {
-			return false;
-		}
-
-		if ((oldValue & ~(K_PAGE_SIZE - 1)) != physicalAddress) {
-			KernelPanic("MMArchMapPage - Attempt to map %x to %x that has already been mapped to %x.\n", 
-					virtualAddress, physicalAddress, oldValue & (~(K_PAGE_SIZE - 1)));
-		}
-
-		if (oldValue == value) {
-			KernelPanic("MMArchMapPage - Attempt to rewrite page translation.\n", 
-					physicalAddress, virtualAddress, oldValue & (K_PAGE_SIZE - 1), value & (K_PAGE_SIZE - 1));
-		} else if (!(oldValue & 2) && (value & 2)) {
-			// The page has become writable.
-		} else {
-			KernelPanic("MMArchMapPage - Attempt to change flags mapping %x address %x from %x to %x.\n", 
-					physicalAddress, virtualAddress, oldValue & (K_PAGE_SIZE - 1), value & (K_PAGE_SIZE - 1));
-		}
-	}
-
-	PAGE_TABLE_L1[indexL1] = value;
-
-	// We rely on this page being invalidated on this CPU in some places.
-	ProcessorInvalidatePage(oldVirtualAddress);
-
-	return true;
-}
-
-uintptr_t MMArchTranslateAddress(MMSpace *, uintptr_t virtualAddress, bool writeAccess) {
-	// TODO This mutex will be necessary if we ever remove page tables.
-	// space->data.mutex.Acquire();
-	// EsDefer(space->data.mutex.Release());
-
-#ifdef ES_ARCH_X86_64
-	virtualAddress &= 0x0000FFFFFFFFF000;
-	if ((PAGE_TABLE_L4[virtualAddress >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 3)] & 1) == 0) return 0;
-	if ((PAGE_TABLE_L3[virtualAddress >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 2)] & 1) == 0) return 0;
-#endif
-	if ((PAGE_TABLE_L2[virtualAddress >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 1)] & 1) == 0) return 0;
-	uintptr_t physicalAddress = PAGE_TABLE_L1[virtualAddress >> (K_PAGE_BITS + ENTRIES_PER_PAGE_TABLE_BITS * 0)];
-	if (writeAccess && !(physicalAddress & 2)) return 0;
-#ifdef ES_ARCH_X86_64
-	return (physicalAddress & 1) ? (physicalAddress & 0x0000FFFFFFFFF000) : 0;
-#else
-	return (physicalAddress & 1) ? (physicalAddress & 0xFFFFF000) : 0;
-#endif
-}
 
 bool MMArchHandlePageFault(uintptr_t address, uint32_t flags) {
 	// EsPrint("Fault %x\n", address);
