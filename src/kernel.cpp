@@ -323,8 +323,6 @@ extern "C"
     void ProcessorOut32(uint16_t port, uint32_t value);
     uint32_t ProcessorIn32(uint16_t port);
     uint64_t ProcessorReadMXCSR();
-    void PCSetupCOM1();
-    void PCDisablePIC();
     void ProcessCrash(Process *process, EsCrashReason *crashReason);
     void MMInitialise();
     void ArchShutdown();
@@ -7336,78 +7334,7 @@ extern "C" void ProcessPause(Process *process, bool resume);
 extern "C" void MMPhysicalInsertFreePagesNext(uintptr_t page);
 extern "C" uint64_t MMArchPopulatePageFrameDatabase();
 extern "C" uintptr_t MMArchGetPhysicalMemoryHighest();
-
-void PCProcessMemoryMap() {
-	physicalMemoryRegions = (PhysicalMemoryRegion *) (LOW_MEMORY_MAP_START + 0x60000 + bootloader_information_offset);
-
-	for (uintptr_t i = 0; physicalMemoryRegions[i].baseAddress; i++) {
-		PhysicalMemoryRegion region = physicalMemoryRegions[i];
-		uint64_t end = region.baseAddress + (region.pageCount << K_PAGE_BITS);
-#ifdef ES_BITS_32
-		if (end > 0x100000000) { region.pageCount = 0; continue; }
-#endif
-		physicalMemoryRegionsPagesCount += region.pageCount;
-		if (end > physicalMemoryHighest) physicalMemoryHighest = end;
-		physicalMemoryRegionsCount++;
-	}
-
-	physicalMemoryOriginalPagesCount = physicalMemoryRegions[physicalMemoryRegionsCount].pageCount;
-}
-
-void ProcessorOut8Delayed(uint16_t port, uint8_t value) {
-	ProcessorOut8(port, value);
-
-	// Read an unused port to get a short delay.
-	ProcessorIn8(IO_UNUSED_DELAY);
-}
-
-bool MMArchIsBufferInUserRange(uintptr_t baseAddress, size_t byteCount) {
-	if (baseAddress               & 0xFFFF800000000000) return false;
-	if (byteCount                 & 0xFFFF800000000000) return false;
-	if ((baseAddress + byteCount) & 0xFFFF800000000000) return false;
-	return true;
-}
-
-void PCSetupCOM1() {
-#ifdef COM_OUTPUT
-	ProcessorOut8Delayed(IO_COM_1 + 1, 0x00);
-	ProcessorOut8Delayed(IO_COM_1 + 3, 0x80);
-	ProcessorOut8Delayed(IO_COM_1 + 0, 0x03);
-	ProcessorOut8Delayed(IO_COM_1 + 1, 0x00);
-	ProcessorOut8Delayed(IO_COM_1 + 3, 0x03);
-	ProcessorOut8Delayed(IO_COM_1 + 2, 0xC7);
-	ProcessorOut8Delayed(IO_COM_1 + 4, 0x0B);
-
-	// Print a divider line.
-	for (uint8_t i = 0; i < 10; i++) ProcessorDebugOutputByte('-');
-	ProcessorDebugOutputByte('\r');
-	ProcessorDebugOutputByte('\n');
-#endif
-}
-
-void PCDisablePIC() {
-	// Remap the ISRs sent by the PIC to 0x20 - 0x2F.
-	// Even though we'll mask the PIC to use the APIC, 
-	// we have to do this so that the spurious interrupts are sent to a reasonable vector range.
-	ProcessorOut8Delayed(IO_PIC_1_COMMAND, 0x11);
-	ProcessorOut8Delayed(IO_PIC_2_COMMAND, 0x11);
-	ProcessorOut8Delayed(IO_PIC_1_DATA, 0x20);
-	ProcessorOut8Delayed(IO_PIC_2_DATA, 0x28);
-	ProcessorOut8Delayed(IO_PIC_1_DATA, 0x04);
-	ProcessorOut8Delayed(IO_PIC_2_DATA, 0x02);
-	ProcessorOut8Delayed(IO_PIC_1_DATA, 0x01);
-	ProcessorOut8Delayed(IO_PIC_2_DATA, 0x01);
-
-	// Mask all interrupts.
-	ProcessorOut8Delayed(IO_PIC_1_DATA, 0xFF);
-	ProcessorOut8Delayed(IO_PIC_2_DATA, 0xFF);
-}
-
-void ArchNextTimer(size_t ms) {
-	while (!scheduler.started);               // Wait until the scheduler is ready.
-	GetLocalStorage()->schedulerReady = true; // Make sure this CPU can be scheduled.
-	LapicNextTimer(ms);                       // Set the next timer.
-}
+extern "C" bool MMArchIsBufferInUserRange(uintptr_t baseAddress, size_t byteCount);
 
 bool MMArchMapPage(MMSpace *space, uintptr_t physicalAddress, uintptr_t virtualAddress, unsigned flags) {
 	// TODO Use the no-execute bit.

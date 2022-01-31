@@ -98,6 +98,7 @@ extern fn ProcessorIn8(port: u16) callconv(.C) u8;
 extern fn ProcessorOut8(port: u16, value: u8) callconv(.C) void;
 extern fn ProcessorReadTimeStamp() callconv(.C) u64;
 extern fn ProcessorReadCR3() callconv(.C) u64;
+extern fn ProcessorDebugOutputByte(byte: u8) callconv(.C) void;
 extern fn GetLocalStorage() callconv(.C) ?*LocalStorage;
 extern fn GetCurrentThread() callconv(.C) ?*Thread;
 
@@ -7657,6 +7658,83 @@ export fn MMArchEarlyAllocatePage() callconv(.C) u64
     physicalMemoryRegionsIndex = index;
 
     return page;
+}
+
+export fn PCProcessMemoryMap() callconv(.C) void
+{
+    physicalMemoryRegions = @intToPtr([*]Physical.MemoryRegion, low_memory_map_start + 0x60000 + bootloader_information_offset);
+
+    var region_i: u64 = 0;
+    while (physicalMemoryRegions[region_i].base_address != 0) : (region_i += 1)
+    {
+        const region = &physicalMemoryRegions[region_i];
+        const end = region.base_address + (region.page_count << page_bit_count);
+        physicalMemoryRegionsPagesCount += region.page_count;
+        if (end > physicalMemoryHighest) physicalMemoryHighest = end;
+        physicalMemoryRegionsCount += 1;
+    }
+
+    physicalMemoryRegionsPagesCount = physicalMemoryRegions[physicalMemoryRegionsCount].page_count;
+}
+
+export fn ProcessorOut8Delayed(port: u16, value: u8) callconv(.C) void
+{
+    ProcessorOut8(port, value);
+    _ = ProcessorIn8(IO_UNUSED_DELAY);
+}
+
+export fn MMArchIsBufferInUserRange(base_address: u64, byte_count: u64) callconv(.C) bool
+{
+    if (base_address & 0xFFFF800000000000 != 0) return false;
+    if (byte_count & 0xFFFF800000000000 != 0) return false;
+    if ((base_address + byte_count) & 0xFFFF800000000000 != 0) return false;
+    return true;
+}
+
+export fn PCSetupCOM1() callconv(.C) void
+{
+    ProcessorOut8Delayed(IO_COM_1 + 1, 0x00);
+    ProcessorOut8Delayed(IO_COM_1 + 3, 0x80);
+    ProcessorOut8Delayed(IO_COM_1 + 0, 0x03);
+    ProcessorOut8Delayed(IO_COM_1 + 1, 0x00);
+    ProcessorOut8Delayed(IO_COM_1 + 3, 0x03);
+    ProcessorOut8Delayed(IO_COM_1 + 2, 0xC7);
+    ProcessorOut8Delayed(IO_COM_1 + 4, 0x0B);
+
+    // Print a divider line.
+    var i: u64 = 0;
+    while (i < 10) : (i += 1)
+    {
+        ProcessorDebugOutputByte('-');
+    }
+    ProcessorDebugOutputByte('\r');
+    ProcessorDebugOutputByte('\n');
+}
+
+export fn PCDisablePIC() callconv(.C) void
+{
+    // Remap the ISRs sent by the PIC to 0x20 - 0x2F.
+    // Even though we'll mask the PIC to use the APIC, 
+    // we have to do this so that the spurious interrupts are sent to a reasonable vector range.
+    ProcessorOut8Delayed(IO_PIC_1_COMMAND, 0x11);
+    ProcessorOut8Delayed(IO_PIC_2_COMMAND, 0x11);
+    ProcessorOut8Delayed(IO_PIC_1_DATA, 0x20);
+    ProcessorOut8Delayed(IO_PIC_2_DATA, 0x28);
+    ProcessorOut8Delayed(IO_PIC_1_DATA, 0x04);
+    ProcessorOut8Delayed(IO_PIC_2_DATA, 0x02);
+    ProcessorOut8Delayed(IO_PIC_1_DATA, 0x01);
+    ProcessorOut8Delayed(IO_PIC_2_DATA, 0x01);
+
+    // Mask all interrupts.
+    ProcessorOut8Delayed(IO_PIC_1_DATA, 0xFF);
+    ProcessorOut8Delayed(IO_PIC_2_DATA, 0xFF);
+}
+
+export fn ArchNextTimer(ms: u64) callconv(.C) void
+{
+    while (!scheduler.started.read_volatile()) { }
+    GetLocalStorage().?.scheduler_ready = true;
+    LapicNextTimer(ms);
 }
 
 export fn MMArchCommitPageTables(space: *AddressSpace, region: *Region) callconv(.C) bool
