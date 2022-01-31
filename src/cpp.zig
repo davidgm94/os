@@ -91,7 +91,7 @@ export var desktopProcess: *Process = undefined;
 extern fn ProcessorAreInterruptsEnabled() callconv(.C) bool;
 extern fn ProcessorEnableInterrupts() callconv(.C) void;
 extern fn ProcessorDisableInterrupts() callconv(.C) void;
-extern fn ProcessorFakeTimerInterrupt() callconv(.C) noreturn;
+extern fn ProcessorFakeTimerInterrupt() callconv(.C) void;
 extern fn ProcessorInvalidatePage(page: u64) callconv(.C) void;
 extern fn ProcessorInvalidateAllPages() callconv(.C) void;
 extern fn ProcessorIn8(port: u16) callconv(.C) u8;
@@ -3339,7 +3339,7 @@ pub const SimpleList = extern struct
 
     pub fn remove(self: *@This()) void
     {
-        if (self.previous_or_last.next != self or self.next_or_first.previous != self) KernelPanic("bad links");
+        if (self.previous_or_last.?.next_or_first != self or self.next_or_first.?.previous_or_last != self) KernelPanic("bad links");
 
         if (self.previous_or_last == self.next_or_first)
         {
@@ -8071,7 +8071,35 @@ export fn PostContextSwitch(context: *InterruptContext, old_address_space: *Addr
 
     return new_thread;
 }
+
 extern fn MMArchSafeCopy(destination_address: u64, source_address: u64, byte_count: u64) callconv(.C) bool;
+
+export fn AsyncTaskThread() callconv(.C) void
+{
+    const local = GetLocalStorage().?;
+
+    while (true)
+    {
+        if (local.async_task_list.next_or_first) |first|
+        {
+            scheduler.async_task_spinlock.acquire();
+            const item = first;
+            const task = @fieldParentPtr(AsyncTask, "item", item);
+            const callback = task.callback.?;
+            task.callback = null;
+            local.in_async_task = true;
+            item.remove();
+            scheduler.async_task_spinlock.release();
+            callback(task);
+            ThreadSetTemporaryAddressSpace(null);
+            local.in_async_task = false;
+        }
+        else
+        {
+            ProcessorFakeTimerInterrupt();
+        }
+    }
+}
 
 export fn KernelInitialise() callconv(.C) void
 {

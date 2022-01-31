@@ -7336,28 +7336,7 @@ extern "C" uint64_t MMArchPopulatePageFrameDatabase();
 extern "C" uintptr_t MMArchGetPhysicalMemoryHighest();
 extern "C" bool MMArchIsBufferInUserRange(uintptr_t baseAddress, size_t byteCount);
 extern "C" void ContextSanityCheck(InterruptContext *context);
-
-void AsyncTaskThread() {
-	CPULocalStorage *local = GetLocalStorage();
-
-	while (true) {
-		if (!local->asyncTaskList.first) {
-			ProcessorFakeTimerInterrupt();
-		} else {
-			KSpinlockAcquire(&scheduler.asyncTaskSpinlock);
-			SimpleList *item = local->asyncTaskList.first;
-			KAsyncTask *task = EsContainerOf(KAsyncTask, item, item);
-			KAsyncTaskCallback callback = task->callback;
-			task->callback = nullptr;
-			local->inAsyncTask = true;
-			item->Remove();
-			KSpinlockRelease(&scheduler.asyncTaskSpinlock);
-			callback(task); // This may cause the task to be deallocated.
-			ThreadSetTemporaryAddressSpace(nullptr); // The task may have modified the address space.
-			local->inAsyncTask = false;
-		}
-	}
-}
+extern "C" void AsyncTaskThread();
 
 void Scheduler::CreateProcessorThreads(CPULocalStorage *local) {
 	local->asyncTaskThread = ThreadSpawn("AsyncTasks", (uintptr_t) AsyncTaskThread, 0, SPAWN_THREAD_ASYNC_TASK);
