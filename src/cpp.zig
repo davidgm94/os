@@ -5606,7 +5606,6 @@ export fn MMCommit(byte_count: u64, fixed: bool) callconv(.C) bool
     return true;
 }
 
-extern fn MMPhysicalFree(page: u64, mutex_already_acquired: bool, count: u64) callconv(.C) void;
 export fn MMSharedResizeRegion(region: *SharedRegion, asked_size: u64) callconv(.C) bool
 {
     _ = region.mutex.acquire();
@@ -8203,6 +8202,29 @@ export fn MMArchUnmapPages(space: *AddressSpace, virtual_address_start: u64, pag
 }
 
 extern fn MMArchInvalidatePages(virtual_address_start: u64, page_count: u64) callconv(.C) void;
+
+export fn MMPhysicalFree(asked_page: u64, mutex_already_acquired: bool, count: u64) callconv(.C) void
+{
+    if (asked_page == 0) KernelPanic("invalid page");
+    if (mutex_already_acquired) pmm.pageframe_mutex.assert_locked()
+    else _ = pmm.pageframe_mutex.acquire();
+    if (!pmm.pageframeDatabaseInitialised) KernelPanic("PMM not yet initialized");
+
+    const page = asked_page >> page_bit_count;
+
+    MMPhysicalInsertFreePagesStart();
+
+    for (pmm.pageframes[0..count]) |*frame|
+    {
+        if (frame.state.read_volatile() == .free) KernelPanic("attempting to free a free page");
+        if (pmm.commit_fixed_limit != 0) pmm.active_page_count -= 1;
+        MMPhysicalInsertFreePagesNext(page);
+    }
+
+    MMPhysicalInsertFreePagesEnd();
+
+    if (!mutex_already_acquired) pmm.pageframe_mutex.release();
+}
 
 export fn KernelInitialise() callconv(.C) void
 {
