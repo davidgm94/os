@@ -3487,7 +3487,6 @@ struct Process {
 };
 
 extern Process _kernelProcess;
-extern Process _desktopProcess;
 extern Process* kernelProcess;
 extern Process* desktopProcess;
 
@@ -3514,6 +3513,17 @@ extern "C"
 {
     void KTimerSet(KTimer *timer, uint64_t triggerInMs, KAsyncTaskCallback callback = nullptr, EsGeneric argument = 0);
     void KTimerRemove(KTimer *timer); // Timers with callbacks cannot be removed (it'd race with async task delivery).
+}
+extern "C"
+{
+    void SchedulerYield(InterruptContext *context);
+    void SchedulerCreateProcessorThreads(CPULocalStorage *local);
+    void SchedulerAddActiveThread(Thread *thread, bool start); // Add an active thread into the queue.
+    void SchedulerMaybeUpdateActiveList(Thread *thread); // After changing the priority of a thread, call this to move it to the correct active thread queue if needed.
+    void SchedulerNotifyObject(LinkedList<Thread> *blockedThreads, bool unblockAll, Thread *previousMutexOwner = nullptr);
+    void SchedulerUnblockThread(Thread *unblockedThread, Thread *previousMutexOwner = nullptr);
+    Thread * SchedulerPickThread(CPULocalStorage *local); // Pick the next thread to execute.
+    int8_t SchedulerGetThreadEffectivePriority(Thread *thread);
 }
 
 struct Scheduler {
@@ -3543,7 +3553,7 @@ struct Scheduler {
             // The thread is paused, so we can put it into the paused queue until it is resumed.
             pausedThreads.InsertStart(&thread->item);
         } else {
-            int8_t effectivePriority = GetThreadEffectivePriority(thread);
+            int8_t effectivePriority = SchedulerGetThreadEffectivePriority(thread);
 
             if (start) {
                 activeThreads[effectivePriority].InsertStart(&thread->item);
@@ -3554,23 +3564,6 @@ struct Scheduler {
 
     }
 	void MaybeUpdateActiveList(Thread *thread); // After changing the priority of a thread, call this to move it to the correct active thread queue if needed.
-    void NotifyObject(LinkedList<Thread> *blockedThreads, bool unblockAll, Thread *previousMutexOwner = nullptr) {
-        KSpinlockAssertLocked(&dispatchSpinlock);
-
-        LinkedItem<Thread> *unblockedItem = blockedThreads->firstItem;
-
-        if (!unblockedItem) {
-            // There weren't any threads blocking on the object.
-            return; 
-        }
-
-        do {
-            LinkedItem<Thread> *nextUnblockedItem = unblockedItem->nextItem;
-            Thread *unblockedThread = unblockedItem->thisItem;
-            UnblockThread(unblockedThread, previousMutexOwner);
-            unblockedItem = nextUnblockedItem;
-        } while (unblockAll && unblockedItem);
-    }
 
     void UnblockThread(Thread *unblockedThread, Thread *previousMutexOwner = nullptr) {
         KSpinlockAssertLocked(&dispatchSpinlock);
@@ -3599,7 +3592,7 @@ struct Scheduler {
                 }
 
                 previousMutexOwner->blockedThreadPriorities[unblockedThread->priority]--;
-                MaybeUpdateActiveList(previousMutexOwner);
+                SchedulerMaybeUpdateActiveList(previousMutexOwner);
 
                 unblockedThread->item.RemoveFromList();
             }
@@ -3633,7 +3626,7 @@ struct Scheduler {
         if (!unblockedThread->executing) {
             // Put the unblocked thread at the start of the activeThreads list
             // so that it is immediately executed when the scheduler yields.
-            AddActiveThread(unblockedThread, true);
+            SchedulerAddActiveThread(unblockedThread, true);
         } 
 
         // TODO If any processors are idleing, send them a yield IPI.
@@ -3689,11 +3682,10 @@ extern "C"
     {
         scheduler.MaybeUpdateActiveList(thread);
     }
-    void SchedulerNotifyObject(LinkedList<Thread> *blockedThreads, bool unblockAll, Thread *previousMutexOwner = nullptr)
-    {
-        scheduler.NotifyObject(blockedThreads, unblockAll, previousMutexOwner);
-    }
-    void SchedulerUnblockThread(Thread *unblockedThread, Thread *previousMutexOwner = nullptr)
+    //{
+        //scheduler.NotifyObject(blockedThreads, unblockAll, previousMutexOwner);
+    //}
+    void SchedulerUnblockThread(Thread *unblockedThread, Thread *previousMutexOwner)
     {
         scheduler.UnblockThread(unblockedThread, previousMutexOwner);
     }
@@ -4162,8 +4154,8 @@ extern PMM pmm;
 extern MMRegion *mmCoreRegions;
 extern size_t mmCoreRegionCount, mmCoreRegionArrayCommit;
 
-MMSharedRegion* mmGlobalDataRegion, *mmAPITableRegion;
-GlobalData *globalData; // Shared with all processes.
+extern MMSharedRegion* mmGlobalDataRegion;
+extern GlobalData *globalData; // Shared with all processes.
 
 typedef bool (*KIRQHandler)(uintptr_t interruptIndex /* tag for MSI */, void *context);
 struct KPCIDevice : KDevice {
@@ -6552,7 +6544,6 @@ void MMInitialise() {
 	{
 		// Create the global data shared region.
 
-        mmAPITableRegion = MMSharedCreateRegion(0xF000, false, 0);
         mmGlobalDataRegion = MMSharedCreateRegion(sizeof(GlobalData), false, 0);
 		globalData = (GlobalData *) MMMapShared(kernelMMSpace, mmGlobalDataRegion, 0, sizeof(GlobalData), MM_REGION_FIXED);
 		MMFaultRange((uintptr_t) globalData, sizeof(GlobalData), MM_HANDLE_PAGE_FAULT_FOR_SUPERVISOR);
@@ -6919,6 +6910,7 @@ InterruptContext *ArchInitialiseThread(uintptr_t kernelStack, uintptr_t kernelSt
 	context->_check = 0x123456789ABCDEF; // Stack corruption detection.
 	context->flags = 1 << 9; // Interrupt flag
 	context->rip = startAddress;
+    if (context->rip == 0) KernelPanic("RIP is 0");
 	context->rsp = stack + userStackSize - 8; // The stack should be 16-byte aligned before the call instruction.
 	context->rdi = argument1;
 	context->rsi = argument2;
@@ -7145,7 +7137,7 @@ void Scheduler::MaybeUpdateActiveList(Thread *thread) {
 		KernelPanic("Scheduler::MaybeUpdateActiveList - Despite thread %x being active and not executing, it is not in an activeThreads lists.\n", thread);
 	}
 
-	int8_t effectivePriority = GetThreadEffectivePriority(thread);
+	int8_t effectivePriority = SchedulerGetThreadEffectivePriority(thread);
 
 	if (&activeThreads[effectivePriority] == thread->item.list) {
 		// The thread's effective priority has not changed.
@@ -7239,7 +7231,7 @@ void Scheduler::Yield(InterruptContext *context) {
 
 		if (!keepThreadAlive && mutex->owner) {
 			mutex->owner->blockedThreadPriorities[local->currentThread->priority]++;
-			MaybeUpdateActiveList(mutex->owner);
+			SchedulerMaybeUpdateActiveList(mutex->owner);
 			mutex->blockedThreads.InsertEnd(&local->currentThread->item);
 		} else {
 			local->currentThread->state = THREAD_ACTIVE;
@@ -7282,7 +7274,7 @@ void Scheduler::Yield(InterruptContext *context) {
 	// Put the current thread at the end of the activeThreads list.
 	if (!killThread && local->currentThread->state == THREAD_ACTIVE) {
 		if (local->currentThread->type == THREAD_NORMAL) {
-			AddActiveThread(local->currentThread, false);
+			SchedulerAddActiveThread(local->currentThread, false);
 		} else if (local->currentThread->type == THREAD_IDLE || local->currentThread->type == THREAD_ASYNC_TASK) {
 			// Do nothing.
 		} else {
@@ -7291,7 +7283,7 @@ void Scheduler::Yield(InterruptContext *context) {
 	}
 
 	// Get the next thread to execute.
-	Thread *newThread = local->currentThread = PickThread(local);
+	Thread *newThread = local->currentThread = SchedulerPickThread(local);
 
 	if (!newThread) {
 		KernelPanic("Scheduler::Yield - Could not find a thread to execute.\n");
@@ -7313,6 +7305,10 @@ void Scheduler::Yield(InterruptContext *context) {
 	ArchNextTimer(1 /* ms */);
 
 	InterruptContext *newContext = newThread->interruptContext;
+    if (newContext->rip == 0)
+    {
+        KernelPanic("RIP is 0");
+    }
 	MMSpace *addressSpace = newThread->temporaryAddressSpace ?: newThread->process->vmm;
 	MMSpaceOpenReference(addressSpace);
 	ArchSwitchContext(newContext, &addressSpace->data, newThread->kernelStack, newThread, oldAddressSpace);
@@ -8936,7 +8932,7 @@ void InterruptHandler(InterruptContext *context) {
 		}
 
 		if (local->irqSwitchThread && scheduler.started && local->schedulerReady) {
-			scheduler.Yield(context); // LapicEndOfInterrupt is called in PostContextSwitch.
+			SchedulerYield(context); // LapicEndOfInterrupt is called in PostContextSwitch.
 			KernelPanic("InterruptHandler - Returned from Scheduler::Yield.\n");
 		}
 
@@ -8997,7 +8993,7 @@ void InterruptHandler(InterruptContext *context) {
 		}
 
 		if (local->irqSwitchThread && scheduler.started && local->schedulerReady) {
-			scheduler.Yield(context); // LapicEndOfInterrupt is called in PostContextSwitch.
+			SchedulerYield(context); // LapicEndOfInterrupt is called in PostContextSwitch.
 			KernelPanic("InterruptHandler - Returned from Scheduler::Yield.\n");
 		}
 
@@ -9661,7 +9657,7 @@ auto ahci_subclass_code = 6;
 
 extern struct AHCIDriver ahci_driver;
 
-void TimeoutTimerHit(KAsyncTask* task);
+extern "C" void TimeoutTimerHit(KAsyncTask* task);
 
 struct BlockDeviceAccessRequest {
 	struct BlockDevice *device;
@@ -10001,13 +9997,13 @@ struct InterruptEvent
     bool complete;
 };
 
-void KSwitchThreadAfterIRQ()
+extern "C" void KSwitchThreadAfterIRQ()
 {
     GetLocalStorage()->irqSwitchThread = true;
 }
 
-volatile uintptr_t recent_interrupt_events_pointer;
-volatile InterruptEvent recent_interrupt_events[64];
+extern volatile uintptr_t recent_interrupt_events_pointer;
+extern volatile InterruptEvent recent_interrupt_events[64];
 
 struct AHCIDriver
 {
@@ -10772,642 +10768,10 @@ void TimeoutTimerHit(KAsyncTask* task)
 
 AHCIDriver ahci_driver;
 
-void GraphicsUpdateScreen32(K_USER_BUFFER const uint8_t *_source, uint32_t sourceWidth, uint32_t sourceHeight, uint32_t sourceStride, 
-		uint32_t destinationX, uint32_t destinationY,
-		uint32_t screenWidth, uint32_t screenHeight, uint32_t stride, volatile uint8_t *pixel) {
-	uint32_t *destinationRowStart = (uint32_t *) (pixel + destinationX * 4 + destinationY * stride);
-	const uint32_t *sourceRowStart = (const uint32_t *) _source;
-
-	if (destinationX > screenWidth || sourceWidth > screenWidth - destinationX
-			|| destinationY > screenHeight || sourceHeight > screenHeight - destinationY) {
-		KernelPanic("GraphicsUpdateScreen32 - Update region outside graphics target bounds.\n");
-	}
-
-	for (uintptr_t y = 0; y < sourceHeight; y++, destinationRowStart += stride / 4, sourceRowStart += sourceStride / 4) {
-		uint32_t *destination = destinationRowStart;
-		const uint32_t *source = sourceRowStart;
-
-		for (uintptr_t x = 0; x < sourceWidth; x++) {
-			*destination = *source;
-			destination++, source++;
-		}
-	}
-}
-
-void GraphicsUpdateScreen24(K_USER_BUFFER const uint8_t *_source, uint32_t sourceWidth, uint32_t sourceHeight, uint32_t sourceStride, 
-		uint32_t destinationX, uint32_t destinationY,
-		uint32_t screenWidth, uint32_t screenHeight, uint32_t stride, volatile uint8_t *pixel) {
-	uint8_t *destinationRowStart = (uint8_t *) (pixel + destinationX * 3 + destinationY * stride);
-	const uint8_t *sourceRowStart = _source;
-
-	if (destinationX > screenWidth || sourceWidth > screenWidth - destinationX
-			|| destinationY > screenHeight || sourceHeight > screenHeight - destinationY) {
-		KernelPanic("GraphicsUpdateScreen32 - Update region outside graphics target bounds.\n");
-	}
-
-	for (uintptr_t y = 0; y < sourceHeight; y++, destinationRowStart += stride, sourceRowStart += sourceStride) {
-		uint8_t *destination = destinationRowStart;
-		const uint8_t *source = sourceRowStart;
-
-		for (uintptr_t x = 0; x < sourceWidth; x++) {
-			*destination++ = *source++;
-			*destination++ = *source++;
-			*destination++ = *source++;
-			source++;
-		}
-	}
-}
-
-void GraphicsDebugPutBlock32(uintptr_t x, uintptr_t y, bool toggle,
-		unsigned screenWidth, unsigned screenHeight, unsigned stride, volatile uint8_t *linearBuffer) {
-	(void) screenWidth;
-	(void) screenHeight;
-
-	if (toggle) {
-		linearBuffer[y * stride + x * 4 + 0] += 0x4C;
-		linearBuffer[y * stride + x * 4 + 1] += 0x4C;
-		linearBuffer[y * stride + x * 4 + 2] += 0x4C;
-	} else {
-		linearBuffer[y * stride + x * 4 + 0] = 0xFF;
-		linearBuffer[y * stride + x * 4 + 1] = 0xFF;
-		linearBuffer[y * stride + x * 4 + 2] = 0xFF;
-	}
-
-	linearBuffer[(y + 1) * stride + (x + 1) * 4 + 0] = 0;
-	linearBuffer[(y + 1) * stride + (x + 1) * 4 + 1] = 0;
-	linearBuffer[(y + 1) * stride + (x + 1) * 4 + 2] = 0;
-}
-
-void GraphicsDebugClearScreen32(unsigned screenWidth, unsigned screenHeight, unsigned stride, volatile uint8_t *linearBuffer) {
-	for (uintptr_t i = 0; i < screenHeight; i++) {
-		for (uintptr_t j = 0; j < screenWidth * 4; j += 4) {
-
-#if 0
-			linearBuffer[i * stride + j + 2] = 0x18;
-			linearBuffer[i * stride + j + 1] = 0x7E;
-			linearBuffer[i * stride + j + 0] = 0xCF;
-#else
-			if (graphics.debuggerActive) {
-				linearBuffer[i * stride + j + 2] = 0x18;
-				linearBuffer[i * stride + j + 1] = 0x7E;
-				linearBuffer[i * stride + j + 0] = 0xCF;
-			} else {
-				linearBuffer[i * stride + j + 2] >>= 1;
-				linearBuffer[i * stride + j + 1] >>= 1;
-				linearBuffer[i * stride + j + 0] >>= 1;
-			}
-#endif
-		}
-	}
-}
-
-struct VideoModeInformation {
-	uint8_t valid : 1, edidValid : 1;
-	uint8_t bitsPerPixel;
-	uint16_t widthPixels, heightPixels;
-	uint16_t bytesPerScanlineLinear;
-	uint64_t bufferPhysical;
-	uint8_t edid[128];
-};
-
-VideoModeInformation* vbeMode;
-uint32_t screenWidth, screenHeight, strideX, strideY;
-volatile uint8_t *linearBuffer; 
-
-void UpdateScreen_32_XRGB(K_USER_BUFFER const uint8_t *source, uint32_t sourceWidth, uint32_t sourceHeight, uint32_t sourceStride, uint32_t destinationX, uint32_t destinationY) {
-	GraphicsUpdateScreen32(source, sourceWidth, sourceHeight, sourceStride, 
-			destinationX, destinationY, screenWidth, screenHeight, strideY, linearBuffer);
-}
-
-void DebugPutBlock_32_XRGB(uintptr_t x, uintptr_t y, bool toggle) {
-	GraphicsDebugPutBlock32(x, y, toggle, screenWidth, screenHeight, strideY, linearBuffer);
-}
-
-void DebugClearScreen_32_XRGB() {
-	GraphicsDebugClearScreen32(screenWidth, screenHeight, strideY, linearBuffer);
-}
-
-void UpdateScreen_24_RGB(K_USER_BUFFER const uint8_t *source, uint32_t sourceWidth, uint32_t sourceHeight, uint32_t sourceStride, uint32_t destinationX, uint32_t destinationY) {
-	GraphicsUpdateScreen24(source, sourceWidth, sourceHeight, sourceStride, 
-			destinationX, destinationY, screenWidth, screenHeight, strideY, linearBuffer);
-}
-
-void DebugPutBlock_24_RGB(uintptr_t x, uintptr_t y, bool toggle) {
-	if (toggle) {
-		linearBuffer[y * strideY + x * 3 + 0] += 0x4C;
-		linearBuffer[y * strideY + x * 3 + 1] += 0x4C;
-		linearBuffer[y * strideY + x * 3 + 2] += 0x4C;
-	} else {
-		linearBuffer[y * strideY + x * 3 + 0] = 0xFF;
-		linearBuffer[y * strideY + x * 3 + 1] = 0xFF;
-		linearBuffer[y * strideY + x * 3 + 2] = 0xFF;
-	}
-
-	linearBuffer[(y + 1) * strideY + (x + 1) * 3 + 0] = 0;
-	linearBuffer[(y + 1) * strideY + (x + 1) * 3 + 1] = 0;
-	linearBuffer[(y + 1) * strideY + (x + 1) * 3 + 2] = 0;
-}
-
-void DebugClearScreen_24_RGB() {
-	for (uintptr_t i = 0; i < screenWidth * screenHeight * 3; i += 3) {
-		linearBuffer[i + 2] = 0x18;
-		linearBuffer[i + 1] = 0x7E;
-		linearBuffer[i + 0] = 0xCF;
-	}
-}
-
-void svga_driver_init()
-{
-    	vbeMode = (VideoModeInformation *) MMMapPhysical(kernelMMSpace, 0x7000 + GetBootloaderInformationOffset(), 
-			sizeof(VideoModeInformation), ES_FLAGS_DEFAULT);
-
-	if (!vbeMode->valid) {
-		return;
-	}
-
-	if (vbeMode->edidValid) {
-		for (uintptr_t i = 0; i < 128; i++) {
-			EsPrint("EDID byte %d: %X.\n", i, vbeMode->edid[i]);
-		}
-	}
-
-	KGraphicsTarget *target = (KGraphicsTarget *) EsHeapAllocate(sizeof(KGraphicsTarget), true, K_FIXED);
-
-	linearBuffer = (uint8_t *) MMMapPhysical(kernelMMSpace, vbeMode->bufferPhysical, 
-			vbeMode->bytesPerScanlineLinear * vbeMode->heightPixels, MM_REGION_WRITE_COMBINING);
-	screenWidth = target->screenWidth = vbeMode->widthPixels;
-	screenHeight = target->screenHeight = vbeMode->heightPixels;
-	strideX = vbeMode->bitsPerPixel >> 3;
-	strideY = vbeMode->bytesPerScanlineLinear;
-
-	if (vbeMode->bitsPerPixel == 32) {
-		target->updateScreen = UpdateScreen_32_XRGB;
-		target->debugPutBlock = DebugPutBlock_32_XRGB;
-		target->debugClearScreen = DebugClearScreen_32_XRGB;
-	} else {
-		target->updateScreen = UpdateScreen_24_RGB; 
-		target->debugPutBlock = DebugPutBlock_24_RGB;
-		target->debugClearScreen = DebugClearScreen_24_RGB;
-	}
-}
-
-#define ES_RECT_1(x) ((EsRectangle) { (int32_t) (x), (int32_t) (x), (int32_t) (x), (int32_t) (x) })
-#define ES_RECT_1I(x) ((EsRectangle) { (int32_t) (x), (int32_t) -(x), (int32_t) (x), (int32_t) -(x) })
-#define ES_RECT_1S(x) ((EsRectangle) { 0, (int32_t) (x), 0, (int32_t) (x) })
-#define ES_RECT_2(x, y) ((EsRectangle) { (int32_t) (x), (int32_t) (x), (int32_t) (y), (int32_t) (y) })
-#define ES_RECT_2I(x, y) ((EsRectangle) { (int32_t) (x), (int32_t) -(x), (int32_t) (y), (int32_t) -(y) })
-#define ES_RECT_2S(x, y) ((EsRectangle) { 0, (int32_t) (x), 0, (int32_t) (y) })
-#define ES_RECT_4(x, y, z, w) ((EsRectangle) { (int32_t) (x), (int32_t) (y), (int32_t) (z), (int32_t) (w) })
-#define ES_RECT_4PD(x, y, w, h) ((EsRectangle) { (int32_t) (x), (int32_t) ((x) + (w)), (int32_t) (y), (int32_t) ((y) + (h)) })
-#define ES_RECT_WIDTH(_r) ((_r).r - (_r).l)
-#define ES_RECT_HEIGHT(_r) ((_r).b - (_r).t)
-#define ES_RECT_TOTAL_H(_r) ((_r).r + (_r).l)
-#define ES_RECT_TOTAL_V(_r) ((_r).b + (_r).t)
-#define ES_RECT_SIZE(_r) ES_RECT_WIDTH(_r), ES_RECT_HEIGHT(_r)
-#define ES_RECT_TOP_LEFT(_r) (_r).l, (_r).t
-#define ES_RECT_BOTTOM_LEFT(_r) (_r).l, (_r).b
-#define ES_RECT_BOTTOM_RIGHT(_r) (_r).r, (_r).b
-#define ES_RECT_ALL(_r) (_r).l, (_r).r, (_r).t, (_r).b
-#define ES_RECT_VALID(_r) (ES_RECT_WIDTH(_r) > 0 && ES_RECT_HEIGHT(_r) > 0)
-
-#define ES_POINT(x, y) ((EsPoint) { (int32_t) (x), (int32_t) (y) })
-
-inline int Width(EsRectangle rectangle) {
-	return rectangle.r - rectangle.l;
-}
-
-inline int Height(EsRectangle rectangle) {
-	return rectangle.b - rectangle.t;
-}
-
-bool EsRectangleClip(EsRectangle parent, EsRectangle rectangle, EsRectangle *output) {
-	EsRectangle current = parent;
-	EsRectangle intersection;
-
-	if (!((current.l > rectangle.r && current.r > rectangle.l)
-			|| (current.t > rectangle.b && current.b > rectangle.t))) {
-		intersection.l = current.l > rectangle.l ? current.l : rectangle.l;
-		intersection.t = current.t > rectangle.t ? current.t : rectangle.t;
-		intersection.r = current.r < rectangle.r ? current.r : rectangle.r;
-		intersection.b = current.b < rectangle.b ? current.b : rectangle.b;
-	} else {
-		intersection = {};
-	}
-
-	if (output) {
-		*output = intersection;
-	}
-
-	return intersection.l < intersection.r && intersection.t < intersection.b;
-}
-
-struct EsPainter {
-	EsRectangle clip;
-	int32_t offsetX, offsetY, width, height;
-	void *style;
-	EsPaintTarget *target;
-};
-
-#define ES_DRAW_BITMAP_OPAQUE (0xFFFF)
-#define ES_DRAW_BITMAP_XOR    (0xFFFE)
-#define ES_DRAW_BITMAP_BLEND  (0)
-
-void EsDrawClear(EsPainter *painter, EsRectangle bounds) {
-	EsPaintTarget *target = painter->target;
-
-	if (!EsRectangleClip(bounds, painter->clip, &bounds)) {
-		return;
-	}
-
-	uintptr_t stride = target->stride / 4;
-	uint32_t *lineStart = (uint32_t *) target->bits + bounds.t * stride + bounds.l;
-
-#ifndef KERNEL
-	__m128i zero = {};
-#endif
-
-	for (int i = 0; i < bounds.b - bounds.t; i++, lineStart += stride) {
-		uint32_t *destination = lineStart;
-		int j = bounds.r - bounds.l;
-
-#ifndef KERNEL
-		while (j >= 4) {
-			_mm_storeu_si128((__m128i *) destination, zero);
-
-			destination += 4;
-			j -= 4;
-		} 
-#endif
-
-		while (j > 0) {
-			*destination = 0;
-			destination++;
-			j--;
-		} 
-	}
-}
-
-void BlendPixel(uint32_t *destinationPixel, uint32_t modified, bool fullAlpha) {
-	if ((modified & 0xFF000000) == 0xFF000000) {
-		*destinationPixel = modified;
-		return;
-	} else if ((modified & 0xFF000000) == 0x00000000) {
-		return;
-	}
-
-	uint32_t m1, m2, a;
-	uint32_t original = *destinationPixel;
-
-	if ((*destinationPixel & 0xFF000000) != 0xFF000000 && fullAlpha) {
-		uint32_t alpha1 = (modified & 0xFF000000) >> 24;
-		uint32_t alpha2 = 255 - alpha1;
-		uint32_t alphaD = (original & 0xFF000000) >> 24;
-		uint32_t alphaD2 = alphaD * alpha2;
-		uint32_t alphaOut = alpha1 + (alphaD2 >> 8);
-
-		if (!alphaOut) {
-			return;
-		}
-
-		m2 = alphaD2 / alphaOut;
-		m1 = (alpha1 << 8) / alphaOut;
-		if (m2 == 0x100) m2--;
-		if (m1 == 0x100) m1--;
-		a = alphaOut << 24;
-	} else {
-		m1 = (modified & 0xFF000000) >> 24;
-		m2 = 255 - m1;
-		a = 0xFF000000;
-	}
-
-	uint32_t r2 = m2 * (original & 0x00FF00FF);
-	uint32_t g2 = m2 * (original & 0x0000FF00);
-	uint32_t r1 = m1 * (modified & 0x00FF00FF);
-	uint32_t g1 = m1 * (modified & 0x0000FF00);
-	uint32_t result = a | (0x0000FF00 & ((g1 + g2) >> 8)) | (0x00FF00FF & ((r1 + r2) >> 8));
-	*destinationPixel = result;
-}
-
-void _DrawBlock(uintptr_t stride, void *bits, EsRectangle bounds, uint32_t color, bool fullAlpha) {
-	stride /= 4;
-	uint32_t *lineStart = (uint32_t *) bits + bounds.t * stride + bounds.l;
-
-#ifndef KERNEL
-	__m128i color4 = _mm_set_epi32(color, color, color, color);
-#endif
-
-	for (int i = 0; i < bounds.b - bounds.t; i++, lineStart += stride) {
-		uint32_t *destination = lineStart;
-		int j = bounds.r - bounds.l;
-
-		if ((color & 0xFF000000) != 0xFF000000) {
-			do {
-				BlendPixel(destination, color, fullAlpha);
-				destination++;
-			} while (--j);
-		} else {
-#ifndef KERNEL
-			while (j >= 4) {
-				_mm_storeu_si128((__m128i *) destination, color4);
-				destination += 4;
-				j -= 4;
-			} 
-#endif
-
-			while (j > 0) {
-				*destination = color;
-				destination++;
-				j--;
-			} 
-		}
-	}
-}
-
-void EsDrawBlock(EsPainter *painter, EsRectangle bounds, uint32_t color) {
-	if (!(color & 0xFF000000)) {
-		return;
-	}
-
-	EsPaintTarget *target = painter->target;
-
-	if (!EsRectangleClip(bounds, painter->clip, &bounds)) {
-		return;
-	}
-	
-	_DrawBlock(target->stride, target->bits, bounds, color, target->fullAlpha);
-}
-
-void EsDrawBitmap(EsPainter *painter, EsRectangle region, uint32_t *sourceBits, uintptr_t sourceStride, uint16_t mode) {
-	EsPaintTarget *target = painter->target;
-	EsRectangle bounds;
-
-	if (!EsRectangleClip(region, painter->clip, &bounds)) {
-		return;
-	}
-
-	sourceStride /= 4;
-	uintptr_t stride = target->stride / 4;
-	uint32_t *lineStart = (uint32_t *) target->bits + bounds.t * stride + bounds.l;
-	uint32_t *sourceLineStart = sourceBits + (bounds.l - region.l) + sourceStride * (bounds.t - region.t);
-
-	for (int i = 0; i < bounds.b - bounds.t; i++, lineStart += stride, sourceLineStart += sourceStride) {
-		uint32_t *destination = lineStart;
-		uint32_t *source = sourceLineStart;
-		int j = bounds.r - bounds.l;
-
-		if (mode == 0xFF) {
-			do {
-				BlendPixel(destination, *source, target->fullAlpha);
-				destination++;
-				source++;
-			} while (--j);
-		} else if (mode <= 0xFF) {
-			do {
-				uint32_t modified = *source;
-				modified = (modified & 0xFFFFFF) | (((((modified & 0xFF000000) >> 24) * mode) << 16) & 0xFF000000);
-				BlendPixel(destination, modified, target->fullAlpha);
-				destination++;
-				source++;
-			} while (--j);
-		} else if (mode == ES_DRAW_BITMAP_XOR) {
-#ifndef KERNEL
-			while (j >= 4) {
-				__m128i *_destination = (__m128i *) destination;
-				_mm_storeu_si128(_destination, _mm_xor_si128(_mm_loadu_si128((__m128i *) source), _mm_loadu_si128(_destination)));
-				destination += 4;
-				source += 4;
-				j -= 4;
-			} 
-#endif
-
-			while (j > 0) {
-				*destination ^= *source;
-				destination++;
-				source++;
-				j--;
-			} 
-		} else if (mode == ES_DRAW_BITMAP_OPAQUE) {
-#ifndef KERNEL
-			__m128i fillAlpha = _mm_set1_epi32(0xFF000000);
-
-			while (j >= 4) {
-				_mm_storeu_si128((__m128i *) destination, _mm_or_si128(fillAlpha, _mm_loadu_si128((__m128i *) source)));
-				destination += 4;
-				source += 4;
-				j -= 4;
-			} 
-#endif
-
-			while (j > 0) {
-				*destination = 0xFF000000 | *source;
-				destination++;
-				source++;
-				j--;
-			} 
-		}
-	}
-}
-
-EsRectangle EsRectangleBounding(EsRectangle a, EsRectangle b) {
-	if (a.l > b.l) a.l = b.l;
-	if (a.t > b.t) a.t = b.t;
-	if (a.r < b.r) a.r = b.r;
-	if (a.b < b.b) a.b = b.b;
-	return a;
-}
-
-void Surface::Draw(Surface *source, EsRectangle destinationRegion, int sourceX, int sourceY, uint16_t alpha) {
-	modifiedRegion = EsRectangleBounding(destinationRegion, modifiedRegion);
-	EsRectangleClip(modifiedRegion, ES_RECT_4(0, width, 0, height), &modifiedRegion);
-	EsPainter painter;
-	painter.clip = ES_RECT_4(0, width, 0, height);
-	painter.target = this;
-	uint8_t *sourceBits = (uint8_t *) source->bits + source->stride * sourceY + 4 * sourceX;
-	EsDrawBitmap(&painter, destinationRegion, (uint32_t *) sourceBits, source->stride, alpha);
-}
-
-bool Surface::Resize(size_t newResX, size_t newResY, uint32_t clearColor, bool copyOldBits) {
-	// Check the surface is within our working size limits.
-	if (!newResX || !newResY || newResX >= 32767 || newResY >= 32767) {
-		return false;
-	}
-
-	if (width == newResX && height == newResY) {
-		return true;
-	}
-
-	uint8_t *newBits = (uint8_t *) EsHeapAllocate(newResX * newResY * 4, !copyOldBits, K_PAGED);
-
-	if (!newBits) {
-		return false;
-	}
-
-	int oldWidth = width, oldHeight = height, oldStride = stride;
-	void *oldBits = bits;
-
-	width = newResX, height = newResY, bits = newBits;
-	stride = newResX * 4;
-
-	EsPainter painter;
-	painter.clip = ES_RECT_4(0, width, 0, height);
-	painter.target = this;
-
-	if (copyOldBits) {
-		EsDrawBitmap(&painter, ES_RECT_4(0, oldWidth, 0, oldHeight), (uint32_t *) oldBits, oldStride, ES_DRAW_BITMAP_OPAQUE);
-
-		if (clearColor) {
-			EsDrawBlock(&painter, ES_RECT_4(oldWidth, width, 0, height), clearColor);
-			EsDrawBlock(&painter, ES_RECT_4(0, oldWidth, oldHeight, height), clearColor);
-		} else {
-			EsDrawClear(&painter, ES_RECT_4(oldWidth, width, 0, height));
-			EsDrawClear(&painter, ES_RECT_4(0, oldWidth, oldHeight, height));
-		}
-	}
-
-	EsHeapFree(oldBits, 0, K_PAGED);
-
-	__sync_fetch_and_add(&graphics.totalSurfaceBytes, newResX * newResY * 4 - oldWidth * oldHeight * 4);
-
-	return true;
-}
-
-void Surface::Copy(Surface *source, EsPoint destinationPoint, EsRectangle sourceRegion, bool addToModifiedRegion) {
-	EsRectangle destinationRegion = ES_RECT_4(destinationPoint.x, destinationPoint.x + Width(sourceRegion), 
-			destinationPoint.y, destinationPoint.y + Height(sourceRegion));
-
-	if (addToModifiedRegion) {
-		modifiedRegion = EsRectangleBounding(destinationRegion, modifiedRegion);
-		EsRectangleClip(modifiedRegion, ES_RECT_4(0, width, 0, height), &modifiedRegion);
-	}
-
-	EsPainter painter;
-	painter.clip = ES_RECT_4(0, width, 0, height);
-	painter.target = this;
-	uint8_t *sourceBits = (uint8_t *) source->bits + source->stride * sourceRegion.t + 4 * sourceRegion.l;
-	EsDrawBitmap(&painter, destinationRegion, (uint32_t *) sourceBits, source->stride, ES_DRAW_BITMAP_OPAQUE);
-}
-
-void Surface::SetBits(K_USER_BUFFER const void *_bits, uintptr_t sourceStride, EsRectangle bounds) {
-	if (Width(bounds) < 0 || Height(bounds) < 0 || bounds.l < 0 || bounds.t < 0 || bounds.r > (int32_t) width || bounds.b > (int32_t) height) {
-		KernelPanic("Surface::SetBits - Invalid bounds %R for surface %x.\n", bounds, this);
-	}
-
-	if (Width(bounds) == 0 || Height(bounds) == 0) {
-		return;
-	}
-
-	modifiedRegion = EsRectangleBounding(bounds, modifiedRegion);
-
-	uint32_t *rowStart = (uint32_t *) bits + bounds.l + bounds.t * stride / 4;
-	K_USER_BUFFER const uint32_t *sourceRowStart = (K_USER_BUFFER const uint32_t *) _bits;
-
-	for (uintptr_t i = bounds.t; i < (uintptr_t) bounds.b; i++, rowStart += stride / 4, sourceRowStart += sourceStride / 4) {
-		size_t count = Width(bounds);
-		uint32_t *destination = rowStart;
-		K_USER_BUFFER const uint32_t *bits = sourceRowStart;
-
-		do {
-			*destination = *bits;
-			destination++, bits++, count--;
-		} while (count);
-	}
-}
-
-void Surface::Scroll(EsRectangle region, ptrdiff_t delta, bool vertical) {
-	if (vertical) {
-		if (delta > 0) {
-			for (intptr_t i = region.t; i < region.b; i++) {
-				for (intptr_t j = region.l; j < region.r; j++) {
-					((uint32_t *) bits)[j + (i - delta) * stride / 4] = ((uint32_t *) bits)[j + i * stride / 4];
-				}
-			}
-		} else {
-			for (intptr_t i = region.b - 1; i >= region.t; i--) {
-				for (intptr_t j = region.l; j < region.r; j++) {
-					((uint32_t *) bits)[j + (i - delta) * stride / 4] = ((uint32_t *) bits)[j + i * stride / 4];
-				}
-			}
-		}
-	} else {
-		if (delta > 0) {
-			for (intptr_t i = region.t; i < region.b; i++) {
-				for (intptr_t j = region.l; j < region.r; j++) {
-					((uint32_t *) bits)[j - delta + i * stride / 4] = ((uint32_t *) bits)[j + i * stride / 4];
-				}
-			}
-		} else {
-			for (intptr_t i = region.t; i < region.b; i++) {
-				for (intptr_t j = region.r - 1; j >= region.l; j--) {
-					((uint32_t *) bits)[j - delta + i * stride / 4] = ((uint32_t *) bits)[j + i * stride / 4];
-				}
-			}
-		}
-	}
-}
-
-void GraphicsUpdateScreen(K_USER_BUFFER void *bits, EsRectangle *bounds, uintptr_t bitsStride) {
-	KMutexAssertLocked(&windowManager.mutex);
-
-	if (windowManager.resizeWindow && windowManager.resizeStartTimeStampMs + RESIZE_FLICKER_TIMEOUT_MS > KGetTimeInMs()
-			&& !windowManager.inspectorWindowCount /* HACK see note in the SET_BITS syscall */) {
-		return;
-	}
-
-	if (bounds && (Width(*bounds) <= 0 || Height(*bounds) <= 0)) {
-		return;
-	}
-
-	int cursorX = windowManager.cursorX + windowManager.cursorImageOffsetX - (bounds ? bounds->l : 0);
-	int cursorY = windowManager.cursorY + windowManager.cursorImageOffsetY - (bounds ? bounds->t : 0);
-
-	Surface *sourceSurface;
-	Surface _sourceSurface;
-	EsRectangle _bounds;
-
-	if (bits) {
-		sourceSurface = &_sourceSurface;
-		EsMemoryZero(sourceSurface, sizeof(Surface));
-		sourceSurface->bits = bits;
-		sourceSurface->width = Width(*bounds);
-		sourceSurface->height = Height(*bounds);
-		sourceSurface->stride = bitsStride;
-	} else {
-		sourceSurface = &graphics.frameBuffer;
-		_bounds = ES_RECT_4(0, sourceSurface->width, 0, sourceSurface->height);
-		bounds = &_bounds;
-	}
-
-	EsRectangle cursorBounds = ES_RECT_4(cursorX, cursorX + windowManager.cursorSwap.width, cursorY, cursorY + windowManager.cursorSwap.height);
-	EsRectangleClip(ES_RECT_4(0, Width(*bounds), 0, Height(*bounds)), cursorBounds, &cursorBounds);
-
-	windowManager.cursorSwap.Copy(sourceSurface, ES_POINT(0, 0), cursorBounds, true);
-	windowManager.changedCursorImage = false;
-
-	int cursorImageWidth = windowManager.cursorSurface.width, cursorImageHeight = windowManager.cursorSurface.height;
-	sourceSurface->Draw(&windowManager.cursorSurface, ES_RECT_4(cursorX, cursorX + cursorImageWidth, cursorY, cursorY + cursorImageHeight), 0, 0, 0xFF);
-
-	if (bits) {
-		graphics.target->updateScreen((K_USER_BUFFER const uint8_t *) bits, 
-				sourceSurface->width, sourceSurface->height, 
-				sourceSurface->stride, bounds->l, bounds->t);
-	} else {
-		if (Width(sourceSurface->modifiedRegion) > 0 && Height(sourceSurface->modifiedRegion) > 0) {
-			uint8_t *bits = (uint8_t *) sourceSurface->bits 
-				+ sourceSurface->modifiedRegion.l * 4 
-				+ sourceSurface->modifiedRegion.t * sourceSurface->stride;
-			graphics.target->updateScreen(bits, Width(sourceSurface->modifiedRegion), Height(sourceSurface->modifiedRegion), 
-					sourceSurface->width * 4, sourceSurface->modifiedRegion.l, sourceSurface->modifiedRegion.t);
-			sourceSurface->modifiedRegion = { (int32_t) graphics.width, 0, (int32_t) graphics.height, 0 };
-		}
-	}
-
-	sourceSurface->Copy(&windowManager.cursorSwap, ES_POINT(cursorBounds.l, cursorBounds.t), ES_RECT_4(0, Width(cursorBounds), 0, Height(cursorBounds)), true);
-}
-
 extern "C" void drivers_init()
 {
     pci_driver.init();
-    svga_driver_init();
+    //svga_driver_init();
     ahci_driver.init();
 }
 
@@ -11449,7 +10813,7 @@ bool MMArchInitialiseUserSpace(MMSpace *space, MMRegion *region) {
 	return true;
 }
 
-bool MMSpaceInitialise(MMSpace* space)
+extern "C" bool MMSpaceInitialise(MMSpace* space)
 {
     space->user = true;
 
@@ -11483,7 +10847,7 @@ struct KLoadedExecutable {
 	bool isDesktop, isBundle;
 };
 
-u8 desktop_executable_buffer[8192] = {};
+u8 _desktop_executable_buffer[8192] = {};
 
 EsError hard_disk_read_desktop_executable()
 {
@@ -11495,7 +10859,7 @@ EsError hard_disk_read_desktop_executable()
     EsAssert(mbr_partition_count > 0);
     EsAssert(mbr_partition_count == 1);
 
-    KDMABuffer buffer = { (uintptr_t) desktop_executable_buffer };
+    KDMABuffer buffer = { (uintptr_t) _desktop_executable_buffer };
     BlockDeviceAccessRequest request = {};
     request.offset = desktop_offset;
     request.count = align(hardcoded_desktop_size, 0x200);
@@ -11578,7 +10942,7 @@ EsError k_load_desktop_elf(KLoadedExecutable* executable)
         KernelPanic("Can't read desktop exe\n");
     }
 
-    ElfHeader* header = (ElfHeader*) desktop_executable_buffer;
+    ElfHeader* header = (ElfHeader*) _desktop_executable_buffer;
 
     uint16_t program_header_entry_size = header->programHeaderEntrySize;
 
@@ -11593,7 +10957,7 @@ EsError k_load_desktop_elf(KLoadedExecutable* executable)
 	if (!programHeaders) return ES_ERROR_INSUFFICIENT_RESOURCES;
 	EsDefer(EsHeapFree(programHeaders, 0, K_PAGED));
 
-    EsMemoryCopy(programHeaders, &desktop_executable_buffer[executable_offset + header->programHeaderTable], program_header_entry_size * header->programHeaderEntries);
+    EsMemoryCopy(programHeaders, &_desktop_executable_buffer[executable_offset + header->programHeaderTable], program_header_entry_size * header->programHeaderEntries);
 
     for (u64 ph_i = 0; ph_i < header->programHeaderEntries; ph_i++)
     {
@@ -11612,7 +10976,7 @@ EsError k_load_desktop_elf(KLoadedExecutable* executable)
 
             if (success)
             {
-                EsMemoryCopy((void*)ph->virtualAddress, &desktop_executable_buffer[executable_offset + ph->fileOffset], ph->dataInFile);
+                EsMemoryCopy((void*)ph->virtualAddress, &_desktop_executable_buffer[executable_offset + ph->fileOffset], ph->dataInFile);
             }
             else
             {
@@ -11737,16 +11101,18 @@ bool process_start_with_something(Process* process)
     return true;
 }
 
+extern "C" void ProcessLoadDesktopExecutable();
+extern "C" Thread* CreateLoadExecutableThread(Process* process)
+{
+    Thread *loadExecutableThread = ThreadSpawn("ExecLoad", (uintptr_t) ProcessLoadDesktopExecutable, 0, ES_FLAGS_DEFAULT, process);
+    return loadExecutableThread;
+}
+
 extern "C" void KernelMain(uintptr_t);
 
 extern "C" void CreateMainThread()
 {
     KThreadCreate("KernelMain", KernelMain);
-}
-
-extern "C" void start_desktop_process()
-{
-    process_start_with_something(desktopProcess);
 }
 
 extern "C" uint64_t get_size(MMRegion* region)

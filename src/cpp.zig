@@ -38,6 +38,8 @@ pub const user_space_size = 0xF00000000000 - 0x100000000000;
 pub const low_memory_map_start = 0xFFFFFE0000000000;
 pub const low_memory_limit = 0x100000000; // The first 4GB is mapped here.
 
+const ES_SUCCESS = -1;
+
 
 export var _stack: [0x4000]u8 align(0x1000) linksection(".bss") = undefined;
 export var _idt_data: [idt_entry_count]IDTEntry align(0x1000) linksection(".bss") = undefined;
@@ -84,7 +86,6 @@ export var gdt_descriptor2 = GDT.Descriptor
 
 export var scheduler: Scheduler = undefined;
 export var _kernelProcess: Process = undefined;
-export var _desktopProcess: Process = undefined;
 export var kernelProcess: *Process = undefined;
 export var desktopProcess: *Process = undefined;
 
@@ -95,7 +96,11 @@ extern fn ProcessorFakeTimerInterrupt() callconv(.C) void;
 extern fn ProcessorInvalidatePage(page: u64) callconv(.C) void;
 extern fn ProcessorInvalidateAllPages() callconv(.C) void;
 extern fn ProcessorIn8(port: u16) callconv(.C) u8;
+extern fn ProcessorIn16(port: u16) callconv(.C) u16;
+extern fn ProcessorIn32(port: u16) callconv(.C) u32;
 extern fn ProcessorOut8(port: u16, value: u8) callconv(.C) void;
+extern fn ProcessorOut16(port: u16, value: u16) callconv(.C) void;
+extern fn ProcessorOut32(port: u16, value: u32) callconv(.C) void;
 extern fn ProcessorReadTimeStamp() callconv(.C) u64;
 extern fn ProcessorReadCR3() callconv(.C) u64;
 extern fn ProcessorDebugOutputByte(byte: u8) callconv(.C) void;
@@ -129,6 +134,11 @@ pub fn Volatile(comptime T: type) type
         pub fn write_volatile(self: *volatile @This(), value: T) callconv(.Inline) void
         {
             self.value = value;
+        }
+
+        pub fn access_volatile(self: *volatile @This()) *volatile T
+        {
+            return &self.value;
         }
 
         pub fn increment(self: *@This()) void
@@ -1113,15 +1123,221 @@ const Scheduler = extern struct
     panic: Volatile(bool),
     shutdown: Volatile(bool),
     time_ms: u64,
+
+    fn yield(self: *@This(), context: *InterruptContext) void
+    {
+        if (!self.started.read_volatile()) return;
+        if (GetLocalStorage()) |local|
+        {
+            if (!local.scheduler_ready) return;
+
+            if (local.processor_ID != 0)
+            {
+                self.time_ms = ArchGetTimeMs();
+                globalData.scheduler_time_ms.write_volatile(self.time_ms);
+
+                self.active_timers_spinlock.acquire();
+
+                var maybe_timer_item = self.active_timers.first;
+
+                while (maybe_timer_item) |timer_item|
+                {
+                    const timer = timer_item.value.?;
+                    const next = timer_item.next;
+
+                    if (timer.trigger_time_ms <= self.time_ms)
+                    {
+                        self.active_timers.remove(timer_item);
+                        _ = timer.event.set(false);
+
+                        if (timer.callback) |callback|
+                        {
+                            timer.async_task.register(callback);
+                        }
+                    }
+                    else
+                    {
+                        break;
+                    }
+                    maybe_timer_item = next;
+                }
+
+                self.active_timers_spinlock.release();
+            }
+
+            if (local.spinlock_count != 0) KernelPanic("Spinlocks acquired while attempting to yield");
+
+            ProcessorDisableInterrupts();
+            self.dispatch_spinlock.acquire();
+
+            if (self.dispatch_spinlock.interrupts_enabled.read_volatile())
+            {
+                KernelPanic("interrupts were enabled when scheduler lock was acquired");
+            }
+
+            if (!local.current_thread.?.executing.read_volatile()) KernelPanic("current thread marked as not executing");
+
+            const old_addres_space = if (local.current_thread.?.temporary_address_space) |tas| @ptrCast(*AddressSpace, tas) else local.current_thread.?.process.?.address_space;
+
+            local.current_thread.?.interrupt_context = context;
+            local.current_thread.?.executing.write_volatile(false);
+
+            const kill_thread = local.current_thread.?.terminatable_state.read_volatile() == .terminatable and local.current_thread.?.terminating.read_volatile();
+            const keep_thread_alive = local.current_thread.?.terminatable_state.read_volatile() == .user_block_request and local.current_thread.?.terminating.read_volatile();
+
+            if (kill_thread)
+            {
+                local.current_thread.?.state.write_volatile(.terminated);
+                local.current_thread.?.kill_async_task.register(ThreadKill);
+            }
+            else if (local.current_thread.?.state.read_volatile() == .waiting_mutex)
+            {
+                const mutex = @ptrCast(*Mutex, local.current_thread.?.blocking.mutex.?);
+                if (!keep_thread_alive and mutex.owner != null)
+                {
+                    mutex.owner.?.blocked_thread_priorities[@intCast(u64, local.current_thread.?.priority)] += 1;
+                    SchedulerMaybeUpdateActiveList(mutex.owner.?);
+                    mutex.blocked_threads.insert_at_end(&local.current_thread.?.item);
+                }
+                else
+                {
+                    local.current_thread.?.state.write_volatile(.active);
+                }
+            }
+            else if (local.current_thread.?.state.read_volatile() == .waiting_event)
+            {
+                if (keep_thread_alive)
+                {
+                    local.current_thread.?.state.write_volatile(.active);
+                }
+                else
+                {
+                    var unblocked = false;
+
+                    for (local.current_thread.?.blocking.event.array[0..local.current_thread.?.blocking.event.count]) |event|
+                    {
+                        if (event.?.state.read_volatile() != 0)
+                        {
+                            local.current_thread.?.state.write_volatile(.active);
+                            unblocked = true;
+                            break;
+                        }
+                    }
+
+                    if (!unblocked)
+                    {
+                        for (local.current_thread.?.blocking.event.array[0..local.current_thread.?.blocking.event.count]) |_event, i|
+                        {
+                            const event = @ptrCast(*Event, _event.?);
+                            const item = @ptrCast(*LinkedList(Thread).Item, &local.current_thread.?.blocking.event.items.?[i]);
+                            event.blocked_threads.insert_at_end(item);
+                        }
+                    }
+                }
+            }
+            else if (local.current_thread.?.state.read_volatile() == .waiting_writer_lock)
+            {
+                const lock = @ptrCast(*WriterLock, local.current_thread.?.blocking.writer.lock.?);
+                if ((local.current_thread.?.blocking.writer.type == WriterLock.shared and lock.state.read_volatile() >= 0) or
+                    (local.current_thread.?.blocking.writer.type == WriterLock.exclusive and lock.state.read_volatile() == 0))
+                {
+                    local.current_thread.?.state.write_volatile(.active);
+                }
+                else
+                {
+                    lock.blocked_threads.insert_at_end(&local.current_thread.?.item);
+                }
+            }
+
+            if (!kill_thread and local.current_thread.?.state.read_volatile() == .active)
+            {
+                if (local.current_thread.?.type == .normal)
+                {
+                    SchedulerAddActiveThread(local.current_thread.?, false);
+                }
+                else if (local.current_thread.?.type == .idle or local.current_thread.?.type == .async_task)
+                {
+                }
+                else
+                {
+                    KernelPanic("unrecognized thread type");
+                }
+            }
+
+            const new_thread = SchedulerPickThread(local) orelse KernelPanic("Could not find a thread to execute");
+            local.current_thread = new_thread;
+            if (new_thread.executing.read_volatile()) KernelPanic("thread in active queue already executing");
+
+            new_thread.executing.write_volatile(true);
+            new_thread.executing_processor_ID = local.processor_ID;
+            new_thread.cpu_time_slices.increment();
+            if (new_thread.type == .idle) new_thread.process.?.idle_time_slices += 1
+            else new_thread.process.?.cpu_time_slices += 1;
+
+            ArchNextTimer(1);
+            const new_context = new_thread.interrupt_context;
+            const address_space = if (new_thread.temporary_address_space) |tas| @ptrCast(*AddressSpace, tas) else new_thread.process.?.address_space;
+            MMSpaceOpenReference(address_space);
+            ArchSwitchContext(new_context, &address_space.arch, new_thread.kernel_stack, new_thread, old_addres_space);
+            KernelPanic("do context switch unexpectedly returned");
+        }
+    }
 };
 
-extern fn SchedulerYield(context: *InterruptContext) callconv(.C) void;
+extern fn ArchSwitchContext(context: *InterruptContext, arch_address_space: *ArchAddressSpace, thread_kernel_stack: u64, new_thread: *Thread, old_address_space: *AddressSpace) callconv(.C) void;
+
 extern fn SchedulerCreateProcessorThreads(local: *LocalStorage) callconv(.C) void;
-extern fn SchedulerAddActiveThread(thread: *Thread, start: bool) callconv(.C) void;
-extern fn SchedulerMaybeUpdateActiveList(thread: *Thread) callconv(.C) void;
-extern fn SchedulerNotifyObject(blocked_threads: *LinkedList(Thread), unblock_all: bool, previous_mutex_owner: ?*Thread) callconv(.C) void;
-extern fn SchedulerUnblockThread(thread: *Thread, previous_mutex_owner: ?*Thread) callconv(.C) void;
+//export fn SchedulerCreateProcessorThreads(local: *LocalStorage) callconv(.C) void
+//{
+    //local.async_task_thread = ThreadSpawn("AsyncTasks", @ptrToInt(AsyncTaskThread), 0, Thread.Flags.from_flag(.async_task), null, 0) ;
+    //local.current_thread = ThreadSpawn("Idle", 0, 0, Thread.Flags.from_flag(.idle), null, 0);
+    //local.idle_thread = local.current_thread;
+    //local.processor_ID = @intCast(u32, @atomicRmw(u64, &scheduler.next_processor_id, .Add, 1, .SeqCst));
+
+    //if (local.processor_ID >= max_processors) KernelPanic("maximum processor count exceeded");
+//}
+export fn SchedulerNotifyObject(blocked_threads: *LinkedList(Thread), unblock_all: bool, previous_mutex_owner: ?*Thread) callconv(.C) void
+{
+    scheduler.dispatch_spinlock.assert_locked();
+
+    var unblocked_item = blocked_threads.first;
+    if (unblocked_item == null) return;
+    while (true)
+    {
+        if (@ptrToInt(unblocked_item) < 0xf000000000000000)
+        {
+            KernelPanic("here");
+        }
+        const next_unblocked_item = unblocked_item.?.next;
+        const unblocked_thread = unblocked_item.?.value.?;
+        SchedulerUnblockThread(unblocked_thread, previous_mutex_owner);
+        unblocked_item = next_unblocked_item;
+        if (!(unblock_all and unblocked_item != null)) break;
+    }
+}
+
 extern fn SchedulerPickThread(local: *LocalStorage) callconv(.C) ?*Thread;
+
+const GlobalData = extern struct
+{
+    click_chain_timeout_ms: Volatile(i32),
+    ui_scale: Volatile(f32),
+    swap_left_and_right_buttons: Volatile(bool),
+    show_cursor_shadow: Volatile(bool),
+    use_smart_quotes: Volatile(bool),
+    enable_hover_state: Volatile(bool),
+    animation_time_multiplier: Volatile(f32),
+    scheduler_time_ms: Volatile(u64),
+    scheduler_time_offset: Volatile(u64),
+    keyboard_layout: Volatile(u16),
+};
+
+export var mmGlobalDataRegion: *SharedRegion = undefined;
+export var globalData: *GlobalData = undefined;
+
+extern fn SchedulerAddActiveThread(thread: *Thread, start: bool) callconv(.C) void;
+extern fn SchedulerMaybeUpdateActiveList(thread: *align(1) volatile Thread) callconv(.C) void;
+extern fn SchedulerUnblockThread(thread: *Thread, previous_mutex_owner: ?*Thread) callconv(.C) void;
 extern fn SchedulerGetThreadEffectivePriority(thread: *Thread) callconv(.C) i8;
 
 const LocalStorage = extern struct
@@ -1567,6 +1783,8 @@ pub const Timer = extern struct
     }
 };
 
+extern fn TimeoutTimerHit(task: *AsyncTask) callconv(.C) void;
+
 export fn KTimerSet(timer: *Timer, trigger_in_ms: u64, callback: ?AsyncTask.Callback, argument: u64) callconv(.C) void
 {
     timer.set_extended(trigger_in_ms, callback, argument);
@@ -1786,6 +2004,13 @@ pub const CrashReason = extern struct
     during_system_call: i32,
 };
 
+const ExecutableState = enum(u8)
+{
+    not_loaded = 0,
+    failed_to_load = 1,
+    loaded = 2,
+};
+
 pub const Process = extern struct
 {
     // @TODO: maybe turn into a pointer
@@ -1800,7 +2025,7 @@ pub const Process = extern struct
     executable_name: [32]u8,
     data: ProcessCreateData,
     permissions: Process.Permission,
-    creation_flags: u32,
+    creation_flags: Process.CreationFlags,
     type: Process.Type,
 
     id: u64,
@@ -1817,7 +2042,7 @@ pub const Process = extern struct
     exit_status: i32,
     killed_event: Event,
 
-    executable_state: u8,
+    executable_state: ExecutableState,
     executable_start_request: bool,
     executable_load_attempt_complete: Event,
     executable_main_thread: ?*Thread,
@@ -1843,6 +2068,11 @@ pub const Process = extern struct
             get_volume_information = 6,
             window_manager = 7,
             posix_subsystem = 8,
+        });
+
+    pub const CreationFlags = Bitflag(enum(u32)
+        {
+            paused = 0,
         });
 
     //pub fn register(self: *@This(), process_type: Process.Type) void
@@ -3526,7 +3756,7 @@ pub const AsyncTask = extern struct
         if (self.callback == null)
         {
             self.callback = callback;
-            LocalStorage.get().?.async_task_list.insert(&self.item, false);
+            GetLocalStorage().?.async_task_list.insert(&self.item, false);
         }
         scheduler.async_task_spinlock.release();
     }
@@ -4565,8 +4795,7 @@ export fn MMUnpinRegion(space: *AddressSpace, region: *Region) callconv(.C) void
     space.reserve_mutex.release();
 }
 
-extern fn drivers_init() callconv(.C) void;
-extern fn start_desktop_process() callconv(.C) void;
+//extern fn drivers_init() callconv(.C) void;
 
 export var shutdownEvent: Event = undefined;
 
@@ -4582,6 +4811,7 @@ extern fn ArchInitialiseThread(kernel_stack: u64, kernel_stack_size: u64, thread
 
 export fn ThreadSpawn(name: [*:0]const u8, start_address: u64, argument1: u64, flags: Thread.Flags, maybe_process: ?*Process, argument2: u64) callconv(.C) ?*Thread
 {
+    if (start_address == 0 and !flags.contains(.idle)) KernelPanic("Start address is 0");
     const userland = flags.contains(.userland);
     const parent_thread = GetCurrentThread();
     const process = if (maybe_process) |process_r| process_r else kernelProcess;
@@ -7081,7 +7311,7 @@ export fn TLBShootdownCallback() callconv(.C) void
 const KIRQHandler = fn(interrupt_index: u64, context: u64) callconv(.C) bool;
 const MSIHandler = extern struct
 {
-    callback: KIRQHandler,
+    callback: ?KIRQHandler,
     context: u64,
 };
 
@@ -8361,7 +8591,6 @@ extern fn syscall_process_exit (argument0: u64, argument1: u64, argument2: u64, 
 export fn KernelInitialise() callconv(.C) void
 {
     kernelProcess = &_kernelProcess;
-    desktopProcess = &_desktopProcess;
     kernelProcess = ProcessSpawn(.kernel).?;
     MMInitialise();
     // Currently it felt impossible to pass arguments to this function
@@ -8379,7 +8608,1752 @@ export fn KernelMain(_: u64) callconv(.C) void
     _ = shutdownEvent.wait();
 }
 
+fn arch_pci_read_config32(bus: u8, device: u8, function: u8, offset: u8) u32
+{
+    return arch_pci_read_config(bus, device, function, offset, 32);
+}
+
+fn arch_pci_read_config(bus: u8, device: u8, function: u8, offset: u8, size: u32) u32
+{
+    pciConfigSpinlock.acquire();
+    defer pciConfigSpinlock.release();
+
+    if (offset & 3 != 0) KernelPanic("offset is not 4-byte aligned");
+    ProcessorOut32(IO_PCI_CONFIG, 0x80000000 | (@intCast(u32, bus) << 16) | (@intCast(u32, device) << 11) | (@intCast(u32, function) << 8) | @intCast(u32, offset));
+    if (size == 8) return ProcessorIn8(IO_PCI_DATA);
+    if (size == 16) return ProcessorIn16(IO_PCI_DATA);
+    if (size == 32) return ProcessorIn32(IO_PCI_DATA);
+    KernelPanic("invalid size");
+}
+
+fn arch_pci_write_config(bus: u8, device: u8, function: u8, offset: u8, value: u32, size: u32) void
+{
+    pciConfigSpinlock.acquire();
+    defer pciConfigSpinlock.release();
+
+    if (offset & 3 != 0) KernelPanic("offset is not 4-byte aligned");
+    ProcessorOut32(IO_PCI_CONFIG, 0x80000000 | (@intCast(u32, bus) << 16) | (@intCast(u32, device) << 11) | (@intCast(u32, function) << 8) | @intCast(u32, offset));
+    if (size == 8) ProcessorOut8(IO_PCI_DATA, @intCast(u8, value))
+    else if (size == 16) ProcessorOut16(IO_PCI_DATA, @intCast(u16, value))
+    else if (size == 32) ProcessorOut32(IO_PCI_DATA, value)
+    else KernelPanic("Invalid size\n");
+}
+
+var module_ptr: u64 = modules_start;
+
+const PCI = struct
+{
+    const Driver = struct
+    {
+        devices: []Device,
+        bus_scan_states: [256]u8,
+
+        fn init() void
+        {
+            const devices_offset = round_up(u64, @sizeOf(Driver), @alignOf(PCI.Device));
+            const allocation_size = devices_offset + (@sizeOf(PCI.Device) * PCI.Device.max_count);
+            const address = MMStandardAllocate(&_kernelMMSpace, allocation_size, Region.Flags.from_flag(.fixed), module_ptr, true);
+            if (address == 0) KernelPanic("Could not allocate memory for PCI driver");
+            module_ptr += round_up(u64, allocation_size, page_size);
+
+            driver = @intToPtr(*PCI.Driver, address);
+            driver.devices.ptr = @intToPtr([*]PCI.Device, address + devices_offset);
+            driver.devices.len = 0;
+            driver.setup();
+        }
+
+        fn setup(self: *@This()) void
+        {
+            const base_header_type = arch_pci_read_config32(0, 0, 0, 0x0c);
+            const base_bus_count: u8 = if (base_header_type & 0x80 != 0) 8 else 1;
+            var bus_to_scan_count: u8 = 0;
+
+            var base_bus: u8 = 0;
+            while (base_bus < base_bus_count) : (base_bus += 1)
+            {
+                const device_id = arch_pci_read_config32(0, 0, base_bus, 0);
+                if (device_id & 0xffff != 0xffff)
+                {
+                    self.bus_scan_states[base_bus] = @enumToInt(Bus.scan_next);
+                    bus_to_scan_count += 1;
+                }
+            }
+
+            if (bus_to_scan_count == 0) KernelPanic("No bus found");
+
+            var found_usb = false;
+
+            while (bus_to_scan_count > 0)
+            {
+                for (self.bus_scan_states) |*bus_scan_state, _bus|
+                {
+                    const bus = @intCast(u8, _bus);
+                    if (bus_scan_state.* == @enumToInt(Bus.scan_next))
+                    {
+                        bus_scan_state.* = @enumToInt(Bus.scanned);
+                        bus_to_scan_count -= 1;
+
+                        var device: u8 = 0;
+                        while (device < 32) : (device += 1)
+                        {
+                            const _device_id = arch_pci_read_config32(bus, device, 0, 0);
+                            if (_device_id & 0xffff != 0xffff)
+                            {
+                                const header_type = @truncate(u8, arch_pci_read_config32(bus, device, 0, 0x0c) >> 16);
+                                const function_count: u8 = if (header_type & 0x80 != 0) 8 else 1;
+
+                                var function: u8 = 0;
+                                while (function < function_count) : (function += 1)
+                                {
+                                    const device_id = arch_pci_read_config32(bus, device, function, 0);
+                                    if (device_id & 0xffff != 0xffff)
+                                    {
+                                        const device_class = arch_pci_read_config32(bus, device, function, 0x08);
+                                        const interrupt_information = arch_pci_read_config32(bus, device, function, 0x3c);
+                                        const index = self.devices.len;
+                                        self.devices.len += 1;
+
+                                        const pci_device = &self.devices[index];
+                                        pci_device.class_code = @truncate(u8, device_class >> 24);
+                                        pci_device.subclass_code = @truncate(u8, device_class >> 16);
+                                        pci_device.prog_IF = @truncate(u8, device_class >> 8);
+                                        pci_device.bus = bus;
+                                        pci_device.slot = device;
+                                        pci_device.function = function;
+                                        pci_device.interrupt_pin = @truncate(u8, interrupt_information >> 8);
+                                        pci_device.interrupt_line = @truncate(u8, interrupt_information >> 0);
+                                        pci_device.device_ID = arch_pci_read_config32(bus, device, function, 0);
+                                        pci_device.subsystem_ID = arch_pci_read_config32(bus, device, function, 0x2c);
+
+                                        for (pci_device.base_addresses) |*base_address, i|
+                                        {
+                                            base_address.* = pci_device.read_config_32(@intCast(u8, 0x10 + 4 * i));
+                                        }
+
+                                        const is_pci_bridge = pci_device.class_code == 0x06 and pci_device.subclass_code == 0x04;
+                                        if (is_pci_bridge)
+                                        {
+                                            const secondary_bus = @truncate(u8, arch_pci_read_config32(bus, device, function, 0x18) >> 8);
+                                            if (self.bus_scan_states[secondary_bus] == @enumToInt(Bus.do_not_scan))
+                                            {
+                                                bus_to_scan_count += 1;
+                                                self.bus_scan_states[secondary_bus] = @enumToInt(Bus.scan_next);
+                                            }
+                                        }
+
+                                        const is_usb = pci_device.class_code == 12 and pci_device.subclass_code == 3;
+                                        if (is_usb) found_usb = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    const Device = extern struct
+    {
+        device_ID: u32,
+        subsystem_ID: u32,
+        domain: u32,
+        class_code: u8,
+        subclass_code: u8,
+        prog_IF: u8,
+        bus: u8,
+        slot: u8,
+        function: u8,
+        interrupt_pin: u8,
+        interrupt_line: u8,
+        base_addresses_virtual: [6]u64,
+        base_addresses_physical: [6]u64,
+        base_addresses_sizes: [6]u64,
+        
+        base_addresses: [6]u32,
+
+        const max_count = 64;
+
+        fn read_config_8(self: @This(), offset: u8) u8
+        {
+            return @truncate(u8, arch_pci_read_config(self.bus, self.slot, self.function, offset, 8));
+        }
+
+        fn read_config_16(self: @This(), offset: u8) u16
+        {
+            return @truncate(u16, arch_pci_read_config(self.bus, self.slot, self.function, offset, 16));
+        }
+
+        fn write_config_16(self: @This(), offset: u8, value: u16) void
+        {
+            arch_pci_write_config(self.bus, self.slot, self.function, offset, value, 16);
+        }
+
+        fn read_config_32(self: @This(), offset: u8) u32
+        {
+            return arch_pci_read_config(self.bus, self.slot, self.function, offset, 32);
+        }
+
+        fn write_config_32(self: @This(), offset: u8, value: u32) void
+        {
+            arch_pci_write_config(self.bus, self.slot, self.function, offset, value, 32);
+        }
+
+        fn enable_features(self: *@This(), features: Features) bool
+        {
+            var config = self.read_config_32(4);
+            if (features.contains(.interrupts)) config &= ~(@as(u32, 1) << 10);
+            if (features.contains(.busmastering_DMA)) config |= 1 << 2;
+            if (features.contains(.memory_space_access)) config |= 1 << 1;
+            if (features.contains(.io_port_access)) config |= 1 << 0;
+            self.write_config_32(4, config);
+
+            assert(self.read_config_32(4) == config);
+            if (self.read_config_32(4) != config) return false;
+
+            var i: u8 = 0;
+            while (i < 6) : (i += 1)
+            {
+                if (~features.bits & (@as(u32, 1) << @intCast(u5, i)) != 0) continue;
+                const bar_is_io_port = self.base_addresses[i] & 1 != 0;
+                if (bar_is_io_port) continue;
+                const size_is_64 = self.base_addresses[i] & 4 != 0;
+                if (self.base_addresses[i] & 8 == 0) 
+                {
+                    // TODO
+                }
+
+                var address: u64 = undefined;
+                var size: u64 = undefined;
+
+                if (size_is_64)
+                {
+                    self.write_config_32(0x10 + 4 * i, 0xffffffff);
+                    self.write_config_32(0x10 + 4 * (i + 1), 0xffffffff);
+                    size = self.read_config_32(0x10 + 4 * i);
+                    size |= @intCast(u64, self.read_config_32(0x10 + 4 * (i + 1))) << 32;
+                    self.write_config_32(0x10 + 4 * i, self.base_addresses[i]);
+                    self.write_config_32(0x10 + 4 * (i + 1), self.base_addresses[i + 1]);
+                    address = self.base_addresses[i];
+                    address |= @intCast(u64, self.base_addresses[i + 1]) << 32;
+                }
+                else
+                {
+                    self.write_config_32(0x10 + 4 * i, 0xffffffff);
+                    size = self.read_config_32(0x10 + 4 * i);
+                    size |= @intCast(u64, 0xffffffff) << 32;
+                    self.write_config_32(0x10 + 4 * i, self.base_addresses[i]);
+                    address = self.base_addresses[i];
+                }
+
+                if (size == 0) return false;
+                if (address == 0) return false;
+
+                size &= ~@as(@TypeOf(size), 0xf);
+                size = ~size + 1;
+                address &= ~@as(@TypeOf(address), 0xf);
+
+                self.base_addresses_virtual[i] = MMMapPhysical(&_kernelMMSpace, address, size, Region.Flags.from_flag(.not_cacheable));
+                assert(address != 0);
+                assert(self.base_addresses_virtual[i] != 0);
+                self.base_addresses_physical[i] = address;
+                self.base_addresses_sizes[i] = size;
+                MMCheckUnusable(address, size);
+            }
+
+            return true;
+        }
+
+        fn read_bar_8(self: @This(), index: u32, offset: u32) u8
+        {
+            const base_address = self.base_addresses[index];
+                if (base_address & 1 != 0) return ProcessorIn8(@intCast(u16, (base_address & ~@as(u32, 3)) + offset))
+                else return @intToPtr(*volatile u8, self.base_addresses_virtual[index] + offset).*;
+        }
+
+        fn read_bar32(self: @This(), index: u32, offset: u32) u32
+        {
+            const base_address = self.base_addresses[index];
+            return
+                if (base_address & 1 != 0)
+                    ProcessorIn32(@intCast(u16, (base_address & ~@as(u32, 3)) + offset))
+                else
+                    @intToPtr(*volatile u32, self.base_addresses_virtual[index] + offset).*;
+        }
+
+        fn write_bar32(self: @This(), index: u32, offset: u32, value: u32) void
+        {
+            const base_address = self.base_addresses[index];
+            if (base_address & 1 != 0)
+            {
+                ProcessorOut32(@intCast(u16, (base_address & ~@as(u32, 3)) + offset), value);
+            }
+            else
+            {
+                @intToPtr(*volatile u32, self.base_addresses_virtual[index] + offset).* = value;
+            }
+        }
+
+        fn enable_single_interrupt(self: *@This(), handler: KIRQHandler, context: u64, owner_name: []const u8) bool
+        {
+            if (self.enable_MSI(handler, context, owner_name)) return true;
+            if (self.interrupt_pin == 0) return false;
+            if (self.interrupt_pin > 4) return false;
+
+            const result = self.enable_features(Features.from_flag(.interrupts));
+            assert(result);
+
+            var line = @intCast(i64, self.interrupt_line);
+            if (bootloader_ID == 2) line = -1;
+
+            TODO();
+        }
+
+        fn enable_MSI(self: *@This(), handler: KIRQHandler, context: u64, owner_name: []const u8) bool
+        {
+            const status = @truncate(u16, self.read_config_32(0x04) >> 16);
+            if (~status & (1 << 4) != 0) return false;
+
+            var pointer = self.read_config_8(0x34);
+            var index: u64 = 0;
+
+            while (true)
+            {
+                if (pointer == 0) break;
+                const _index = index;
+                index += 1;
+                if (_index >= 0xff) break;
+
+                var dw = self.read_config_32(pointer);
+                const next_pointer = @truncate(u8, dw >> 8);
+                const id = @truncate(u8, dw);
+
+                if (id != 5)
+                {
+                    pointer = next_pointer;
+                    continue;
+                }
+
+                const msi = MSI.register(handler, context, owner_name);
+
+                if (msi.address == 0) return false;
+                var control = @truncate(u16, dw >> 16);
+
+                if (msi.data & ~@as(u64, 0xffff) != 0)
+                {
+                    MSI.unregister(msi.tag);
+                    return false;
+                }
+
+                if (msi.address & 0b11 != 0)
+                {
+                    MSI.unregister(msi.tag);
+                    return false;
+                }
+                if (msi.address & 0xFFFFFFFF00000000 != 0 and ~control & (1 << 7) != 0)
+                {
+                    MSI.unregister(msi.tag);
+                    return false;
+                }
+
+                control = (control & ~@as(u16, 7 << 4)) | (1 << 0);
+                dw = @truncate(u16, dw) | (@as(u32, control) << 16);
+
+                self.write_config_32(pointer + 0, dw);
+                self.write_config_32(pointer + 4, @truncate(u32, msi.address));
+
+                if (control & (1 << 7) != 0)
+                {
+                    self.write_config_32(pointer + 8, @truncate(u32, msi.address >> 32));
+                    self.write_config_16(pointer + 12, @intCast(u16, (self.read_config_16(pointer + 12) & 0x3800) | msi.data));
+                    if (control & (1 << 8) != 0) self.write_config_32(pointer + 16, 0);
+                }
+                else
+                {
+                    self.write_config_16(pointer + 8, @intCast(u16, msi.data));
+                    if (control & (1 << 8) != 0) self.write_config_32(pointer + 12, 0);
+                }
+
+                return true;
+            }
+
+            return false;
+        }
+    };
+
+    const Bus = enum(u8)
+    {
+        do_not_scan = 0,
+        scan_next = 1,
+        scanned = 2,
+    };
+
+    const Features = Bitflag(enum(u64)
+    {
+        bar_0 = 0,
+        bar_1 = 1,
+        bar_2 = 2,
+        bar_3 = 3,
+        bar_4 = 4,
+        bar_5 = 5,
+        interrupts = 8,
+        busmastering_DMA = 9,
+        memory_space_access = 10,
+        io_port_access = 11,
+    });
+
+    var driver: *Driver = undefined;
+};
+
+const MSI = extern struct
+{
+    address: u64,
+    data: u64,
+    tag: u64,
+
+    fn register(handler: KIRQHandler, context: u64, owner_name: []const u8) @This()
+    {
+        _ = owner_name;
+        irqHandlersLock.acquire();
+        defer irqHandlersLock.release();
+
+        for (msiHandlers) |*msi_handler, i|
+        {
+            if (msi_handler.callback != null) continue;
+
+            msi_handler.* = MSIHandler { .callback = handler, .context = context };
+
+            return .
+            {
+                .address = 0xfee00000,
+                .data = interrupt_vector_msi_start + i,
+                .tag = i,
+            };
+        }
+
+        return zeroes(MSI);
+    }
+
+    fn unregister(tag: u64) void
+    {
+        irqHandlersLock.acquire();
+        defer irqHandlersLock.release();
+        msiHandlers[tag].callback = null;
+    }
+};
+
+const Workgroup = extern struct
+{
+    remaining: Volatile(u64),
+    success: Volatile(u64),
+    event: Event,
+
+    fn init(self: *@This()) void
+    {
+        self.remaining.write_volatile(1);
+        self.success.write_volatile(1);
+        self.event.reset();
+    }
+
+    fn wait(self: *@This()) bool
+    {
+        if (self.remaining.atomic_fetch_sub(1) != 1) _ = self.event.wait();
+        if (self.remaining.read_volatile() != 0) KernelPanic("Expected remaining operations to be 0 after event set");
+
+        return self.success.read_volatile() != 0;
+    }
+
+    fn start(self: *@This()) void
+    {
+        if (self.remaining.atomic_fetch_add(1) == 0) KernelPanic("Could not start operation on completed dispatch group");
+    }
+
+    fn end(self: *@This(), success: bool) void
+    {
+        if (!success)
+        {
+            self.success.write_volatile(0);
+            @fence(.SeqCst);
+        }
+
+        if (self.remaining.atomic_fetch_sub(1) == 1) _ = self.event.set(false);
+    }
+};
+
+export var recent_interrupt_events_pointer: Volatile(u64) = undefined;
+export var recent_interrupt_events: [64]Volatile(InterruptEvent) = undefined;
+
+const AHCI = struct
+{
+    fn GlobalRegister(comptime offset: u32) type
+    {
+        return struct
+        {
+            fn write(d: *AHCI.Driver, value: u32) void
+            {
+                d.pci.write_bar32(5, offset, value);
+            }
+
+            fn read(d: *AHCI.Driver) u32
+            {
+                return d.pci.read_bar32(5, offset);
+            }
+        };
+    }
+
+    fn PortRegister(comptime offset: u32) type
+    {
+        return struct
+        {
+            fn write(d: *AHCI.Driver, port: u32, value: u32) void
+            {
+                d.pci.write_bar32(5, offset + port * 0x80, value);
+            }
+
+            fn read(d: *AHCI.Driver, port: u32) u32
+            {
+                return d.pci.read_bar32(5, offset + port * 0x80);
+            }
+        };
+    }
+
+    const CAP = GlobalRegister(0);
+    const GHC = GlobalRegister(4);
+    const IS = GlobalRegister(8);
+    const PI = GlobalRegister(0xc);
+    const CAP2 = GlobalRegister(0x24);
+    const BOHC = GlobalRegister(0x28);
+
+    const PCLB = PortRegister(0x100);
+    const PCLBU = PortRegister(0x104);
+    const PFB = PortRegister(0x108);
+    const PFBU = PortRegister(0x10c);
+    const PIS = PortRegister(0x110);
+    const PIE = PortRegister(0x114);
+    const PCMD = PortRegister(0x118);
+    const PTFD = PortRegister(0x120);
+    const PSIG = PortRegister(0x124);
+    const PSSTS = PortRegister(0x128);
+    const PSCTL = PortRegister(0x12c);
+    const PSERR = PortRegister(0x130);
+    const PCI_register = PortRegister(0x138);
+
+    const general_timeout = 5000;
+    const command_list_size = 0x400;
+    const received_FIS_size = 0x100;
+    const PRDT_entry_count = 0x48;
+    const command_table_size = 0x80 + PRDT_entry_count * 0x10;
+
+    const Driver = struct
+    {
+        pci: *PCI.Device,
+        drives: []AHCI.Drive,
+        mbr_partitions: [4]MBR.Partition,
+        mbr_partition_count: u64,
+        partition_devices: []PartitionDevice,
+        capabilities: u32,
+        capabilities2: u32,
+        command_slot_count: u64,
+        timeout_timer: Timer,
+        dma64_supported: bool,
+        ports: [max_port_count]Port,
+
+        const Port = extern struct
+        {
+            connected: bool,
+            atapi: bool,
+            ssd: bool,
+
+            command_list: [*]u32,
+            command_tables: [*]u8,
+            sector_byte_count: u64,
+            sector_count: u64,
+
+            command_contexts: [32]?*Workgroup,
+            command_start_timestamps: [32]u64,
+            running_commands: u32,
+
+            command_spinlock: Spinlock,
+            command_slots_available_event: Event,
+
+            model: [41]u8,
+        };
+
+        const max_port_count = 32;
+        const class_code = 1;
+        const subclass_code = 6;
+        const prog_IF = 1;
+
+        fn init() void
+        {
+            const drives_offset = round_up(u64, @sizeOf(Driver), @alignOf(AHCI.Drive));
+            const partition_devices_offset = round_up(u64, drives_offset + (@sizeOf(AHCI.Drive) * AHCI.Drive.max_count), @alignOf(PartitionDevice));
+            const allocation_size = partition_devices_offset + (@sizeOf(PartitionDevice) * PartitionDevice.max_count);
+            const address = MMStandardAllocate(&_kernelMMSpace, allocation_size, Region.Flags.from_flag(.fixed), module_ptr, true);
+            if (address == 0) KernelPanic("Could not allocate memory for PCI driver");
+            module_ptr += round_up(u64, allocation_size, page_size);
+            driver = @intToPtr(*AHCI.Driver, address);
+            driver.drives.ptr = @intToPtr([*]AHCI.Drive, address + drives_offset);
+            driver.drives.len = 0;
+            driver.partition_devices.ptr = @intToPtr([*]PartitionDevice, address + partition_devices_offset);
+            driver.partition_devices.len = 0;
+            driver.setup();
+        }
+
+        fn setup(self: *@This()) void
+        {
+            self.pci = &PCI.driver.devices[3];
+
+            const is_ahci_pci_device = self.pci.class_code == class_code and self.pci.subclass_code == subclass_code and self.pci.prog_IF == prog_IF;
+
+            if (!is_ahci_pci_device) KernelPanic("AHCI PCI device not found");
+
+            _ = self.pci.enable_features(PCI.Features.from_flags(.{ .interrupts, .busmastering_DMA, .memory_space_access, .bar_5 }));
+
+            if (CAP2.read(self) & (1 << 0) != 0)
+            {
+                BOHC.write(self, BOHC.read(self) | (1 << 1));
+                const timeout = Timeout.new(25);
+                var status: u32 = undefined;
+
+                while (true)
+                {
+                    status = BOHC.read(self);
+                    if (status & (1 << 0) != 0) break;
+                    if (timeout.hit()) break;
+                }
+
+                if (status & (1 << 0) != 0)
+                {
+                    var event = zeroes(Event);
+                    _ = event.wait_extended(2000);
+                }
+            }
+
+            {
+                const timeout = Timeout.new(AHCI.general_timeout);
+                GHC.write(self, GHC.read(self) | (1 << 0));
+                while (GHC.read(self) & (1 << 0) != 0 and !timeout.hit())
+                {
+                }
+
+                // error
+                if (timeout.hit()) KernelPanic("AHCI timeout hit");
+            }
+
+            if (!self.pci.enable_single_interrupt(handler, @ptrToInt(self), "AHCI")) KernelPanic("Unable to initialize AHCI");
+
+            GHC.write(self, GHC.read(self) | (1 << 31) | (1 << 1));
+            self.capabilities = CAP.read(self);
+            self.capabilities2 = CAP2.read(self);
+            self.command_slot_count = ((self.capabilities >> 8) & 31) + 1;
+            self.dma64_supported = self.capabilities & (1 << 31) != 0;
+            if (!self.dma64_supported) KernelPanic("DMA is not supported");
+
+            const maximum_number_of_ports = (self.capabilities & 31) + 1;
+            var found_port_count: u64 = 0;
+            const implemented_ports = PI.read(self);
+
+            for (self.ports) |*port, i|
+            {
+                if (implemented_ports & (@as(u32, 1) << @intCast(u5, i)) != 0)
+                {
+                    found_port_count += 1;
+                    if (found_port_count <= maximum_number_of_ports) port.connected = true;
+                }
+            }
+
+            for (self.ports) |*port, _port_i|
+            {
+                if (port.connected)
+                {
+                    const port_i = @intCast(u32, _port_i);
+                    const needed_byte_count = command_list_size + received_FIS_size + command_table_size * self.command_slot_count;
+
+                    var virtual_address: u64 = 0;
+                    var physical_address: u64 = 0;
+
+                    if (!MMPhysicalAllocateAndMap(needed_byte_count, page_size, if (self.dma64_supported) 64 else 32, true, Region.Flags.from_flag(.not_cacheable), &virtual_address, &physical_address))
+                    {
+                        KernelPanic("AHCI allocation failure");
+                    }
+
+                    port.command_list = @intToPtr([*]u32, virtual_address);
+                    port.command_tables = @intToPtr([*]u8, virtual_address + command_list_size + received_FIS_size);
+
+                    PCLB.write(self, port_i, @truncate(u32, physical_address));
+                    PFB.write(self, port_i, @truncate(u32, physical_address + 0x400));
+                    if (self.dma64_supported)
+                    {
+                        PCLBU.write(self, port_i, @truncate(u32, physical_address >> 32));
+                        PFBU.write(self, port_i, @truncate(u32, (physical_address + 0x400) >> 32));
+                    }
+
+                    var command_slot: u64 = 0;
+                    while (command_slot < self.command_slot_count) : (command_slot += 1)
+                    {
+                        const address = physical_address + command_list_size + received_FIS_size + command_table_size * command_slot;
+                        port.command_list[command_slot * 8 + 2] = @truncate(u32, address);
+                        port.command_list[command_slot * 8 + 3] = @truncate(u32, address >> 32);
+                    }
+
+                    const timeout = Timeout.new(general_timeout);
+                    const running_bits = (1 << 0) | (1 << 4) | (1 << 15) | (1 << 14);
+
+                    while (true)
+                    {
+                        const status = PCMD.read(self, port_i);
+                        if (status & running_bits == 0 or timeout.hit()) break;
+                        PCMD.write(self, port_i, status & ~@as(u32, (1 << 0) | (1 << 4)));
+                    }
+
+                    const reset_port_timeout = PCMD.read(self, port_i) & running_bits != 0;
+                    if (reset_port_timeout)
+                    {
+                        port.connected = false;
+                        continue;
+                    }
+
+                    PIE.write(self, port_i, PIE.read(self, port_i) & 0x0e3fff0);
+                    PIS.write(self, port_i, PIS.read(self, port_i));
+
+                    PSCTL.write(self, port_i, PSCTL.read(self, port_i) | (3 << 8));
+                    PCMD.write(self, port_i,
+                        (PCMD.read(self, port_i) & 0x0FFFFFFF) |
+                        (1 << 1) |
+                        (1 << 2) |
+                        (1 << 4) |
+                        (1 << 28));
+
+                    var link_timeout = Timeout.new(10);
+
+                    while (PSSTS.read(self, port_i) & 0xf != 3 and !link_timeout.hit()) { }
+                    const activate_port_timeout = PSSTS.read(self, port_i) & 0xf != 3;
+                    if (activate_port_timeout)
+                    {
+                        port.connected = false;
+                        continue;
+                    }
+
+                    PSERR.write(self, port_i, PSERR.read(self, port_i));
+
+                    while (PTFD.read(self, port_i) & 0x88 != 0 and !timeout.hit()) { }
+                    const port_ready_timeout = PTFD.read(self, port_i) & 0x88 != 0;
+                    if (port_ready_timeout)
+                    {
+                        port.connected = false;
+                        continue;
+                    }
+
+                    PCMD.write(self, port_i, PCMD.read(self, port_i) | (1 << 0));
+                    PIE.write(self, port_i,
+                        PIE.read(self, port_i) |
+                        (1 << 5) |
+                        (1 << 0) |
+                        (1 << 30) |
+                        (1 << 29) |
+                        (1 << 28) |
+                        (1 << 27) |
+                        (1 << 26) |
+                        (1 << 24) |
+                        (1 << 23));
+                }
+            }
+
+            for (self.ports) |*port, _port_i|
+            {
+                if (port.connected)
+                {
+                    const port_i = @intCast(u32, _port_i);
+
+                    const status = PSSTS.read(self, port_i);
+
+                    if (status & 0xf != 0x3 or status & 0xf0 == 0 or status & 0xf00 != 0x100)
+                    {
+                        port.connected = false;
+                        continue;
+                    }
+
+                    const signature = PSIG.read(self, port_i);
+
+                    if (signature == 0x00000101)
+                    {
+                        // SATA drive
+                    }
+                    else if (signature == 0xEB140101)
+                    {
+                        // SATAPI drive
+                        port.atapi = true;
+                    }
+                    else if (signature == 0)
+                    {
+                        // no drive connected
+                        port.connected = false;
+                    }
+                    else
+                    {
+                        // unrecognized drive signature
+                        port.connected = false;
+                    }
+                }
+            }
+
+            var identify_data: u64 = 0;
+            var identify_data_physical: u64 = 0;
+            if (!MMPhysicalAllocateAndMap(0x200, page_size, if (self.dma64_supported) 64 else 32, true, Region.Flags.from_flag(.not_cacheable), &identify_data, &identify_data_physical))
+            {
+                KernelPanic("Allocation failure");
+            }
+
+            for (self.ports) |*port, _port_i|
+            {
+                if (port.connected)
+                {
+                    const port_i = @intCast(u32, _port_i);
+                    EsMemoryZero(identify_data, 0x200);
+
+                    port.command_list[0] = 5 | (1 << 16);
+                    port.command_list[1] = 0;
+
+                    const opcode: u32 = if (port.atapi) 0xa1 else 0xec;
+                    const command_FIS = @ptrCast([*]u32, @alignCast(4, port.command_tables));
+                    command_FIS[0] = 0x27 | (1 << 15) | (opcode << 16);
+                    command_FIS[1] = 0;
+                    command_FIS[2] = 0;
+                    command_FIS[3] = 0;
+                    command_FIS[4] = 0;
+
+                    const prdt = @intToPtr([*]u32, @ptrToInt(port.command_tables) + 0x80);
+                    prdt[0] = @truncate(u32, identify_data_physical);
+                    prdt[1] = @truncate(u32, identify_data_physical >> 32);
+                    prdt[2] = 0;
+                    prdt[3] = 0x200 - 1;
+
+                    if (!self.send_single_command(port_i))
+                    {
+                        PCMD.write(self, port_i, PCMD.read(self, port_i) & ~@as(u32, 1 << 0));
+                        port.connected = false;
+                        continue;
+                    }
+
+                    port.sector_byte_count = 0x200;
+
+                    const identify_ptr = @intToPtr([*]u16, identify_data);
+                    if (identify_ptr[106] & (1 << 14) != 0 and ~identify_ptr[106] & (1 << 15) != 0 and identify_ptr[106] & (1 << 12) != 0)
+                    {
+                        port.sector_byte_count = identify_ptr[117] | (@intCast(u32, identify_ptr[118]) << 16);
+                    }
+
+                    port.sector_count = identify_ptr[100] + (@intCast(u64, identify_ptr[101]) << 16) + (@intCast(u64, identify_ptr[102]) << 32) + (@intCast(u64, identify_ptr[103]) << 48);
+
+                    if (!(identify_ptr[49] & (1 << 9) != 0 and identify_ptr[49] & (1 << 8) != 0))
+                    {
+                        port.connected = false;
+                        continue;
+                    }
+
+                    if (port.atapi)
+                    {
+                        port.command_list[0] = 5 | (1 << 16) | (1 << 5);
+                        command_FIS[0] = 0x27 | (1 << 15) | (0xa0 << 16);
+                        command_FIS[1] = 8 << 8;
+                        prdt[3] = 8 - 1;
+
+                        const scsi_command = @ptrCast([*]u8, command_FIS);
+                        EsMemoryZero(@ptrToInt(scsi_command), 10);
+                        scsi_command[0] = 0x25;
+
+                        if (!self.send_single_command(port_i))
+                        {
+                            PCMD.write(self, port_i, PCMD.read(self, port_i) & ~@as(u32, 1 << 0));
+                            port.connected = false;
+                            continue;
+                        }
+
+                        const capacity = @intToPtr([*]u8, identify_data);
+                        port.sector_count = capacity[3] + (@intCast(u64, capacity[2]) << 8) + (@intCast(u64, capacity[1]) << 16) + (@intCast(u64, capacity[0]) << 24) + 1;
+                        port.sector_byte_count = capacity[7] + (@intCast(u64, capacity[6]) << 8) + (@intCast(u64, capacity[5]) << 16) + (@intCast(u64, capacity[4]) << 24);
+                    }
+
+                    if (port.sector_count <= 128 or port.sector_byte_count & 0x1ff != 0 or port.sector_byte_count == 0 or port.sector_byte_count > 0x1000)
+                    {
+                        port.connected = false;
+                        continue;
+                    }
+
+                    var model: u64 = 0;
+                    while (model < 20) : (model += 1)
+                    {
+                        port.model[model * 2 + 0] = @truncate(u8, identify_ptr[27 + model] >> 8);
+                        port.model[model * 2 + 1] = @truncate(u8, identify_ptr[27 + model]);
+                    }
+                    
+                    port.model[40] = 0;
+
+                    model = 39;
+
+                    while (model > 0) : (model -= 1)
+                    {
+                        if (port.model[model] == ' ') port.model[model] = 0
+                        else break;
+                    }
+
+                    port.ssd = identify_ptr[217] == 1;
+
+                    var i: u64 = 10;
+                    while (i < 20) : (i += 1)
+                    {
+                        identify_ptr[i] = (identify_ptr[i] >> 8) | (identify_ptr[i] << 8);
+                    }
+
+                    i = 23;
+                    while (i < 27) : (i += 1)
+                    {
+                        identify_ptr[i] = (identify_ptr[i] >> 8) | (identify_ptr[i] << 8);
+                    }
+
+                    i = 27;
+                    while (i < 47) : (i += 1)
+                    {
+                        identify_ptr[i] = (identify_ptr[i] >> 8) | (identify_ptr[i] << 8);
+                    }
+                }
+            }
+
+
+            _ = MMFree(&_kernelMMSpace, identify_data, 0, false);
+            MMPhysicalFree(identify_data_physical, false, 1);
+
+            KTimerSet(&self.timeout_timer, general_timeout, TimeoutTimerHit, @ptrToInt(self));
+
+            for (self.ports) |*port, _port_i|
+            {
+                if (port.connected)
+                {
+                    const port_i = @intCast(u32, _port_i);
+                    const drive_index = self.drives.len;
+                    self.drives.len += 1;
+                    const drive = &self.drives[drive_index];
+                    drive.port = port_i;
+                    drive.block_device.sector_size = port.sector_byte_count;
+                    drive.block_device.sector_count = port.sector_count;
+                    drive.block_device.max_access_sector_count = if (port.atapi) (65535 / drive.block_device.sector_size) else (PRDT_entry_count - 1) * page_size / drive.block_device.sector_size;
+                    drive.block_device.read_only = port.atapi;
+                    comptime assert(port.model.len <= drive.block_device.model.len);
+                    std.mem.copy(u8, drive.block_device.model[0..port.model.len], port.model[0..]);
+                    drive.block_device.model_bytes = port.model.len;
+                    drive.block_device.drive_type = if (port.atapi) DriveType.cdrom else if (port.ssd) DriveType.ssd else DriveType.hdd;
+                    
+                    drive.block_device.access = @ptrToInt(access_callback);
+                    drive.block_device.register_filesystem();
+                }
+            }
+        }
+
+        fn access_callback(request: BlockDevice.AccessRequest) Error
+        {
+            const drive = @ptrCast(*AHCI.Drive, request.device);
+            request.dispatch_group.?.start();
+
+            if (!AHCI.driver.access(drive.port, request.offset, request.count, request.operation, request.buffer, request.flags, request.dispatch_group))
+            {
+                request.dispatch_group.?.end(false);
+            }
+
+            return ES_SUCCESS;
+        }
+
+        fn handle_IRQ(self: *@This()) bool
+        {
+            const global_interrupt_status = IS.read(self);
+            if (global_interrupt_status == 0) return false;
+            IS.write(self, global_interrupt_status);
+
+            const event = &recent_interrupt_events[recent_interrupt_events_pointer.read_volatile()];
+            event.access_volatile().timestamp = scheduler.time_ms;
+            event.access_volatile().global_interrupt_status = global_interrupt_status;
+            event.access_volatile().complete = false;
+            recent_interrupt_events_pointer.write_volatile((recent_interrupt_events_pointer.read_volatile() + 1) % recent_interrupt_events.len);
+
+            var command_completed = false;
+
+            for (self.ports) |*port, _port_i|
+            {
+                const port_i = @intCast(u32, _port_i);
+                if (~global_interrupt_status & (@as(u32, 1) << @intCast(u5, port_i)) != 0) continue;
+
+                const interrupt_status = PIS.read(self, port_i);
+                if (interrupt_status == 0) continue;
+
+                PIS.write(self, port_i, interrupt_status);
+
+                if (interrupt_status & ((1 << 30 | (1 << 29) | (1 << 28) | (1 << 27) | (1 << 26) | (1 << 24) | (1 << 23))) != 0)
+                {
+                    TODO();
+                }
+                port.command_spinlock.acquire();
+                const commands_issued = PCI_register.read(self, port_i);
+
+                if (port_i == 0)
+                {
+                    event.access_volatile().port_0_commands_issued = commands_issued;
+                    event.access_volatile().port_0_commands_running = port.running_commands;
+                }
+
+                var i: u32 = 0;
+                while (i < self.ports.len) : (i += 1)
+                {
+                    const shifter = (@as(u32, 1) << @intCast(u5, i));
+                    if (~port.running_commands & shifter != 0) continue;
+                    if (commands_issued & shifter != 0) continue;
+
+                    port.command_contexts[i].?.end(true);
+                    port.command_contexts[i] = null;
+                    _ = port.command_slots_available_event.set(true);
+                    port.running_commands &= ~shifter;
+
+                    command_completed = true;
+                }
+
+                port.command_spinlock.release();
+            }
+
+            if (command_completed)
+            {
+                KSwitchThreadAfterIRQ();
+            }
+
+            event.access_volatile().complete = true;
+            return true;
+        }
+
+        fn send_single_command(self: *@This(), port: u32) bool
+        {
+            const timeout = Timeout.new(general_timeout);
+            
+            while (PTFD.read(self, port) & ((1 << 7) | (1 << 3)) != 0 and !timeout.hit()) { }
+            if (timeout.hit()) return false;
+            @fence(.SeqCst);
+            PCI_register.write(self, port, 1 << 0);
+            var complete = false;
+
+            while (!timeout.hit())
+            {
+                complete = ~PCI_register.read(self, port) & (1 << 0) != 0;
+                if (complete)
+                {
+                    break;
+                }
+            }
+
+            return complete;
+        }
+
+        fn access(self: *@This(), _port_index: u64, offset: u64, byte_count: u64, operation: i32, buffer: *DMABuffer, flags: BlockDevice.AccessRequest.Flags, dispatch_group: ?*Workgroup) bool
+        {
+            _ = flags;
+            const port_index = @intCast(u32, _port_index);
+            const port = &self.ports[port_index];
+
+            var command_index: u64 = 0;
+
+            while (true)
+            {
+                port.command_spinlock.acquire();
+
+                const commands_available = ~PCI_register.read(self, port_index);
+
+                var found = false;
+                var slot: u64 = 0;
+                while (slot < self.command_slot_count) : (slot += 1)
+                {
+                    if (commands_available & (@as(u32, 1) << @intCast(u5, slot)) != 0 and port.command_contexts[slot] == null)
+                    {
+                        command_index = slot;
+                        found = true;
+                        break;
+                    }
+                }
+
+                if (!found)
+                {
+                    port.command_slots_available_event.reset();
+                }
+                else
+                {
+                    port.command_contexts[command_index] = dispatch_group;
+                }
+
+                port.command_spinlock.release();
+
+                if (!found)
+                {
+                    _ = port.command_slots_available_event.wait();
+                }
+                else
+                {
+                    break;
+                }
+            }
+
+            const sector_count = byte_count / port.sector_byte_count;
+            const offset_sectors = offset / port.sector_byte_count;
+
+            const command_FIS = @intToPtr([*]u32, @ptrToInt(port.command_tables) + command_table_size * command_index);
+            command_FIS[0] = 0x27 | (1 << 15) | (@as(u32, if (operation == BlockDevice.write) 0x35 else 0x25) << 16);
+            command_FIS[1] = (@intCast(u32, offset_sectors) & 0xffffff) | (1 << 30);
+            command_FIS[2] = @intCast(u32, offset_sectors >> 24) & 0xffffff;
+            command_FIS[3] = @truncate(u16, sector_count);
+            command_FIS[4] = 0;
+
+            var m_PRDT_entry_count: u64 = 0;
+            const prdt = @intToPtr([*]u32, @ptrToInt(port.command_tables) + command_table_size * command_index + 0x80);
+
+            while (!buffer.is_complete())
+            {
+                if (m_PRDT_entry_count == PRDT_entry_count) KernelPanic("Too many PRDT entries");
+
+                const segment = buffer.next_segment(false);
+
+                prdt[0 + 4 * m_PRDT_entry_count] = @truncate(u32, segment.physical_address);
+                prdt[1 + 4 * m_PRDT_entry_count] = @truncate(u32, segment.physical_address >> 32);
+                prdt[2 + 4 * m_PRDT_entry_count] = 0;
+                prdt[3 + 4 * m_PRDT_entry_count] = (@intCast(u32, segment.byte_count) - 1) | @as(u32, if (segment.is_last) (1 << 31) else 0);
+                m_PRDT_entry_count += 1;
+            }
+
+            port.command_list[command_index * 8 + 0] = 5 | (@intCast(u32, m_PRDT_entry_count) << 16) | @as(u32, if (operation == BlockDevice.write) (1 << 6) else 0);
+            port.command_list[command_index * 8 + 1] = 0;
+
+            if (port.atapi)
+            {
+                port.command_list[command_index * 8 + 0] |= (1 << 5);
+                command_FIS[0] = 0x27 | (1 << 15) | (0xa0 << 16);
+                command_FIS[1] = @intCast(u32, byte_count) << 8;
+
+                const scsi_command = @intToPtr([*]u8, @ptrToInt(command_FIS) + 0x40);
+                EsMemoryZero(@ptrToInt(scsi_command), 10);
+                scsi_command[0] = 0xa8;
+                scsi_command[2] = @truncate(u8, offset_sectors >> 0x18);
+                scsi_command[3] = @truncate(u8, offset_sectors >> 0x10);
+                scsi_command[4] = @truncate(u8, offset_sectors >> 0x08);
+                scsi_command[5] = @truncate(u8, offset_sectors >> 0x00);
+                scsi_command[9] = @intCast(u8, sector_count);
+            }
+
+            port.command_spinlock.acquire();
+            port.running_commands |= @intCast(u32, 1) << @intCast(u5, command_index);
+            @fence(.SeqCst);
+            PCI_register.write(self, port_index, @intCast(u32, 1) << @intCast(u5, command_index));
+            port.command_start_timestamps[command_index] = scheduler.time_ms;
+            port.command_spinlock.release();
+
+            return true;
+        }
+    };
+
+    const Drive = extern struct
+    {
+        block_device: BlockDevice,
+        port: u64,
+
+        const max_count = 64;
+    };
+
+    var driver: *Driver = undefined;
+
+    fn handler(_: u64, context: u64) callconv(.C) bool
+    {
+        return @intToPtr(*AHCI.Driver, context).handle_IRQ();
+    }
+};
+
+const DriveType = enum(u8)
+{
+    other = 0,
+    hdd = 1,
+    ssd = 2,
+    cdrom = 3,
+    usb_mass_storage = 4,
+};
+
+const BlockDevice = extern struct
+{
+    access: u64,
+    sector_size: u64,
+    sector_count: u64,
+    read_only: bool,
+    nest_level: u8,
+    drive_type: DriveType,
+    model_bytes: u8,
+    model: [64]u8,
+    max_access_sector_count: u64,
+    signature_block: [*]u8,
+    detect_filesystem_mutex: Mutex,
+
+    const AccessRequest = extern struct
+    {
+        device: *BlockDevice,
+        offset: u64,
+        count: u64,
+        operation: i32,
+        buffer: *DMABuffer,
+        flags: Flags,
+        dispatch_group: ?*Workgroup,
+
+        const Flags = Bitflag(enum(u64)
+            {
+                cache = 0,
+                soft_errors = 1,
+            });
+        const Callback = fn(self: @This()) i64;
+    };
+
+    fn register_filesystem(self: *@This()) void
+    {
+        self.detect_filesystem();
+        // @TODO: notify desktop
+    }
+
+    fn detect_filesystem(self: *@This()) void
+    {
+        _ = self.detect_filesystem_mutex.acquire();
+        defer self.detect_filesystem_mutex.release();
+
+        if (self.nest_level > 4) KernelPanic("Filesystem nest limit");
+
+        const sectors_to_read = (signature_block_size + self.sector_size - 1) / self.sector_size;
+        if (sectors_to_read > self.sector_count) KernelPanic("Drive too small");
+
+        const bytes_to_read = sectors_to_read * self.sector_size;
+        self.signature_block = @intToPtr(?[*]u8, EsHeapAllocate(bytes_to_read, false, &heapFixed)) orelse KernelPanic("unable to allocate memory for fs detection"); 
+        var dma_buffer = zeroes(DMABuffer);
+        dma_buffer.virtual_address = @ptrToInt(self.signature_block);
+        var request = zeroes(BlockDevice.AccessRequest);
+        request.device = self;
+        request.count = bytes_to_read;
+        request.operation = read;
+        request.buffer = &dma_buffer;
+
+        if (FSBlockDeviceAccess(request) != ES_SUCCESS)
+        {
+            KernelPanic("Could not read disk");
+        }
+        assert(self.nest_level == 0);
+
+        if (!self.check_mbr()) KernelPanic("Only MBR is supported\n");
+
+        EsHeapFree(@ptrToInt(self.signature_block), bytes_to_read, &heapFixed);
+    }
+
+    fn check_mbr(self: *@This()) bool
+    {
+        if (MBR.get_partitions(self.signature_block, self.sector_count))
+        {
+            for (AHCI.driver.mbr_partitions) |partition|
+            {
+                if (partition.present)
+                {
+                    // @TODO: this should be a recursive call to fs_register
+                    const index = AHCI.driver.partition_devices.len;
+                    AHCI.driver.partition_devices.len += 1;
+                    const partition_device = &AHCI.driver.partition_devices[index];
+                    partition_device.register(self, partition.offset, partition.count, 0, "MBR partition");
+                    return true;
+                }
+            }
+        }
+        
+        return false;
+    }
+
+    const read = 0;
+    const write = 1;
+};
+
+const MBR = extern struct
+{
+    const Partition = extern struct
+    {
+        offset: u32,
+        count: u32,
+        present: bool,
+    };
+    fn get_partitions(first_block: [*]u8, sector_count: u64) bool
+    {
+        const is_boot_magic_ok = first_block[510] == 0x55 and first_block[511] == 0xaa;
+        if (!is_boot_magic_ok) return false;
+
+        for (AHCI.driver.mbr_partitions) |*mbr_partition, i|
+        {
+            if (first_block[4 + 0x1be + i * 0x10] == 0)
+            {
+                mbr_partition.present = false;
+                continue;
+            }
+
+            mbr_partition.offset =
+                (@intCast(u32, first_block[0x1be + i * 0x10 + 8]) << 0) +
+                (@intCast(u32, first_block[0x1be + i * 0x10 + 9]) << 8) +
+                (@intCast(u32, first_block[0x1be + i * 0x10 + 10]) << 16) +
+                (@intCast(u32, first_block[0x1be + i * 0x10 + 11]) << 24);
+            mbr_partition.count =
+                (@intCast(u32, first_block[0x1be + i * 0x10 + 12]) << 0) +
+                (@intCast(u32, first_block[0x1be + i * 0x10 + 13]) << 8) +
+                (@intCast(u32, first_block[0x1be + i * 0x10 + 14]) << 16) +
+                (@intCast(u32, first_block[0x1be + i * 0x10 + 15]) << 24);
+            mbr_partition.present = true;
+
+            if (mbr_partition.offset > sector_count or mbr_partition.count > sector_count - mbr_partition.offset or mbr_partition.count < 32)
+            {
+                return false;
+            }
+            AHCI.driver.mbr_partition_count += 1;
+        }
+
+        return true;
+    }
+};
+
+const PartitionDevice = extern struct
+{
+    block: BlockDevice,
+    sector_offset: u64,
+    parent: *BlockDevice,
+
+    const max_count = 16;
+
+    fn access(_request: BlockDevice.AccessRequest) Error
+    {
+        var request = _request;
+        const device = @ptrCast(*PartitionDevice, request.device);
+        request.device = @ptrCast(*BlockDevice, device.parent);
+        request.offset += device.sector_offset * device.block.sector_size;
+        return FSBlockDeviceAccess(request);
+    }
+
+    fn register(self: *@This(), parent: *BlockDevice, offset: u64, sector_count: u64, flags: u32, model: []const u8) void
+    {
+        _ = flags; // @TODO: refactor
+        std.mem.copy(u8, self.block.model[0..model.len], model);
+
+        self.parent = parent;
+        self.block.sector_size = parent.sector_size;
+        self.block.max_access_sector_count = parent.max_access_sector_count;
+        self.sector_offset = offset;
+        self.block.sector_count = sector_count;
+        self.block.read_only = parent.read_only;
+        self.block.access = @ptrToInt(access);
+        self.block.model_bytes = @intCast(u8, model.len);
+        self.block.nest_level = parent.nest_level + 1;
+        self.block.drive_type = parent.drive_type;
+    }
+};
+
+const Errors = struct
+{
+    const ES_ERROR_BLOCK_ACCESS_INVALID: Error = -74;
+    const ES_ERROR_DRIVE_CONTROLLER_REPORTED: Error = -35;
+    const ES_ERROR_UNSUPPORTED_EXECUTABLE: Error = -62;
+    const ES_ERROR_INSUFFICIENT_RESOURCES: Error = -52;
+};
+
+fn FSBlockDeviceAccess(_request: BlockDevice.AccessRequest) Error
+{
+    var request = _request;
+    const device = request.device;
+
+    if (request.count == 0) return ES_SUCCESS;
+
+    if (device.read_only and request.operation == BlockDevice.write)
+    {
+        if (request.flags.contains(.soft_errors)) return Errors.ES_ERROR_BLOCK_ACCESS_INVALID;
+        KernelPanic("The device is read-only and the access requests for write permission");
+    }
+
+    if (request.offset / device.sector_size > device.sector_count or (request.offset + request.count) / device.sector_size > device.sector_count)
+    {
+        if (request.flags.contains(.soft_errors)) return Errors.ES_ERROR_BLOCK_ACCESS_INVALID;
+        KernelPanic("Disk access out of bounds");
+    }
+
+    if (request.offset % device.sector_size != 0 or request.count % device.sector_size != 0)
+    {
+        if (request.flags.contains(.soft_errors)) return Errors.ES_ERROR_BLOCK_ACCESS_INVALID;
+        KernelPanic("Unaligned access\n");
+    }
+
+    var buffer = request.buffer.*;
+
+    if (buffer.virtual_address & 3 != 0)
+    {
+        if (request.flags.contains(.soft_errors)) return Errors.ES_ERROR_BLOCK_ACCESS_INVALID;
+        KernelPanic("Buffer must be 4-byte aligned");
+    }
+
+    var fake_dispatch_group = zeroes(Workgroup);
+    if (request.dispatch_group == null)
+    {
+        fake_dispatch_group.init();
+        request.dispatch_group = &fake_dispatch_group;
+    }
+
+    var r = zeroes(BlockDevice.AccessRequest);
+    r.device = request.device;
+    r.buffer = &buffer;
+    r.flags = request.flags;
+    r.dispatch_group = request.dispatch_group;
+    r.operation = request.operation;
+    r.offset = request.offset;
+
+    while (request.count != 0)
+    {
+        r.count = device.max_access_sector_count * device.sector_size;
+        if (r.count > request.count) r.count = request.count;
+
+        buffer.offset = 0;
+        buffer.total_byte_count = r.count;
+        //r.count = r.count;
+        const callback = @intToPtr(BlockDevice.AccessRequest.Callback, device.access);
+        _ =callback(r);
+        //_ = device.access(r);
+        r.offset += r.count;
+        buffer.virtual_address += r.count;
+        request.count -= r.count;
+    }
+
+    if (request.dispatch_group == &fake_dispatch_group)
+    {
+        return if (fake_dispatch_group.wait()) ES_SUCCESS else Errors.ES_ERROR_DRIVE_CONTROLLER_REPORTED;
+    }
+    else
+    {
+        return ES_SUCCESS;
+    }
+}
+
+const signature_block_size = 65536;
+
+const DMASegment = extern struct
+{
+    physical_address: u64,
+    byte_count: u64,
+    is_last: bool,
+};
+
+const DMABuffer = extern struct
+{
+    virtual_address: u64,
+    total_byte_count: u64,
+    offset: u64,
+
+    fn is_complete(self: *@This()) bool
+    {
+        return self.offset == self.total_byte_count;
+    }
+
+    fn next_segment(self: *@This(), peek: bool) DMASegment
+    {
+        if (self.offset >= self.total_byte_count or self.virtual_address == 0) KernelPanic("Invalid state of DMA buffer");
+
+        var transfer_byte_count: u64 = page_size;
+        const virtual_address = self.virtual_address + self.offset;
+        var physical_address = MMArchTranslateAddress(virtual_address, false);
+        const offset_into_page = virtual_address & (page_size - 1);
+
+        if (offset_into_page > 0)
+        {
+            transfer_byte_count = page_size - offset_into_page;
+            physical_address += offset_into_page;
+        }
+
+        const total_minus_offset = self.total_byte_count - self.offset;
+        if (transfer_byte_count > total_minus_offset)
+        {
+            transfer_byte_count = total_minus_offset;
+        }
+
+        const is_last = self.offset + transfer_byte_count == self.total_byte_count;
+        if (!peek) self.offset += transfer_byte_count;
+
+        return DMASegment
+        {
+            .physical_address = physical_address,
+            .byte_count = transfer_byte_count,
+            .is_last = is_last,
+        };
+    }
+};
+
+extern fn KSwitchThreadAfterIRQ() callconv(.C) void;
+
+const InterruptEvent = extern struct
+{
+    timestamp: u64,
+    global_interrupt_status: u32,
+    port_0_commands_running: u32,
+    port_0_commands_issued: u32,
+    complete: bool,
+};
+
+fn drivers_init() callconv(.C) void
+{
+    PCI.Driver.init();
+    AHCI.Driver.init();
+}
+
+const Timeout = struct
+{
+    end: u64,
+
+    fn new(ms: u64) callconv(.Inline) Timeout
+    {
+        return Timeout
+        {
+            .end = scheduler.time_ms + ms,
+        };
+    }
+
+    fn hit(self: @This()) callconv(.Inline) bool
+    {
+        return scheduler.time_ms >= self.end;
+    }
+};
+export fn start_desktop_process() callconv(.C) void
+{
+    const result = process_start_with_something(desktopProcess);
+    assert(result);
+}
+
+const ProcessStartupInformation = extern struct
+{
+    is_desktop: bool,
+    is_bundle: bool,
+    application_start_address: u64,
+    tls_image_start: u64,
+    tls_image_byte_count: u64,
+    tls_byte_count: u64,
+    timestamp_ticks_per_ms: u64,
+    global_data_region: u64,
+    process_create_data: ProcessCreateData,
+};
+
+const LoadedExecutable = extern struct
+{
+    start_address: u64,
+    tls_image_start: u64,
+    tls_image_byte_count: u64,
+    tls_byte_count: u64,
+
+    is_desktop: bool,
+    is_bundle: bool,
+};
+
+const hardcoded_kernel_file_offset = 1056768;
+const hardcoded_desktop_size = 17344;
+comptime { assert(align_address(hardcoded_desktop_size, 0x200) < desktop_executable_buffer.len); }
+export var desktop_executable_buffer: [0x8000]u8 align(0x1000) = undefined;
+
+fn align_address(address: u64, alignment: u64) u64
+{
+    const mask = alignment - 1;
+    assert(alignment & mask == 0);
+    return (address + mask) & ~mask;
+}
+
+fn hard_disk_read_desktop_executable() Error
+{
+    const unaligned_desktop_offset = hardcoded_kernel_file_offset + kernel_size;
+    const desktop_offset = align_address(unaligned_desktop_offset, 0x200);
+
+    assert(AHCI.driver.drives.len > 0);
+    assert(AHCI.driver.drives.len == 1);
+    assert(AHCI.driver.mbr_partition_count > 0);
+    assert(AHCI.driver.mbr_partition_count == 1);
+
+    var buffer = zeroes(DMABuffer);
+    buffer.virtual_address = @ptrToInt(&desktop_executable_buffer);
+    var request = zeroes(BlockDevice.AccessRequest);
+    request.offset = desktop_offset;
+    request.count = align_address(hardcoded_desktop_size, 0x200);
+    request.operation = BlockDevice.read;
+    request.device = @ptrCast(*BlockDevice, &AHCI.driver.drives[0]);
+    request.buffer = &buffer;
+
+    const result = FSBlockDeviceAccess(request);
+    assert(result == ES_SUCCESS);
+    return result;
+}
+
+const ELF = extern struct
+{
+    const Header = extern struct
+    {
+        magic: u32,
+        bits: u8,
+        endianness: u8,
+        version1: u8,
+        abi: u8,
+        unused: [8]u8,
+        type: u16,
+        instruction_set: u16,
+        version2: u32,
+
+        entry: u64,
+        program_header_table: u64,
+        section_header_table: u64,
+        flags: u32,
+        header_size: u16,
+        program_header_entry_size: u16,
+        program_header_entry_count: u16,
+        section_header_entry_size: u16,
+        section_header_entry_count: u16,
+        section_name_index: u16,
+    };
+
+    const ProgramHeader = extern struct
+    {
+        type: u32,
+        flags: u32,
+        file_offset: u64,
+        virtual_address: u64,
+        unused0: u64,
+        data_in_file: u64,
+        segment_size: u64,
+        alignment: u64,
+
+        fn is_bad(self: *@This()) bool
+        {
+            return self.virtual_address >= 0xC0000000 or self.virtual_address < 0x1000 or self.segment_size > 0x10000000;
+        }
+    };
+};
+
+export fn LoadDesktopELF(exe: *LoadedExecutable) Error
+{
+    const process = GetCurrentThread().?.process.?;
+
+    if (hard_disk_read_desktop_executable() != ES_SUCCESS) KernelPanic("Can't read desktop executable from the disk");
+
+    const header = @ptrCast(*ELF.Header, &desktop_executable_buffer);
+    if (header.magic != 0x464c457f) return Errors.ES_ERROR_UNSUPPORTED_EXECUTABLE;
+    if (header.bits != 2) return Errors.ES_ERROR_UNSUPPORTED_EXECUTABLE;
+    if (header.endianness != 1) return Errors.ES_ERROR_UNSUPPORTED_EXECUTABLE;
+    if (header.abi != 0) return Errors.ES_ERROR_UNSUPPORTED_EXECUTABLE;
+    if (header.type != 2) return Errors.ES_ERROR_UNSUPPORTED_EXECUTABLE;
+    if (header.instruction_set != 0x3e) return Errors.ES_ERROR_UNSUPPORTED_EXECUTABLE;
+
+    const program_headers = @intToPtr(?[*]ELF.ProgramHeader, EsHeapAllocate(header.program_header_entry_size * header.program_header_entry_count, false, &heapFixed)) orelse return Errors.ES_ERROR_INSUFFICIENT_RESOURCES; // K_PAGED
+    defer EsHeapFree(@ptrToInt(program_headers), 0, &heapFixed); // K_PAGED
+
+    const executable_offset = 0;
+    EsMemoryCopy(@ptrToInt(program_headers), @ptrToInt(&desktop_executable_buffer[executable_offset + header.program_header_table]), header.program_header_entry_size * header.program_header_entry_count);
+
+    var ph_i: u64 = 0;
+    while (ph_i < header.program_header_entry_count) : (ph_i += 1)
+    {
+        const ph = @intToPtr(*ELF.ProgramHeader, @ptrToInt(program_headers) + header.program_header_entry_size * ph_i);
+
+        if (ph.type == 1) // PT_LOAD
+        {
+            if (ph.is_bad()) return Errors.ES_ERROR_UNSUPPORTED_EXECUTABLE;
+
+            const result = MMStandardAllocate(process.address_space, round_up(u64, ph.segment_size, page_size), Region.Flags.empty(), round_down(u64, ph.virtual_address, page_size), true);
+            if (result != 0)
+            {
+                EsMemoryCopy(ph.virtual_address, @ptrToInt(&desktop_executable_buffer[executable_offset + ph.file_offset]), ph.data_in_file);
+            }
+            else
+            {
+                return Errors.ES_ERROR_INSUFFICIENT_RESOURCES;
+            }
+        }
+        else if (ph.type == 7)  // PT_TLS
+        {
+            exe.tls_image_start = ph.virtual_address;
+            exe.tls_image_byte_count = ph.data_in_file;
+            exe.tls_byte_count = ph.segment_size;
+        }
+    }
+
+    exe.start_address = header.entry;
+    return ES_SUCCESS;
+}
+
+export fn ProcessLoadDesktopExecutable() callconv(.C) void
+{
+    const process = GetCurrentThread().?.process.?;
+    var exe = zeroes(LoadedExecutable);
+    exe.is_desktop = true;
+    const result = LoadDesktopELF(&exe);
+    if (result != ES_SUCCESS) KernelPanic("Failed to load desktop executable");
+
+    const startup_information = @intToPtr(?*ProcessStartupInformation, MMStandardAllocate(process.address_space, @sizeOf(ProcessStartupInformation), Region.Flags.empty(), 0, true)) orelse KernelPanic("Can't allocate startup information");
+    startup_information.is_desktop = true;
+    startup_information.is_bundle = false;
+    startup_information.application_start_address = exe.start_address;
+    startup_information.tls_image_start = exe.tls_image_start;
+    startup_information.tls_image_byte_count = exe.tls_image_byte_count;
+    startup_information.tls_byte_count = exe.tls_byte_count;
+    startup_information.timestamp_ticks_per_ms = timeStampTicksPerMs;
+    startup_information.process_create_data = process.data;
+    
+    var thread_flags = Thread.Flags.from_flag(.userland);
+    if (process.creation_flags.contains(.paused)) thread_flags = thread_flags.or_flag(.paused);
+    process.executable_state = .loaded;
+    process.executable_main_thread = ThreadSpawn("MainThread", exe.start_address, @ptrToInt(startup_information), thread_flags, process, 0) orelse KernelPanic("Couldn't create main thread for executable");
+    _ = process.executable_load_attempt_complete.set(false);
+}
+
+// ProcessStartWithNode
+export fn process_start_with_something(process: *Process) bool
+{
+    scheduler.dispatch_spinlock.acquire();
+
+    if (process.executable_start_request)
+    {
+        scheduler.dispatch_spinlock.release();
+        return false;
+    }
+
+    process.executable_start_request = true;
+    scheduler.dispatch_spinlock.release();
+
+    if (!MMSpaceInitialise(process.address_space)) return false;
+
+    if (scheduler.all_processes_terminated_event.poll())
+    {
+        KernelPanic("all process terminated event was set");
+    }
+
+    process.block_shutdown = true;
+    _ = scheduler.active_process_count.atomic_fetch_add(1);
+    _ = scheduler.block_shutdown_process_count.atomic_fetch_add(1);
+
+    _ = scheduler.all_processes_mutex.acquire();
+    scheduler.all_processes.insert_at_end(&process.all_item);
+    const load_executable_thread = CreateLoadExecutableThread(process);
+    scheduler.all_processes_mutex.release();
+
+    if (load_executable_thread) |thread|
+    {
+        CloseHandleToObject(@ptrToInt(thread), .thread, 0);
+        _ = process.executable_load_attempt_complete.wait();
+        if (process.executable_state == .failed_to_load) return false;
+        return true;
+    }
+    else
+    {
+        CloseHandleToObject(@ptrToInt(process), .process, 0);
+        return false;
+    }
+}
+
+extern fn CreateLoadExecutableThread(process: *Process) callconv(.C) ?*Thread;
+
+extern fn MMSpaceInitialise(space: *AddressSpace) callconv(.C) bool;
+
 export fn get_size_zig() callconv(.C) u64
 {
-    return @sizeOf(Region);
+    return @sizeOf(Scheduler);
 }

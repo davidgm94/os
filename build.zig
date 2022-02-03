@@ -131,7 +131,7 @@ const Kernel = struct
         kernel.red_zone = false;
         kernel.code_model = .kernel;
         kernel.disable_stack_probing = true;
-        kernel.disable_sanitize_c = true;
+        kernel.disable_sanitize_c = false;
         kernel.link_function_sections = false;
         kernel.setMainPkgPath("src");
         kernel.setLinkerScriptPath(FileSource.relative(Kernel.linker_script_path));
@@ -928,6 +928,7 @@ pub fn build(b: *Builder) !void
                 \\b KernelPanic
                 \\b KernelMain
                 \\b TODO
+                //\\watch *(uint64_t*)0xffffffff8003e168
                 \\target remote localhost:1234
                 \\c
                 ,
