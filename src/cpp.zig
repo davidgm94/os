@@ -10377,7 +10377,32 @@ export fn TimeoutTimerHit(task: *AsyncTask) callconv(.C) void
 }
 
 extern fn CreateLoadExecutableThread(process: *Process) callconv(.C) ?*Thread;
-extern fn MMArchInitialiseUserSpace(space: *AddressSpace, region: *Region) callconv(.C) bool;
+
+export fn MMArchInitialiseUserSpace(space: *AddressSpace, region: *Region) callconv(.C) bool
+{
+    region.descriptor.base_address = user_space_start;
+    region.descriptor.page_count = user_space_size / page_size;
+
+    if (!MMCommit(page_size, true)) return false;
+
+    space.arch.cr3 = MMPhysicalAllocateWithFlags(Physical.Flags.empty());
+
+    {
+        _ = _coreMMSpace.reserve_mutex.acquire();
+        defer _coreMMSpace.reserve_mutex.release();
+
+        const L1_region = MMReserve(&_coreMMSpace, ArchAddressSpace.L1_commit_size, Region.Flags.from_flags(.{ .normal, .no_commit_tracking, .fixed }), 0) orelse return false;
+        space.arch.commit.L1 = @intToPtr([*]u8, L1_region.descriptor.base_address);
+    }
+
+    const page_table_address = @intToPtr(?[*]u64, MMMapPhysical(&_kernelMMSpace, space.arch.cr3, page_size, Region.Flags.empty())) orelse KernelPanic("Expected page table allocation to be good");
+    EsMemoryZero(@ptrToInt(page_table_address), page_size / 2);
+    EsMemoryCopy(@ptrToInt(page_table_address) + (0x100 * @sizeOf(u64)), @ptrToInt(PageTables.access_at_index(.level4, 0x100)), page_size / 2);
+    page_table_address[512 - 2] = space.arch.cr3 | 0b11;
+    _ = MMFree(&_kernelMMSpace, @ptrToInt(page_table_address), 0, false);
+
+    return true;
+}
 
 export fn MMSpaceInitialise(space: *AddressSpace) callconv(.C) bool
 {

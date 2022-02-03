@@ -340,7 +340,6 @@ extern "C"
     bool MMArchIsBufferInUserRange(uintptr_t baseAddress, size_t byteCount);
     bool MMArchSafeCopy(uintptr_t destinationAddress, uintptr_t sourceAddress, size_t byteCount); // Returns false if a page fault occured during the copy.
     bool MMArchCommitPageTables(MMSpace *space, struct MMRegion *region);
-    bool MMArchInitialiseUserSpace(MMSpace *space, struct MMRegion *firstRegion);
     void MMArchInitialise();
     void MMArchFreeVAS(MMSpace *space);
     uintptr_t MMArchEarlyAllocatePage();
@@ -9006,45 +9005,6 @@ void InterruptHandler(InterruptContext *context) {
 	if (ProcessorAreInterruptsEnabled()) {
 		KernelPanic("InterruptHandler - Interrupts were enabled while returning from an interrupt handler.\n");
 	}
-}
-
-
-// my code
-typedef uint8_t  u8;
-typedef uint16_t u16;
-typedef uint32_t u32;
-typedef uint64_t u64;
-typedef int8_t   s8;
-typedef int16_t  s16;
-typedef int32_t  s32;
-typedef int64_t  s64;
-
-bool MMArchInitialiseUserSpace(MMSpace *space, MMRegion *region) {
-	region->baseAddress = MM_USER_SPACE_START; 
-	region->pageCount = MM_USER_SPACE_SIZE / K_PAGE_SIZE;
-
-	if (!MMCommit(K_PAGE_SIZE, true)) {
-		return false;
-	}
-
-	space->data.cr3 = MMPhysicalAllocate(ES_FLAGS_DEFAULT);
-
-	KMutexAcquire(&coreMMSpace->reserveMutex);
-	MMRegion *l1Region = MMReserve(coreMMSpace, L1_COMMIT_SIZE_BYTES, MM_REGION_NORMAL | MM_REGION_NO_COMMIT_TRACKING | MM_REGION_FIXED);
-	if (l1Region) space->data.l1Commit = (uint8_t *) l1Region->baseAddress;
-	KMutexRelease(&coreMMSpace->reserveMutex);
-
-	if (!space->data.l1Commit) {
-		return false;
-	}
-
-	uint64_t *pageTable = (uint64_t *) MMMapPhysical(kernelMMSpace, (uintptr_t) space->data.cr3, K_PAGE_SIZE, ES_FLAGS_DEFAULT);
-	EsMemoryZero(pageTable + 0x000, K_PAGE_SIZE / 2);
-	EsMemoryCopy(pageTable + 0x100, (uint64_t *) (PAGE_TABLE_L4 + 0x100), K_PAGE_SIZE / 2);
-	pageTable[512 - 2] = space->data.cr3 | 3;
-	MMFree(kernelMMSpace, pageTable);
-
-	return true;
 }
 
 extern "C" void ProcessLoadDesktopExecutable();
