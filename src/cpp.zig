@@ -1783,7 +1783,7 @@ pub const Timer = extern struct
     }
 };
 
-extern fn TimeoutTimerHit(task: *AsyncTask) callconv(.C) void;
+//extern fn TimeoutTimerHit(task: *AsyncTask) callconv(.C) void;
 
 export fn KTimerSet(timer: *Timer, trigger_in_ms: u64, callback: ?AsyncTask.Callback, argument: u64) callconv(.C) void
 {
@@ -9620,7 +9620,7 @@ const AHCI = struct
 
             if (command_completed)
             {
-                KSwitchThreadAfterIRQ();
+                GetLocalStorage().?.IRQ_switch_thread = true;
             }
 
             event.access_volatile().complete = true;
@@ -10347,6 +10347,33 @@ export fn process_start_with_something(process: *Process) bool
         CloseHandleToObject(@ptrToInt(process), .process, 0);
         return false;
     }
+}
+
+export fn TimeoutTimerHit(task: *AsyncTask) callconv(.C) void
+{
+    const driver = @fieldParentPtr(AHCI.Driver, "timeout_timer", @fieldParentPtr(Timer, "async_task", task));
+    const current_timestamp = scheduler.time_ms;
+
+    for (driver.ports) |*port|
+    {
+        port.command_spinlock.acquire();
+
+        var slot: u64 = 0;
+        while (slot < driver.command_slot_count) : (slot += 1)
+        {
+            const slot_mask = @intCast(u32, 1) << @intCast(u5, slot);
+            if (port.running_commands & slot_mask != 0 and port.command_start_timestamps[slot] + AHCI.general_timeout < current_timestamp)
+            {
+                port.command_contexts[slot].?.end(false);
+                port.command_contexts[slot] = null;
+                port.running_commands &= ~slot_mask;
+            }
+        }
+
+        port.command_spinlock.release();
+    }
+
+    driver.timeout_timer.set_extended(AHCI.general_timeout, TimeoutTimerHit, @ptrToInt(driver));
 }
 
 extern fn CreateLoadExecutableThread(process: *Process) callconv(.C) ?*Thread;
