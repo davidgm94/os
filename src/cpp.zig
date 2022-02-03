@@ -10377,8 +10377,25 @@ export fn TimeoutTimerHit(task: *AsyncTask) callconv(.C) void
 }
 
 extern fn CreateLoadExecutableThread(process: *Process) callconv(.C) ?*Thread;
+extern fn MMArchInitialiseUserSpace(space: *AddressSpace, region: *Region) callconv(.C) bool;
 
-extern fn MMSpaceInitialise(space: *AddressSpace) callconv(.C) bool;
+export fn MMSpaceInitialise(space: *AddressSpace) callconv(.C) bool
+{
+    space.user = true;
+
+    const region = @intToPtr(?*Region, EsHeapAllocate(@sizeOf(Region), true, &heapCore)) orelse return false;
+
+    if (!MMArchInitialiseUserSpace(space, region))
+    {
+        EsHeapFree(@ptrToInt(region), @sizeOf(Region), &heapCore);
+        return false;
+    }
+
+    _ = space.free_region_base.insert(&region.u.item.base, region, region.descriptor.base_address, .panic);
+    _ = space.free_region_size.insert(&region.u.item.u.size, region, region.descriptor.page_count, .allow);
+
+    return true;
+}
 
 export fn get_size_zig() callconv(.C) u64
 {

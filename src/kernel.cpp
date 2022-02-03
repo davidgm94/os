@@ -9047,26 +9047,6 @@ bool MMArchInitialiseUserSpace(MMSpace *space, MMRegion *region) {
 	return true;
 }
 
-extern "C" bool MMSpaceInitialise(MMSpace* space)
-{
-    space->user = true;
-
-    MMRegion* region = (MMRegion*)EsHeapAllocate(sizeof(MMRegion), true, K_CORE);
-
-    if (!region) return false;
-
-    if (!MMArchInitialiseUserSpace(space, region))
-    {
-        EsHeapFree(region, sizeof(MMRegion), K_CORE);
-        return false;
-    }
-
-    TreeInsert(&space->freeRegionsBase, &region->itemBase, region, MakeShortKey(region->baseAddress));
-    TreeInsert(&space->freeRegionsSize, &region->itemSize, region, MakeShortKey(region->pageCount), AVL_DUPLICATE_KEYS_ALLOW);
-
-    return true;
-}
-
 extern "C" void ProcessLoadDesktopExecutable();
 extern "C" Thread* CreateLoadExecutableThread(Process* process)
 {
