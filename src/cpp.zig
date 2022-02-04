@@ -6117,8 +6117,6 @@ export fn ProcessKill(process: *Process) callconv(.C) void
     }
 }
 
-// @TODO: MMReserve
-
 export fn MMFindAndPinRegion(space: *AddressSpace, address: u64, size: u64) callconv(.C) ?*Region
 {
     {
@@ -6183,7 +6181,148 @@ export fn MMCommitRange(space: *AddressSpace, region: *Region, page_offset: u64,
     return true;
 }
 
-extern fn MMReserve(space: *AddressSpace, byte_count: u64, flags: Region.Flags, forced_address: u64) callconv(.C) ?*Region;
+export fn MMReserve(space: *AddressSpace, byte_count: u64, flags: Region.Flags, forced_address: u64) callconv(.C) ?*Region
+{
+    const needed_page_count = ((byte_count + page_size - 1) & ~@as(u64, page_size - 1)) / page_size;
+
+    if (needed_page_count == 0) return null;
+
+    space.reserve_mutex.assert_locked();
+
+    const region = blk:
+    {
+        if (space == &_coreMMSpace)
+        {
+            if (mmCoreRegionCount == core_memory_region_count) return null;
+
+            if (forced_address != 0) KernelPanic("Using a forced address in core address space\n");
+
+            {
+                const new_region_count = mmCoreRegionCount + 1;
+                const needed_commit_page_count = new_region_count * @sizeOf(Region) / page_size;
+
+                while (mmCoreRegionArrayCommit < needed_commit_page_count) : (mmCoreRegionArrayCommit += 1)
+                {
+                    if (!MMCommit(page_size, true)) return null;
+                }
+            }
+
+            for (mmCoreRegions[0..mmCoreRegionCount]) |*region|
+            {
+                if (!region.u.core.used and region.descriptor.page_count >= needed_page_count)
+                {
+                    if (region.descriptor.page_count > needed_page_count)
+                    {
+                        const last = mmCoreRegionCount;
+                        mmCoreRegionCount += 1;
+                        var split = &mmCoreRegions[last];
+                        split.* = region.*;
+                        split.descriptor.base_address += needed_page_count * page_size;
+                        split.descriptor.page_count -= needed_page_count;
+                    }
+
+                    region.u.core.used = true;
+                    region.descriptor.page_count = needed_page_count;
+                    region.flags = flags;
+                    region.data = zeroes(@TypeOf(region.data));
+                    assert(region.data.u.normal.commit.ranges.length() == 0);
+
+                    break :blk region;
+                }
+            }
+
+            return null;
+        }
+        else if (forced_address != 0)
+        {
+            if (space.used_regions.find(forced_address, .exact)) |_| return null;
+
+            if (space.used_regions.find(forced_address, .smallest_above_or_equal)) |item|
+            {
+                if (item.value.?.descriptor.base_address < forced_address + needed_page_count * page_size) return null;
+            }
+
+            if (space.used_regions.find(forced_address + needed_page_count * page_size - 1, .largest_below_or_equal)) |item|
+            {
+                if (item.value.?.descriptor.base_address + item.value.?.descriptor.page_count * page_size > forced_address) return null;
+            }
+
+            if (space.free_region_base.find(forced_address, .exact)) |_| return null;
+
+            if (space.free_region_base.find(forced_address, .smallest_above_or_equal)) |item|
+            {
+                if (item.value.?.descriptor.base_address < forced_address + needed_page_count * page_size) return null;
+            }
+
+            if (space.free_region_base.find(forced_address + needed_page_count * page_size - 1, .largest_below_or_equal)) |item|
+            {
+                if (item.value.?.descriptor.base_address + item.value.?.descriptor.page_count * page_size > forced_address) return null;
+            }
+
+            const region = @intToPtr(?*Region, EsHeapAllocate(@sizeOf(Region), true, &heapCore)) orelse unreachable;
+            region.descriptor.base_address = forced_address;
+            region.descriptor.page_count = needed_page_count;
+            region.flags = flags;
+
+            _ = space.used_regions.insert(&region.u.item.base, region, region.descriptor.base_address, .panic);
+
+            region.data = zeroes(@TypeOf(region.data));
+            break :blk region;
+        }
+        else
+        {
+            // @TODO: implement guard pages?
+
+            if (space.free_region_size.find(needed_page_count, .smallest_above_or_equal)) |item|
+            {
+                const region = item.value.?;
+                space.free_region_base.remove(&region.u.item.base);
+                space.free_region_size.remove(&region.u.item.u.size);
+
+                if (region.descriptor.page_count > needed_page_count)
+                {
+                    const split = @intToPtr(?*Region, EsHeapAllocate(@sizeOf(Region), true, &heapCore)) orelse unreachable;
+                    split.* = region.*;
+
+                    split.descriptor.base_address += needed_page_count * page_size;
+                    split.descriptor.page_count -= needed_page_count;
+
+                    _ = space.free_region_base.insert(&split.u.item.base, split, split.descriptor.base_address, .panic);
+                    _ = space.free_region_size.insert(&split.u.item.u.size, split, split.descriptor.page_count, .allow);
+                }
+
+                region.data = zeroes(@TypeOf(region.data));
+                region.descriptor.page_count = needed_page_count;
+                region.flags = flags;
+
+                // @TODO: if guard pages needed
+                _ = space.used_regions.insert(&region.u.item.base, region, region.descriptor.base_address, .panic);
+                break :blk region;
+            }
+            else
+            {
+                return null;
+            }
+        }
+    };
+
+    if (!MMArchCommitPageTables(space, region))
+    {
+        MMUnreserve(space, region, false, false);
+        return null;
+    }
+
+    if (space != &_coreMMSpace)
+    {
+        region.u.item.u.non_guard = zeroes(@TypeOf(region.u.item.u.non_guard));
+        region.u.item.u.non_guard.value = region;
+        space.used_regions_non_guard.insert_at_end(&region.u.item.u.non_guard);
+    }
+
+    space.reserve_count += needed_page_count;
+
+    return region;
+}
 
 export fn MMStandardAllocate(space: *AddressSpace, byte_count: u64, flags: Region.Flags, base_address: u64, commit_all: bool) callconv(.C) u64
 {
