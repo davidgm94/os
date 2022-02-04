@@ -3875,13 +3875,21 @@ pub const Handle = extern struct
 const HandleTableL2 = extern struct
 {
     t: [256]Handle,
+
+    const entry_count = 256;
 };
 
 const HandleTableL1 = extern struct
 {
     t: [256]?*HandleTableL2,
     u: [256]u16,
+
+    const entry_count = 256;
 };
+
+const ES_INVALID_HANDLE: u64 = 0x0;
+const ES_CURRENT_THREAD: u64 = 0x10;
+const ES_CURRENT_PROCESS: u64 = 0x11;
 
 const HandleTable = extern struct
 {
@@ -3890,6 +3898,64 @@ const HandleTable = extern struct
     process: ?*Process,
     destroyed: bool,
     handleCount: u32,
+
+    fn resolve_handle(self: *@This(), out_handle: *Handle, in_handle: u64, type_mask: u32) ResolveHandleStatus
+    {
+        if (in_handle == ES_CURRENT_THREAD and type_mask & @enumToInt(KernelObjectType.thread) != 0)
+        {
+            out_handle.type = .thread;
+            out_handle.object = @ptrToInt(GetCurrentThread());
+            out_handle.flags = 0;
+
+            return .no_close;
+        }
+        else if (in_handle == ES_CURRENT_PROCESS and type_mask & @enumToInt(KernelObjectType.process) != 0)
+        {
+            out_handle.type = .process;
+            out_handle.object = @ptrToInt(GetCurrentThread().?.process);
+            out_handle.flags = 0;
+
+            return .no_close;
+        }
+        else if (in_handle == ES_INVALID_HANDLE and type_mask & @enumToInt(KernelObjectType.none) != 0)
+        {
+            out_handle.type = .none;
+            out_handle.object = 0;
+            out_handle.flags = 0;
+
+            return .no_close;
+        }
+
+        _ = self;
+        TODO();
+    }
+
+    fn destroy(self: *@This()) void
+    {
+        _ = self.lock.acquire();
+        defer self.lock.release();
+
+        if (self.destroyed) return;
+
+        self.destroyed = true;
+
+        const l1 = &self.l1r;
+
+        var i: u64 = 0;
+        while (i < HandleTableL1.entry_count) : (i += 1)
+        {
+            if (l1.u[i] == 0) continue;
+
+            var k: u64 = 0;
+            while (k < HandleTableL2.entry_count) : (k += 1)
+            {
+                const handle = &l1.t[i].?.t[k];
+                if (handle.object != 0) CloseHandleToObject(handle.object, handle.type, handle.flags);
+            }
+
+            EsHeapFree(@ptrToInt(l1.t[i]), 0, &heapFixed);
+        }
+    }
 };
 
 pub fn AVLTree(comptime T: type) type
@@ -6086,7 +6152,6 @@ export fn KThreadTerminate() callconv(.C) void
     thread_exit(GetCurrentThread().?);
 }
 
-extern fn HandleTableDestroy(handle_table: *HandleTable) callconv(.C) void;
 export fn ProcessKill(process: *Process) callconv(.C) void
 {
     if (process.handle_count.read_volatile() == 0) KernelPanic("process is on the all process list but there are no handles in it");
@@ -6109,7 +6174,7 @@ export fn ProcessKill(process: *Process) callconv(.C) void
     process.all_threads_terminated = true;
     scheduler.dispatch_spinlock.release();
     _ = process.killed_event.set(true);
-    HandleTableDestroy(&process.handle_table);
+    process.handle_table.destroy();
     MMSpaceDestroy(process.address_space);
     if (!scheduler.shutdown.read_volatile())
     {
@@ -8564,7 +8629,7 @@ export fn syscall_process_exit(argument0: u64, argument1: u64, argument2: u64, a
 
     {
         var process_out: Handle = undefined;
-        const status = HandleTableResolveHandle(&current_process.handle_table, &process_out, argument0, KernelObjectType.process);
+        const status = current_process.handle_table.resolve_handle(&process_out, argument0, @enumToInt(KernelObjectType.process));
         if (status == .failed)
         {
             fatal_error.* = @enumToInt(FatalError.invalid_handle);
@@ -8591,7 +8656,6 @@ const ResolveHandleStatus = enum(u8)
     normal = 2,
 };
 
-extern fn HandleTableResolveHandle(self: *HandleTable, out_handle: *Handle, in_handle: u64, type_mask: KernelObjectType) callconv(.C) ResolveHandleStatus;
 
 export fn KernelInitialise() callconv(.C) void
 {

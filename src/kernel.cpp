@@ -2492,55 +2492,7 @@ struct HandleTable {
     struct Process *process;
     bool destroyed;
     uint32_t handleCount;
-
-    // Be careful putting handles in the handle table!
-    // The process will be able to immediately close it.
-    // If this fails, the handle is closed and ES_INVALID_HANDLE is returned.
-    //EsHandle OpenHandle(void *_object, uint32_t _flags, KernelObjectType _type, EsHandle at = ES_INVALID_HANDLE);
-
-    //bool CloseHandle(EsHandle handle);
-    //void ModifyFlags(EsHandle handle, uint32_t newFlags);
-
-    // Resolve the handle if it is valid.
-    // The initial value of type is used as a mask of expected object types for the handle.
-#define RESOLVE_HANDLE_FAILED (0)
-#define RESOLVE_HANDLE_NO_CLOSE (1)
-#define RESOLVE_HANDLE_NORMAL (2)
-    uint8_t ResolveHandle(Handle *outHandle, EsHandle inHandle, KernelObjectType typeMask); 
-
-    void Destroy() {
-        KMutexAcquire(&lock);
-        EsDefer(KMutexRelease(&lock));
-
-        if (destroyed) {
-            return;
-        }
-
-        destroyed = true;
-        HandleTableL1 *l1 = &l1r;
-
-        for (uintptr_t i = 0; i < HANDLE_TABLE_L1_ENTRIES; i++) {
-            if (!l1->u[i]) continue;
-
-            for (uintptr_t k = 0; k < HANDLE_TABLE_L2_ENTRIES; k++) {
-                Handle *handle = &l1->t[i]->t[k];
-                if (handle->object) CloseHandleToObject(handle->object, handle->type, handle->flags);
-            }
-
-            EsHeapFree(l1->t[i], 0, K_FIXED);
-        }
-    }
 };
-
-extern "C" uint8_t HandleTableResolveHandle(HandleTable* self, Handle* out_handle, EsHandle in_handle, KernelObjectType type_mask)
-{
-    return self->ResolveHandle(out_handle, in_handle, type_mask);
-}
-
-extern "C" void HandleTableDestroy(HandleTable* self)
-{
-    self->Destroy();
-}
 
 struct Process {
 	MMSpace *vmm;
@@ -3266,13 +3218,6 @@ extern "C" void KRegisterAsyncTask(KAsyncTask *task, KAsyncTaskCallback callback
 extern "C" void thread_exit(Thread *thread);
 extern "C" void KThreadTerminate();
 extern "C" void MMSpaceOpenReference(MMSpace *space);
-
-inline intptr_t ClampIntptr(intptr_t low, intptr_t high, intptr_t integer) {
-	if (integer < low) return low;
-	if (integer > high) return high;
-	return integer;
-}
-
 extern "C" void MMZeroPageThread();
 extern "C" void MMBalanceThread();
 
@@ -3456,8 +3401,6 @@ void Scheduler::MaybeUpdateActiveList(Thread *thread) {
 	// TODO I'm not 100% sure we want to always put it at the start.
 	activeThreads[effectivePriority].InsertStart(&thread->item);
 }
-
-extern "C" uint64_t ArchGetTimeFromPITMs();
 
 void Scheduler::Yield(InterruptContext *context) {
 	CPULocalStorage *local = GetLocalStorage();
@@ -3649,49 +3592,6 @@ void KernelPanic(const char *format, ...) {
 	ProcessorHalt();
 }
 
-uint8_t HandleTable::ResolveHandle(Handle *outHandle, EsHandle inHandle, KernelObjectType typeMask) {
-	// Special handles.
-	if (inHandle == ES_CURRENT_THREAD && (typeMask & KERNEL_OBJECT_THREAD)) {
-		outHandle->type = KERNEL_OBJECT_THREAD;
-		outHandle->object = GetCurrentThread();
-		outHandle->flags = 0;
-		return RESOLVE_HANDLE_NO_CLOSE;
-	} else if (inHandle == ES_CURRENT_PROCESS && (typeMask & KERNEL_OBJECT_PROCESS)) {
-		outHandle->type = KERNEL_OBJECT_PROCESS;
-		outHandle->object = GetCurrentThread()->process;
-		outHandle->flags = 0;
-		return RESOLVE_HANDLE_NO_CLOSE;
-	} else if (inHandle == ES_INVALID_HANDLE && (typeMask & KERNEL_OBJECT_NONE)) {
-		outHandle->type = KERNEL_OBJECT_NONE;
-		outHandle->object = nullptr;
-		outHandle->flags = 0;
-		return RESOLVE_HANDLE_NO_CLOSE;
-	}
-
-	// Check that the handle is within the correct bounds.
-	if ((!inHandle) || inHandle >= HANDLE_TABLE_L1_ENTRIES * HANDLE_TABLE_L2_ENTRIES) {
-		return RESOLVE_HANDLE_FAILED;
-	}
-
-	KMutexAcquire(&lock);
-	EsDefer(KMutexRelease(&lock));
-
-	HandleTableL2 *l2 = l1r.t[inHandle / HANDLE_TABLE_L2_ENTRIES];
-	if (!l2) return RESOLVE_HANDLE_FAILED;
-
-	Handle *_handle = l2->t + (inHandle % HANDLE_TABLE_L2_ENTRIES);
-
-	if ((_handle->type & typeMask) && (_handle->object)) {
-		// Open a handle to the object so that it can't be destroyed while the system call is still using it.
-		// The handle is closed in the KObject's destructor.
-		if (OpenHandleToObject(_handle->object, _handle->type, _handle->flags)) {
-			*outHandle = *_handle;
-			return RESOLVE_HANDLE_NORMAL;
-		}
-	}
-
-	return RESOLVE_HANDLE_FAILED;
-}
 
 void InterruptHandler(InterruptContext *context) {
 	if (scheduler.panic && context->interruptNumber != 2) {
