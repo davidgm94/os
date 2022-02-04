@@ -96,12 +96,6 @@ extern MMSpace _coreMMSpace;
 #define kernelMMSpace (&_kernelMMSpace)
 #define coreMMSpace (&_coreMMSpace)
 
-#define CC_ACCESS_MAP                (1 << 0)
-#define CC_ACCESS_READ               (1 << 1)
-#define CC_ACCESS_WRITE              (1 << 2)
-#define CC_ACCESS_WRITE_BACK         (1 << 3) // Wait for the write to complete before returning.
-#define CC_ACCESS_PRECISE            (1 << 4) // Do not write back bytes not touched by this write. (Usually modified tracking is to page granularity.) Requires WRITE_BACK.
-#define CC_ACCESS_USER_BUFFER_MAPPED (1 << 5) // Set if the user buffer is memory-mapped to mirror this or another cache.
 
 
 #define ES_MEMORY_OPEN_FAIL_IF_FOUND     (0x1000)
@@ -128,11 +122,6 @@ struct ConstantBuffer {
 #define _ES_NODE_FROM_WRITE_EXCLUSIVE	(0x020000)
 #define _ES_NODE_DIRECTORY_WRITE		(0x040000)
 #define _ES_NODE_NO_WRITE_BASE		(0x080000)
-
-#define NODE_INCREMENT_HANDLE_COUNT(node) \
-	node->handles++; \
-	node->fileSystem->totalHandleCount++; \
-	fs.totalHandleCount++;
 
 #define ES_ERROR_BUFFER_TOO_SMALL		(-2)
 #define ES_ERROR_UNKNOWN 			(-7)
@@ -189,36 +178,8 @@ struct ConstantBuffer {
 #define ES_ERROR_DEVICE_REMOVED			(-75)
 #define ES_ERROR_TOO_MANY_FILES_WITH_NAME	(-76)
 
-extern "C" void CloseHandleToObject(void *object, KernelObjectType type, uint32_t flags = 0);
-extern "C" void *MMStandardAllocate(MMSpace *space, size_t bytes, uint32_t flags, void *baseAddress = nullptr, bool commitAll = true);
-extern "C" bool MMFree(MMSpace *space, void *address, size_t expectedSize = 0, bool userOnly = false);
 
 #define K_USER_BUFFER // Used to mark pointers that (might) point to non-kernel memory.
-
-// Interval between write behinds. (Assuming no low memory conditions are in effect.)
-#define CC_WAIT_FOR_WRITE_BEHIND                  (1000)                              
-
-// Divisor of the modified list size for each write behind batch.
-// That is, every CC_WAIT_FOR_WRITE_BEHIND ms, 1/CC_WRITE_BACK_DIVISORth of the modified list is written back.
-#define CC_WRITE_BACK_DIVISOR                     (8)
-                                                                                      
-// Describes the virtual memory covering a section of a file.  
-#define CC_ACTIVE_SECTION_SIZE                    ((EsFileOffset) 262144)             
-
-// Maximum number of active sections on the modified list. If exceeded, writers will wait for it to drop before retrying.
-// TODO This should based off the amount of physical memory.
-#define CC_MAX_MODIFIED                           (67108864 / CC_ACTIVE_SECTION_SIZE) 
-
-// The size at which the modified list is determined to be getting worryingly full;
-// passing this threshold causes the write back thread to immediately start working.
-#define CC_MODIFIED_GETTING_FULL                  (CC_MAX_MODIFIED * 2 / 3)
-										      
-// The size of the kernel's address space used for mapping active sections.
-#if defined(ES_BITS_32)                                                                  
-#define CC_SECTION_BYTES                          (ClampIntptr(0, 64L * 1024 * 1024, pmm.commitFixedLimit * K_PAGE_SIZE / 4)) 
-#elif defined(ES_BITS_64)
-#define CC_SECTION_BYTES                          (ClampIntptr(0, 1024L * 1024 * 1024, pmm.commitFixedLimit * K_PAGE_SIZE / 4)) 
-#endif
 
 // When we reach a critical number of pages, FIXED allocations start failing,
 // and page faults are blocked, unless you are on a page generating thread (the modified page writer or the balancer).
@@ -285,7 +246,6 @@ struct Process;
 struct EsCrashReason;
 struct InterruptContext;
 
-extern "C" uintptr_t _KThreadTerminate;
 extern "C"
 {
     void TODO() __attribute__((noreturn));
@@ -393,6 +353,20 @@ extern "C"
     void EsAssertionFailure(const char *file, int line);
     size_t EsCStringLength(const char *string);
     int EsStringCompareRaw(const char *s1, ptrdiff_t length1, const char *s2, ptrdiff_t length2);
+    void *MMStandardAllocate(MMSpace *space, size_t bytes, uint32_t flags, void *baseAddress = nullptr, bool commitAll = true);
+    void CloseHandleToObject(void *object, KernelObjectType type, uint32_t flags = 0);
+    bool MMFree(MMSpace *space, void *address, size_t expectedSize = 0, bool userOnly = false);
+    bool OpenHandleToObject(void *object, KernelObjectType type, uint32_t flags);
+uintptr_t /* Returns physical address of first page, or 0 if none were available. */ MMPhysicalAllocate(unsigned flags, 
+		uintptr_t count = 1 /* Number of contiguous pages to allocate. */, 
+		uintptr_t align = 1 /* Alignment, in pages. */, 
+		uintptr_t below = 0 /* Upper limit of physical address, in pages. E.g. for 32-bit pages only, pass (0x100000000 >> K_PAGE_BITS). */);
+    void MMPhysicalFree(uintptr_t page /* Physical address. */, 
+		bool mutexAlreadyAcquired = false /* Internal use. Pass false. */, 
+		size_t count = 1 /* Number of consecutive pages to free. */);
+
+    bool MMPhysicalAllocateAndMap(size_t sizeBytes, size_t alignmentBytes, size_t maximumBits, bool zeroed, uint64_t caching, uint8_t **virtualAddress, uintptr_t *physicalAddress);
+    void MMPhysicalFreeAndUnmap(void *virtualAddress, uintptr_t physicalAddress);
 }
 
 union EsGeneric {
@@ -1112,8 +1086,6 @@ void TreeRemove(AVLTree<T> *tree, AVLItem<T> *item) {
 	TreeValidate(tree->root, false, tree);
 }
 
-struct Thread;
-
 struct KWriterLock { // One writer or many readers.
 	LinkedList<Thread> blockedThreads;
 	volatile intptr_t state; // -1: exclusive; >0: shared owners.
@@ -1738,115 +1710,6 @@ enum EsSyscallType
     ES_SYSCALL_COUNT,
 };
 
-//enum EsSyscallType {
-	//// Memory.
-
-	//ES_SYSCALL_MEMORY_ALLOCATE,
-	//ES_SYSCALL_MEMORY_FREE,
-	//ES_SYSCALL_MEMORY_MAP_OBJECT,
-	//ES_SYSCALL_MEMORY_OPEN,
-	//ES_SYSCALL_MEMORY_COMMIT,
-	//ES_SYSCALL_MEMORY_FAULT_RANGE,
-	//ES_SYSCALL_MEMORY_GET_AVAILABLE,
-
-	//// Processing.
-
-	//ES_SYSCALL_EVENT_CREATE,
-	//ES_SYSCALL_EVENT_RESET,
-	//ES_SYSCALL_EVENT_SET,
-	//ES_SYSCALL_PROCESS_CRASH,
-	//ES_SYSCALL_PROCESS_CREATE,
-	//ES_SYSCALL_PROCESS_GET_STATE,
-	//ES_SYSCALL_PROCESS_GET_STATUS,
-	//ES_SYSCALL_PROCESS_GET_TLS,
-	//ES_SYSCALL_PROCESS_OPEN,
-	//ES_SYSCALL_PROCESS_PAUSE,
-	//ES_SYSCALL_PROCESS_SET_TLS,
-	//ES_SYSCALL_PROCESS_TERMINATE,
-	//ES_SYSCALL_SLEEP,
-	//ES_SYSCALL_THREAD_CREATE,
-	//ES_SYSCALL_THREAD_GET_ID,
-	//ES_SYSCALL_THREAD_STACK_SIZE,
-	//ES_SYSCALL_THREAD_TERMINATE,
-	//ES_SYSCALL_WAIT,
-	//ES_SYSCALL_YIELD_SCHEDULER,
-
-	//// Windowing.
-
-	//ES_SYSCALL_MESSAGE_GET,
-	//ES_SYSCALL_MESSAGE_POST,
-	//ES_SYSCALL_MESSAGE_WAIT,
-
-	//ES_SYSCALL_CURSOR_POSITION_GET,
-	//ES_SYSCALL_CURSOR_POSITION_SET,
-	//ES_SYSCALL_CURSOR_PROPERTIES_SET,
-	//ES_SYSCALL_GAME_CONTROLLER_STATE_POLL,
-	//ES_SYSCALL_EYEDROP_START,
-	//ES_SYSCALL_SCREEN_WORK_AREA_SET,
-	//ES_SYSCALL_SCREEN_WORK_AREA_GET,
-	//ES_SYSCALL_SCREEN_BOUNDS_GET,
-	//ES_SYSCALL_SCREEN_FORCE_UPDATE,
-
-	//ES_SYSCALL_WINDOW_CREATE,
-	//ES_SYSCALL_WINDOW_CLOSE,
-	//ES_SYSCALL_WINDOW_REDRAW,
-	//ES_SYSCALL_WINDOW_MOVE,
-	//ES_SYSCALL_WINDOW_TRANSFER_PRESS,
-	//ES_SYSCALL_WINDOW_FIND_BY_POINT,
-	//ES_SYSCALL_WINDOW_GET_ID,
-	//ES_SYSCALL_WINDOW_GET_BOUNDS,
-	//ES_SYSCALL_WINDOW_SET_BITS,
-	//ES_SYSCALL_WINDOW_SET_CURSOR,
-	//ES_SYSCALL_WINDOW_SET_PROPERTY,
-
-	//ES_SYSCALL_MESSAGE_DESKTOP,
-
-	//// IO.
-
-	//ES_SYSCALL_NODE_OPEN,
-	//ES_SYSCALL_NODE_DELETE,
-	//ES_SYSCALL_NODE_MOVE,
-	//ES_SYSCALL_FILE_READ_SYNC,
-	//ES_SYSCALL_FILE_WRITE_SYNC,
-	//ES_SYSCALL_FILE_RESIZE,
-	//ES_SYSCALL_FILE_GET_SIZE,
-	//ES_SYSCALL_FILE_CONTROL,
-	//ES_SYSCALL_DIRECTORY_ENUMERATE,
-	//ES_SYSCALL_VOLUME_GET_INFORMATION,
-	//ES_SYSCALL_DEVICE_CONTROL,
-
-	//// Networking.
-
-	//ES_SYSCALL_DOMAIN_NAME_RESOLVE,
-	//ES_SYSCALL_ECHO_REQUEST,
-	//ES_SYSCALL_CONNECTION_OPEN,
-	//ES_SYSCALL_CONNECTION_POLL,
-	//ES_SYSCALL_CONNECTION_NOTIFY,
-
-	//// IPC.
-
-	//ES_SYSCALL_CONSTANT_BUFFER_READ,
-	//ES_SYSCALL_CONSTANT_BUFFER_CREATE,
-	//ES_SYSCALL_PIPE_CREATE,
-	//ES_SYSCALL_PIPE_WRITE,
-	//ES_SYSCALL_PIPE_READ,
-
-	//// Misc.
-
-	//ES_SYSCALL_HANDLE_CLOSE,
-	//ES_SYSCALL_HANDLE_SHARE,
-	//ES_SYSCALL_BATCH,
-	//ES_SYSCALL_DEBUG_COMMAND,
-	//ES_SYSCALL_POSIX,
-	//ES_SYSCALL_PRINT,
-	//ES_SYSCALL_SHUTDOWN,
-	//ES_SYSCALL_SYSTEM_TAKE_SNAPSHOT,
-	//ES_SYSCALL_PROCESSOR_COUNT,
-
-	//// End.
-
-	//ES_SYSCALL_COUNT,
-//};
 
 // MMArchMapPage.
 #define MM_MAP_PAGE_NOT_CACHEABLE 		(1 << 0)
@@ -2379,16 +2242,6 @@ struct Handle;
 struct Scheduler;
 struct MessageQueue;
 
-struct EsThreadEventLogEntry {
-	char file[31];
-	uint8_t fileBytes;
-	char expression[31];
-	uint8_t expressionBytes;
-	uint8_t event;
-	uint16_t line;
-	EsObjectID objectID, threadID;
-};
-
 struct EsProcessCreateData {
     EsHandle systemData;
     EsHandle subsystemData;
@@ -2525,80 +2378,6 @@ struct Thread {
 	const char *cName;
 };
 
-struct KNode {
-	void *driverNode;
-
-	volatile size_t handles;
-	struct FSDirectoryEntry *directoryEntry;
-	struct KFileSystem *fileSystem;
-	uint64_t id;
-	KWriterLock writerLock; // Acquire before the parent's.
-	EsError error;
-	volatile uint32_t flags;
-	MMObjectCacheItem cacheItem;
-};
-
-struct KNodeMetadata {
-	// Metadata stored in the node's directory entry.
-	EsNodeType type;
-	bool removingNodeFromCache, removingThisFromCache;
-	EsFileOffset totalSize;
-	EsFileOffsetDifference directoryChildren; // ES_DIRECTORY_CHILDREN_UNKNOWN if not supported by the file system.
-};
-
-struct FSDirectoryEntry : KNodeMetadata {
-	MMObjectCacheItem cacheItem;
-	AVLItem<FSDirectoryEntry> item; // item.key.longKey contains the entry's name.
-	struct FSDirectory *parent; // The directory containing this entry.
-	KNode *volatile node; // nullptr if the node hasn't been loaded.
-	char inlineName[16]; // Store the name of the entry inline if it is small enough.
-	// Followed by driver data.
-};
-
-struct FSDirectory : KNode {
-	AVLTree<FSDirectoryEntry> entries;
-	size_t entryCount;
-};
-
-struct CCCachedSection {
-	EsFileOffset offset, 			// The offset into the file.
-		     pageCount;			// The number of pages in the section.
-	volatile size_t mappedRegionsCount; 	// The number of mapped regions that use this section.
-	uintptr_t *data;			// A list of page frames covering the section.
-};
-
-struct CCSpace;
-
-struct CCSpaceCallbacks {
-	EsError (*readInto)(CCSpace *fileCache, void *buffer, EsFileOffset offset, EsFileOffset count);
-	EsError (*writeFrom)(CCSpace *fileCache, const void *buffer, EsFileOffset offset, EsFileOffset count);
-};
-
-struct CCSpace {
-	// A sorted list of the cached sections in the file.
-	// Maps offset -> physical address.
-	KMutex cachedSectionsMutex;
-	Array<struct CCCachedSection, K_CORE> cachedSections;
-
-	// A sorted list of the active sections.
-	// Maps offset -> virtual address.
-	KMutex activeSectionsMutex;
-	Array<struct CCActiveSectionReference, K_CORE> activeSections;
-
-	// Used by CCSpaceFlush.
-	KEvent writeComplete;
-
-	// Callbacks.
-	const struct CCSpaceCallbacks *callbacks;
-};
-
-struct FSFile : KNode {
-	int32_t countWrite /* negative indicates non-shared readers */, blockResize;
-	EsFileOffset fsFileSize; // Files are lazily resized; this is the size the file system thinks the file is.
-	EsFileOffset fsZeroAfter; // This is the smallest size the file has reached without telling the file system.
-	CCSpace cache;
-	KWriterLock resizeLock; // Take exclusive for resizing or flushing.
-};
 
 enum EsMessageType {
 	ES_MSG_INVALID				= 0x0000,
@@ -2865,19 +2644,6 @@ struct HandleTable {
     }
 };
 
-//extern "C" EsHandle HandleTableOpenHandle(HandleTable* self, void* object, uint32_t flags, KernelObjectType type, EsHandle at)
-//{
-    //return self->OpenHandle(object, flags, type, at);
-//}
-//extern "C" EsHandle HandleTableCloseHandle(HandleTable* self, EsHandle handle)
-//{
-    //return self->CloseHandle(handle);
-//}
-//extern "C" void HandleTableModifyFlags(HandleTable self, EsHandle handle, uint32_t new_flags)
-//{
-    //return self.ModifyFlags(handle, new_flags);
-//}
-
 extern "C" uint8_t HandleTableResolveHandle(HandleTable* self, Handle* out_handle, EsHandle in_handle, KernelObjectType type_mask)
 {
     return self->ResolveHandle(out_handle, in_handle, type_mask);
@@ -2897,7 +2663,7 @@ struct Process {
 	KMutex threadsMutex;
 
 	// Creation information:
-	KNode *executableNode;
+	struct KNode *executableNode;
 	char cExecutableName[ES_SNAPSHOT_MAX_PROCESS_NAME_LENGTH + 1];
 	EsProcessCreateData data;
 	uint64_t permissions;
@@ -3106,12 +2872,6 @@ struct Scheduler {
 	volatile size_t activeProcessCount;
 	volatile bool started, panic, shutdown;
 	uint64_t timeMs;
-
-#ifdef DEBUG_BUILD
-	EsThreadEventLogEntry *volatile threadEventLog;
-	volatile uintptr_t threadEventLogPosition;
-	volatile size_t threadEventLogAllocated;
-#endif
 };
 
 extern Scheduler scheduler;
@@ -3274,7 +3034,6 @@ struct MMSharedRegion {
 	void *data;
 };
 
-extern "C" bool OpenHandleToObject(void *object, KernelObjectType type, uint32_t flags);
 
 extern "C" Thread* ThreadSpawn(const char *cName, uintptr_t startAddress, uintptr_t argument1 = 0, uint32_t flags = ES_FLAGS_DEFAULT, Process *process = nullptr, uintptr_t argument2 = 0);
 
@@ -3344,6 +3103,11 @@ struct Bitset {
 	bool modCheck;
 #endif
 };
+
+extern "C" void BitsetInitialise(Bitset* self, size_t count, bool mapAll)
+{
+    self->Initialise(count, mapAll);
+}
 
 extern "C" uintptr_t BitsetGet(Bitset* self, size_t count, uintptr_t align, uintptr_t below)
 {
@@ -3537,18 +3301,6 @@ struct MMObjectCache {
 	size_t averageObjectBytes;
 };
 
-extern "C" uintptr_t /* Returns physical address of first page, or 0 if none were available. */ MMPhysicalAllocate(unsigned flags, 
-		uintptr_t count = 1 /* Number of contiguous pages to allocate. */, 
-		uintptr_t align = 1 /* Alignment, in pages. */, 
-		uintptr_t below = 0 /* Upper limit of physical address, in pages. E.g. for 32-bit pages only, pass (0x100000000 >> K_PAGE_BITS). */);
-extern "C" void MMPhysicalFree(uintptr_t page /* Physical address. */, 
-		bool mutexAlreadyAcquired = false /* Internal use. Pass false. */, 
-		size_t count = 1 /* Number of consecutive pages to free. */);
-
-extern "C" bool MMPhysicalAllocateAndMap(size_t sizeBytes, size_t alignmentBytes, size_t maximumBits, bool zeroed, 
-		uint64_t caching, uint8_t **virtualAddress, uintptr_t *physicalAddress);
-void MMPhysicalFreeAndUnmap(void *virtualAddress, uintptr_t physicalAddress);
-
 struct PMM {
 	MMPageFrame *pageFrames;
 	bool pageFrameDatabaseInitialised;
@@ -3614,826 +3366,6 @@ extern "C" MMRegion *MMFindRegion(MMSpace *space, uintptr_t address);
 extern "C" void MMDecommit(uint64_t bytes, bool fixed);
 extern "C" bool MMDecommitRange(MMSpace *space, MMRegion *region, uintptr_t pageOffset, size_t pageCount);
 extern "C" uintptr_t MMArchTranslateAddress(uintptr_t virtualAddress, bool writeAccess =false);
-
-#define CC_ACTIVE_SECTION_SIZE                    ((EsFileOffset) 262144)
-
-struct CCActiveSectionReference {
-	EsFileOffset offset; // Offset into the file; multiple of CC_ACTIVE_SECTION_SIZE.
-	uintptr_t index; // Index of the active section.
-};
-
-struct CCActiveSection {
-	KEvent loadCompleteEvent, writeCompleteEvent; 
-	LinkedItem<CCActiveSection> listItem; // Either in the LRU list, or the modified list. If accessors > 0, it should not be in a list.
-
-	EsFileOffset offset;
-	struct CCSpace *cache;
-
-	size_t accessors;
-	volatile bool loading, writing, modified, flush;
-
-	uint16_t referencedPageCount; 
-	uint8_t referencedPages[CC_ACTIVE_SECTION_SIZE / K_PAGE_SIZE / 8]; // If accessors > 0, then pages cannot be dereferenced.
-
-	uint8_t modifiedPages[CC_ACTIVE_SECTION_SIZE / K_PAGE_SIZE / 8];
-};
-
-struct MMActiveSectionManager {
-	CCActiveSection *sections;
-	size_t sectionCount;
-	uint8_t *baseAddress;
-	KMutex mutex;
-	LinkedList<CCActiveSection> lruList;
-	LinkedList<CCActiveSection> modifiedList;
-	KEvent modifiedNonEmpty, modifiedNonFull, modifiedGettingFull;
-	Thread *writeBackThread;
-};
-
-extern MMActiveSectionManager activeSectionManager;
-
-#define CC_MAX_MODIFIED                           (67108864 / CC_ACTIVE_SECTION_SIZE)
-#define CC_MODIFIED_GETTING_FULL                  (CC_MAX_MODIFIED * 2 / 3)
-
-extern "C" void CCDereferenceActiveSection(CCActiveSection *section, uintptr_t startingPage = 0);
-
-extern "C" CCCachedSection *CCFindCachedSectionContaining(CCSpace *cache, EsFileOffset sectionOffset);
-
-void CCSpaceUncover(CCSpace *cache, EsFileOffset removeStart, EsFileOffset removeEnd) {
-	KMutexAssertLocked(&cache->cachedSectionsMutex);
-
-	removeStart = RoundDown(removeStart, (EsFileOffset) K_PAGE_SIZE);
-	removeEnd = RoundUp(removeEnd, (EsFileOffset) K_PAGE_SIZE);
-
-	CCCachedSection *first = CCFindCachedSectionContaining(cache, removeStart);
-
-	if (!first) {
-		KernelPanic("CCSpaceUncover - Range %x->%x was not covered in cache %x.\n", removeStart, removeEnd, cache);
-	}
-
-	for (uintptr_t i = first - cache->cachedSections.array; i < cache->cachedSections.Length(); i++) {
-		CCCachedSection *section = &cache->cachedSections[i];
-
-		EsFileOffset sectionStart = section->offset, 
-			     sectionEnd = section->offset + section->pageCount * K_PAGE_SIZE;
-
-		if (removeEnd > sectionStart && removeStart < sectionEnd) {
-			if (!section->mappedRegionsCount) KernelPanic("CCSpaceUncover - Section wasn't mapped.\n");
-			section->mappedRegionsCount--;
-			// EsPrint("- %x %x %d\n", cache, section->data, section->mappedRegionsCount);
-		} else {
-			break;
-		}
-	}
-}
-
-bool CCSpaceCover(CCSpace *cache, EsFileOffset insertStart, EsFileOffset insertEnd) {
-	KMutexAssertLocked(&cache->cachedSectionsMutex);
-
-	// TODO Test this thoroughly.
-	// TODO Break up really large sections. (maybe into GBs?)
-
-	insertStart = RoundDown(insertStart, (EsFileOffset) K_PAGE_SIZE);
-	insertEnd = RoundUp(insertEnd, (EsFileOffset) K_PAGE_SIZE);
-	EsFileOffset position = insertStart, lastEnd = 0;
-	CCCachedSection *result = nullptr;
-
-	// EsPrint("New: %d, %d\n", insertStart / K_PAGE_SIZE, insertEnd / K_PAGE_SIZE);
-
-	for (uintptr_t i = 0; i < cache->cachedSections.Length(); i++) {
-		CCCachedSection *section = &cache->cachedSections[i];
-
-		EsFileOffset sectionStart = section->offset, 
-			     sectionEnd = section->offset + section->pageCount * K_PAGE_SIZE;
-
-		// EsPrint("Existing (%d): %d, %d\n", i, sectionStart / K_PAGE_SIZE, sectionEnd / K_PAGE_SIZE);
-
-		if (insertStart > sectionEnd) continue;
-
-		// If the inserted region starts before this section starts, then we need to make a new section before us.
-
-		if (position < sectionStart) {
-			CCCachedSection newSection = {};
-			newSection.mappedRegionsCount = 0;
-			newSection.offset = position;
-			newSection.pageCount = ((insertEnd > sectionStart ? sectionStart : insertEnd) - position) / K_PAGE_SIZE;
-
-			if (newSection.pageCount) {
-				// EsPrint("\tAdded: %d, %d\n", newSection.offset / K_PAGE_SIZE, newSection.pageCount);
-				newSection.data = (uintptr_t *) EsHeapAllocate(sizeof(uintptr_t) * newSection.pageCount, true, K_CORE);
-
-				if (!newSection.data) {
-					goto fail;
-				}
-
-				if (!cache->cachedSections.Insert(newSection, i)) { 
-					EsHeapFree(newSection.data, sizeof(uintptr_t) * newSection.pageCount, K_CORE); 
-					goto fail; 
-				}
-
-				i++;
-			}
-
-		}
-
-		position = sectionEnd;
-		if (position > insertEnd) break;
-	}
-
-	// Insert the final section if necessary.
-
-	if (position < insertEnd) {
-		CCCachedSection newSection = {};
-		newSection.mappedRegionsCount = 0;
-		newSection.offset = position;
-		newSection.pageCount = (insertEnd - position) / K_PAGE_SIZE;
-		newSection.data = (uintptr_t *) EsHeapAllocate(sizeof(uintptr_t) * newSection.pageCount, true, K_CORE);
-		// EsPrint("\tAdded (at end): %d, %d\n", newSection.offset / K_PAGE_SIZE, newSection.pageCount);
-
-		if (!newSection.data) {
-			goto fail;
-		}
-
-		if (!cache->cachedSections.Add(newSection)) { 
-			EsHeapFree(newSection.data, sizeof(uintptr_t) * newSection.pageCount, K_CORE); 
-			goto fail; 
-		}
-	}
-
-	for (uintptr_t i = 0; i < cache->cachedSections.Length(); i++) {
-		CCCachedSection *section = &cache->cachedSections[i];
-
-		EsFileOffset sectionStart = section->offset, 
-			     sectionEnd = section->offset + section->pageCount * K_PAGE_SIZE;
-
-		if (sectionStart < lastEnd) KernelPanic("CCSpaceCover - Overlapping MMCachedSections.\n");
-
-		// If the inserted region ends after this section starts, 
-		// and starts before this section ends, then it intersects it.
-
-		if (insertEnd > sectionStart && insertStart < sectionEnd) {
-			section->mappedRegionsCount++;
-			// EsPrint("+ %x %x %d\n", cache, section->data, section->mappedRegionsCount);
-			if (result && sectionStart != lastEnd) KernelPanic("CCSpaceCover - Incomplete MMCachedSections.\n");
-			if (!result) result = section;
-		}
-
-		lastEnd = sectionEnd;
-	}
-
-	return true;
-
-	fail:;
-	return false; // TODO Remove unused cached sections?
-}
-
-void CCWriteSection(CCActiveSection *section) {
-	// Write any modified pages to the backing store.
-
-	uint8_t *sectionBase = activeSectionManager.baseAddress + (section - activeSectionManager.sections) * CC_ACTIVE_SECTION_SIZE;
-	EsError error = ES_SUCCESS;
-
-	for (uintptr_t i = 0; i < CC_ACTIVE_SECTION_SIZE / K_PAGE_SIZE; i++) {
-		uintptr_t from = i, count = 0;
-
-		while (i != CC_ACTIVE_SECTION_SIZE / K_PAGE_SIZE 
-				&& (section->modifiedPages[i >> 3] & (1 << (i & 7)))) {
-			count++, i++;
-		}
-
-		if (!count) continue;
-
-		error = section->cache->callbacks->writeFrom(section->cache, sectionBase + from * K_PAGE_SIZE, 
-				section->offset + from * K_PAGE_SIZE, count * K_PAGE_SIZE);
-
-		if (error != ES_SUCCESS) {
-			break;
-		}
-	}
-
-	// Return the active section.
-
-	KMutexAcquire(&activeSectionManager.mutex);
-
-	if (!section->accessors) KernelPanic("CCWriteSection - Section %x has no accessors while being written.\n", section);
-	if (section->modified) KernelPanic("CCWriteSection - Section %x was modified while being written.\n", section);
-
-	section->accessors--;
-	section->writing = false;
-	EsMemoryZero(section->modifiedPages, sizeof(section->modifiedPages));
-	__sync_synchronize();
-	KEventSet(&section->writeCompleteEvent);
-	KEventSet(&section->cache->writeComplete, true);
-
-	if (!section->accessors) {
-		if (section->loading) KernelPanic("CCSpaceAccess - Active section %x with no accessors is loading.", section);
-		activeSectionManager.lruList.InsertEnd(&section->listItem);
-	}
-
-	KMutexRelease(&activeSectionManager.mutex);
-}
-
-void CCWriteSectionPrepare(CCActiveSection *section) {
-	KMutexAssertLocked(&activeSectionManager.mutex);
-	if (!section->modified) KernelPanic("CCWriteSectionPrepare - Unmodified section %x on modified list.\n", section);
-	if (section->accessors) KernelPanic("CCWriteSectionPrepare - Section %x with accessors on modified list.\n", section);
-	if (section->writing) KernelPanic("CCWriteSectionPrepare - Section %x already being written.\n", section);
-	activeSectionManager.modifiedList.Remove(&section->listItem);
-	section->writing = true;
-	section->modified = false;
-	section->flush = false;
-	KEventReset(&section->writeCompleteEvent);
-	section->accessors = 1;
-	if (!activeSectionManager.modifiedList.count) KEventReset(&activeSectionManager.modifiedNonEmpty);
-	if (activeSectionManager.modifiedList.count < CC_MODIFIED_GETTING_FULL) KEventReset(&activeSectionManager.modifiedGettingFull);
-	KEventSet(&activeSectionManager.modifiedNonFull, true);
-}
-
-void CCActiveSectionReturnToLists(CCActiveSection *section, bool writeBack) {
-	bool waitNonFull = false;
-
-	if (section->flush) {
-		writeBack = true;
-	}
-
-	while (true) {
-		// If modified, wait for the modified list to be below a certain size.
-
-		if (section->modified && waitNonFull) {
-			KEventWait(&activeSectionManager.modifiedNonFull);
-		}
-
-		// Decrement the accessors count.
-
-		KMutexAcquire(&activeSectionManager.mutex);
-		EsDefer(KMutexRelease(&activeSectionManager.mutex));
-
-		if (!section->accessors) KernelPanic("CCSpaceAccess - Active section %x has no accessors.\n", section);
-
-		if (section->accessors == 1) {
-			if (section->loading) KernelPanic("CCSpaceAccess - Active section %x with no accessors is loading.", section);
-
-			// If nobody is accessing the section, put it at the end of the LRU list.
-
-			if (section->modified) {
-				if (activeSectionManager.modifiedList.count > CC_MAX_MODIFIED) {
-					waitNonFull = true;
-					continue;
-				}
-
-				if (activeSectionManager.modifiedList.count == CC_MAX_MODIFIED) {
-					KEventReset(&activeSectionManager.modifiedNonFull);
-				}
-
-				if (activeSectionManager.modifiedList.count >= CC_MODIFIED_GETTING_FULL) {
-					KEventSet(&activeSectionManager.modifiedGettingFull, true);
-				}
-
-				KEventSet(&activeSectionManager.modifiedNonEmpty, true);
-
-				activeSectionManager.modifiedList.InsertEnd(&section->listItem);
-			} else {
-				activeSectionManager.lruList.InsertEnd(&section->listItem);
-			}
-		}
-
-		section->accessors--;
-
-		if (writeBack && !section->accessors && section->modified) {
-			CCWriteSectionPrepare(section);
-		} else {
-			writeBack = false;
-		}
-
-		break;
-	}
-
-	if (writeBack) {
-		CCWriteSection(section);
-	}
-}
-
-EsError CCSpaceAccess(CCSpace *cache, K_USER_BUFFER void *_buffer, EsFileOffset offset, EsFileOffset count, uint32_t flags, 
-        MMSpace *mapSpace = nullptr, unsigned mapFlags = ES_FLAGS_DEFAULT) {
-
-    // TODO Reading in multiple active sections at the same time - will this give better performance on AHCI/NVMe?
-    // 	- Each active section needs to be separately committed.
-    // TODO Read-ahead.
-
-    // Commit CC_ACTIVE_SECTION_SIZE bytes, since we require an active section to be active at a time.
-
-    if (!MMCommit(CC_ACTIVE_SECTION_SIZE, true)) {
-        return ES_ERROR_INSUFFICIENT_RESOURCES;
-    }
-
-    EsDefer(MMDecommit(CC_ACTIVE_SECTION_SIZE, true));
-
-    K_USER_BUFFER uint8_t *buffer = (uint8_t *) _buffer;
-
-    EsFileOffset firstSection = RoundDown(offset, CC_ACTIVE_SECTION_SIZE),
-                 lastSection = RoundUp(offset + count, CC_ACTIVE_SECTION_SIZE);
-
-    uintptr_t guessedActiveSectionIndex = 0;
-
-    bool writeBack = (flags & CC_ACCESS_WRITE_BACK) && (~flags & CC_ACCESS_PRECISE);
-    bool preciseWriteBack = (flags & CC_ACCESS_WRITE_BACK) && (flags & CC_ACCESS_PRECISE);
-
-    for (EsFileOffset sectionOffset = firstSection; sectionOffset < lastSection; sectionOffset += CC_ACTIVE_SECTION_SIZE) {
-        if (MM_AVAILABLE_PAGES() < MM_CRITICAL_AVAILABLE_PAGES_THRESHOLD && !GetCurrentThread()->isPageGenerator) {
-            // @Log
-            KEventWait(&pmm.availableNotCritical);
-        }
-
-        EsFileOffset start = sectionOffset < offset ? offset - sectionOffset : 0;
-        EsFileOffset   end = sectionOffset + CC_ACTIVE_SECTION_SIZE > offset + count ? offset + count - sectionOffset : CC_ACTIVE_SECTION_SIZE;
-
-        EsFileOffset pageStart = RoundDown(start, (EsFileOffset) K_PAGE_SIZE) / K_PAGE_SIZE;
-        EsFileOffset   pageEnd =   RoundUp(end,   (EsFileOffset) K_PAGE_SIZE) / K_PAGE_SIZE;
-
-        // Find the section in the active sections list.
-
-        KMutexAcquire(&cache->activeSectionsMutex);
-
-        bool found = false;
-        uintptr_t index = 0;
-
-        if (guessedActiveSectionIndex < cache->activeSections.Length()
-                && cache->activeSections[guessedActiveSectionIndex].offset == sectionOffset) {
-            index = guessedActiveSectionIndex;
-            found = true;
-        }
-
-        if (!found && cache->activeSections.Length()) {
-            intptr_t low = 0, high = cache->activeSections.Length() - 1;
-
-            while (low <= high) {
-                intptr_t i = low + (high - low) / 2;
-
-                if (cache->activeSections[i].offset < sectionOffset) {
-                    low = i + 1;
-                } else if (cache->activeSections[i].offset > sectionOffset) {
-                    high = i - 1;
-                } else {
-                    index = i;
-                    found = true;
-                    break;
-                }
-            }
-
-            if (!found) {
-                index = low;
-                if (high + 1 != low) KernelPanic("CCSpaceAccess - Bad binary search.\n");
-            }
-        }
-
-        if (found) {
-            guessedActiveSectionIndex = index + 1;
-        }
-
-        KMutexAcquire(&activeSectionManager.mutex);
-
-        CCActiveSection *section;
-
-        // Replace active section in list if it has been used for something else.
-
-        bool replace = false;
-
-        if (found) {
-            CCActiveSection *section = activeSectionManager.sections + cache->activeSections[index].index;
-
-            if (section->cache != cache || section->offset != sectionOffset) {
-                replace = true, found = false;
-            }
-        }
-
-        if (!found) {
-            // Allocate a new active section.
-
-            if (!activeSectionManager.lruList.count) {
-                KMutexRelease(&activeSectionManager.mutex);
-                KMutexRelease(&cache->activeSectionsMutex);
-                return ES_ERROR_INSUFFICIENT_RESOURCES;
-            }
-
-            section = activeSectionManager.lruList.firstItem->thisItem;
-
-            // Add it to the file cache's list of active sections.
-
-            CCActiveSectionReference reference = { .offset = sectionOffset, .index = (uintptr_t) (section - activeSectionManager.sections) };
-
-            if (replace) {
-                cache->activeSections[index] = reference;
-            } else {
-                if (!cache->activeSections.Insert(reference, index)) {
-                    KMutexRelease(&activeSectionManager.mutex);
-                    KMutexRelease(&cache->activeSectionsMutex);
-                    return ES_ERROR_INSUFFICIENT_RESOURCES;
-                }
-            }
-
-            if (section->cache) {
-                // Dereference pages.
-
-                if (section->accessors) {
-                    KernelPanic("CCSpaceAccess - Attempting to dereference active section %x with %d accessors.\n", 
-                            section, section->accessors);
-                }
-
-                CCDereferenceActiveSection(section);
-
-                // Uncover the section's previous contents.
-
-                KMutexAcquire(&section->cache->cachedSectionsMutex);
-                CCSpaceUncover(section->cache, section->offset, section->offset + CC_ACTIVE_SECTION_SIZE);
-                KMutexRelease(&section->cache->cachedSectionsMutex);
-
-                section->cache = nullptr;
-            }
-
-            // Make sure there are cached sections covering the region of the active section.
-
-            KMutexAcquire(&cache->cachedSectionsMutex);
-
-            if (!CCSpaceCover(cache, sectionOffset, sectionOffset + CC_ACTIVE_SECTION_SIZE)) {
-                KMutexRelease(&cache->cachedSectionsMutex);
-                cache->activeSections.Delete(index);
-                KMutexRelease(&activeSectionManager.mutex);
-                KMutexRelease(&cache->activeSectionsMutex);
-                return ES_ERROR_INSUFFICIENT_RESOURCES;
-            }
-
-            KMutexRelease(&cache->cachedSectionsMutex);
-
-            // Remove it from the LRU list.
-
-            activeSectionManager.lruList.Remove(activeSectionManager.lruList.firstItem);
-
-            // Setup the section.
-
-            if (section->accessors) KernelPanic("CCSpaceAccess - Active section %x in the LRU list had accessors.\n", section);
-            if (section->loading) KernelPanic("CCSpaceAccess - Active section %x in the LRU list was loading.\n", section);
-
-            section->accessors = 1;
-            section->offset = sectionOffset;
-            section->cache = cache;
-
-#if 0
-            {
-                Node *node = EsContainerOf(Node, file.cache, cache);
-                EsPrint("active section %d: %s, %x\n", reference.index, node->nameBytes, node->nameBuffer, section->offset);
-            }
-#endif
-
-#ifdef DEBUG_BUILD
-            for (uintptr_t i = 1; i < cache->activeSections.Length(); i++) {
-                if (cache->activeSections[i - 1].offset >= cache->activeSections[i].offset) {
-                    KernelPanic("CCSpaceAccess - Active sections list in cache %x unordered.\n", cache);
-                }
-            }
-#endif
-        } else {
-            // Remove the active section from the LRU/modified list, if present, 
-            // and increment the accessors count.
-            // Don't bother keeping track of its place in the modified list.
-
-            section = activeSectionManager.sections + cache->activeSections[index].index;
-
-            if (!section->accessors) {
-                if (section->writing) KernelPanic("CCSpaceAccess - Active section %x in list is being written.\n", section);
-                section->listItem.RemoveFromList();
-            } else if (section->listItem.list) {
-                KernelPanic("CCSpaceAccess - Active section %x in list had accessors (2).\n", section);
-            }
-
-            section->accessors++;
-        }
-
-        KMutexRelease(&activeSectionManager.mutex);
-        KMutexRelease(&cache->activeSectionsMutex);
-
-        if ((flags & CC_ACCESS_WRITE) && section->writing) {
-            // If writing, wait for any in progress write-behinds to complete.
-            // Note that, once this event is set, a new write can't be started until accessors is 0.
-
-            KEventWait(&section->writeCompleteEvent);
-        }
-
-        uint8_t *sectionBase = activeSectionManager.baseAddress + (section - activeSectionManager.sections) * CC_ACTIVE_SECTION_SIZE;
-
-        // Check if all the pages are already referenced (and hence loaded and mapped).
-
-        bool allReferenced = true;
-
-        for (uintptr_t i = pageStart; i < pageEnd; i++) {
-            if (~section->referencedPages[i >> 3] & (1 << (i & 7))) {
-                allReferenced = false;
-                break;
-            }
-        }
-
-        uint8_t alreadyWritten[CC_ACTIVE_SECTION_SIZE / K_PAGE_SIZE / 8] = {};
-
-        if (allReferenced) {
-            goto copy;
-        }
-
-        while (true) {
-            KMutexAcquire(&cache->cachedSectionsMutex);
-
-            // Find the first cached section covering this active section.
-
-            CCCachedSection *cachedSection = CCFindCachedSectionContaining(cache, sectionOffset);
-
-            if (!cachedSection) {
-                KernelPanic("CCSpaceAccess - Active section %x not covered.\n", section);
-            }
-
-            // Find where the requested region is located.
-
-            uintptr_t pagesToSkip = pageStart + (sectionOffset - cachedSection->offset) / K_PAGE_SIZE,
-                      pageInCachedSectionIndex = 0;
-
-            while (pagesToSkip) {
-                if (pagesToSkip >= cachedSection->pageCount) {
-                    pagesToSkip -= cachedSection->pageCount;
-                    cachedSection++;
-                } else {
-                    pageInCachedSectionIndex = pagesToSkip;
-                    pagesToSkip = 0;
-                }
-            }
-
-            if (pageInCachedSectionIndex >= cachedSection->pageCount 
-                    || cachedSection >= cache->cachedSections.array + cache->cachedSections.Length()) {
-                KernelPanic("CCSpaceAccess - Invalid requested region search result.\n");
-            }
-
-            // Reference all loaded pages, and record the ones we need to load.
-
-            uintptr_t *pagesToLoad[CC_ACTIVE_SECTION_SIZE / K_PAGE_SIZE];
-            uintptr_t loadCount = 0;
-
-            for (uintptr_t i = pageStart; i < pageEnd; i++) {
-                if (cachedSection == cache->cachedSections.array + cache->cachedSections.Length()) {
-                    KernelPanic("CCSpaceAccess - Not enough cached sections.\n");
-                }
-
-                KMutexAcquire(&pmm.pageFrameMutex);
-
-                uintptr_t entry = cachedSection->data[pageInCachedSectionIndex];
-                pagesToLoad[i] = nullptr;
-
-                if ((entry & MM_SHARED_ENTRY_PRESENT) && (~section->referencedPages[i >> 3] & (1 << (i & 7)))) {
-                    MMPageFrame *frame = pmm.pageFrames + (entry >> K_PAGE_BITS);
-
-                    if (frame->state == MMPageFrame::STANDBY) {
-                        // The page was mapped out from all MMSpaces, and therefore was placed on the standby list.
-                        // Mark the page as active before we map it.
-                        MMPhysicalActivatePages(entry / K_PAGE_SIZE, 1);
-                        frame->cacheReference = cachedSection->data + pageInCachedSectionIndex;
-                    } else if (frame->state != MMPageFrame::ACTIVE) {
-                        KernelPanic("CCSpaceAccess - Page frame %x was neither standby nor active.\n", frame);
-                    } else if (!frame->active.references) {
-                        KernelPanic("CCSpaceAccess - Active page frame %x had no references.\n", frame);
-                    }
-
-                    frame->active.references++;
-                    MMArchMapPage(kernelMMSpace, entry & ~(K_PAGE_SIZE - 1), (uintptr_t) sectionBase + i * K_PAGE_SIZE, MM_MAP_PAGE_FRAME_LOCK_ACQUIRED);
-
-                    __sync_synchronize();
-                    section->referencedPages[i >> 3] |= 1 << (i & 7);
-                    section->referencedPageCount++;
-                } else if (~entry & MM_SHARED_ENTRY_PRESENT) {
-                    if (section->referencedPages[i >> 3] & (1 << (i & 7))) {
-                        KernelPanic("CCSpaceAccess - Referenced page was not present.\n");
-                    }
-
-                    pagesToLoad[i] = cachedSection->data + pageInCachedSectionIndex;
-                    loadCount++;
-                }
-
-                KMutexRelease(&pmm.pageFrameMutex);
-
-                pageInCachedSectionIndex++;
-
-                if (pageInCachedSectionIndex == cachedSection->pageCount) {
-                    pageInCachedSectionIndex = 0;
-                    cachedSection++;
-                }
-            }
-
-            if (!loadCount) {
-                KMutexRelease(&cache->cachedSectionsMutex);
-                goto copy;
-            }
-
-            // If another thread is already trying to load pages into the active section,
-            // then wait for it to complete.
-
-            bool loadCollision = section->loading;
-
-            if (!loadCollision) {
-                section->loading = true;
-                KEventReset(&section->loadCompleteEvent);
-            }
-
-            KMutexRelease(&cache->cachedSectionsMutex);
-
-            if (loadCollision) {
-                KEventWait(&section->loadCompleteEvent);
-                continue;
-            }
-
-            // Allocate, reference and map physical pages.
-
-            uintptr_t pageFrames[CC_ACTIVE_SECTION_SIZE / K_PAGE_SIZE];
-
-            for (uintptr_t i = pageStart; i < pageEnd; i++) {
-                if (!pagesToLoad[i]) {
-                    continue;
-                }
-
-                pageFrames[i] = MMPhysicalAllocate(ES_FLAGS_DEFAULT);
-
-                MMPageFrame *frame = pmm.pageFrames + (pageFrames[i] >> K_PAGE_BITS);
-                frame->active.references = 1;
-                frame->cacheReference = pagesToLoad[i];
-
-                MMArchMapPage(kernelMMSpace, pageFrames[i], (uintptr_t) sectionBase + i * K_PAGE_SIZE, ES_FLAGS_DEFAULT);
-            }
-
-            // Read from the cache's backing store.
-
-            EsError error = ES_SUCCESS;
-
-            if ((flags & CC_ACCESS_WRITE) && (~flags & CC_ACCESS_USER_BUFFER_MAPPED)) {
-                bool loadedStart = false;
-
-                if (error == ES_SUCCESS && (start & (K_PAGE_SIZE - 1)) && pagesToLoad[pageStart]) {
-                    // Left side of the accessed region is not page aligned, so we need to load in the page.
-
-                    error = cache->callbacks->readInto(cache, sectionBase + pageStart * K_PAGE_SIZE, 
-                            section->offset + pageStart * K_PAGE_SIZE, K_PAGE_SIZE);
-                    loadedStart = true;
-                }
-
-                if (error == ES_SUCCESS && (end & (K_PAGE_SIZE - 1)) && !(pageStart == pageEnd - 1 && loadedStart) && pagesToLoad[pageEnd - 1]) {
-                    // Right side of the accessed region is not page aligned, so we need to load in the page.
-
-                    error = cache->callbacks->readInto(cache, sectionBase + (pageEnd - 1) * K_PAGE_SIZE, 
-                            section->offset + (pageEnd - 1) * K_PAGE_SIZE, K_PAGE_SIZE);
-                }
-
-                K_USER_BUFFER uint8_t *buffer2 = buffer;
-
-                // Initialise the rest of the contents HERE, before referencing the pages.
-                // The user buffer cannot be mapped otherwise we could deadlock while reading from it,
-                // as we have marked the active section in the loading state.
-
-                for (uintptr_t i = pageStart; i < pageEnd; i++) {
-                    uintptr_t left = i == pageStart ? (start & (K_PAGE_SIZE - 1)) : 0;
-                    uintptr_t right = i == pageEnd - 1 ? (end & (K_PAGE_SIZE - 1)) : K_PAGE_SIZE;
-                    if (!right) right = K_PAGE_SIZE;
-
-                    if (pagesToLoad[i]) {
-                        EsMemoryCopy(sectionBase + i * K_PAGE_SIZE + left, buffer2, right - left);
-                        alreadyWritten[i >> 3] |= 1 << (i & 7);
-                    }
-
-                    buffer2 += right - left;
-                }
-
-                if (buffer + (end - start) != buffer2) {
-                    KernelPanic("CCSpaceAccess - Incorrect page left/right calculation.\n");
-                }
-            } else {
-                for (uintptr_t i = pageStart; i < pageEnd; i++) {
-                    uintptr_t from = i, count = 0;
-
-                    while (i != pageEnd && pagesToLoad[i]) {
-                        count++, i++;
-                    }
-
-                    if (!count) continue;
-
-                    error = cache->callbacks->readInto(cache, sectionBase + from * K_PAGE_SIZE, 
-                            section->offset + from * K_PAGE_SIZE, count * K_PAGE_SIZE);
-
-                    if (error != ES_SUCCESS) {
-                        break;
-                    }
-                }
-            }
-
-            if (error != ES_SUCCESS) {
-                // Free and unmap the pages we allocated if there was an error.
-
-                for (uintptr_t i = pageStart; i < pageEnd; i++) {
-                    if (!pagesToLoad[i]) continue;
-                    MMArchUnmapPages(kernelMMSpace, (uintptr_t) sectionBase + i * K_PAGE_SIZE, 1, ES_FLAGS_DEFAULT);
-                    MMPhysicalFree(pageFrames[i], false, 1);
-                }
-            }
-
-            KMutexAcquire(&cache->cachedSectionsMutex);
-
-            // Write the pages to the cached sections, and mark them as referenced.
-
-            if (error == ES_SUCCESS) {
-                for (uintptr_t i = pageStart; i < pageEnd; i++) {
-                    if (pagesToLoad[i]) {
-                        *pagesToLoad[i] = pageFrames[i] | MM_SHARED_ENTRY_PRESENT;
-                        section->referencedPages[i >> 3] |= 1 << (i & 7);
-                        section->referencedPageCount++;
-                    }
-                }
-            }
-
-            // Return active section to normal state, and set the load complete event.
-
-            section->loading = false;
-            KEventSet(&section->loadCompleteEvent);
-
-            KMutexRelease(&cache->cachedSectionsMutex);
-
-            if (error != ES_SUCCESS) {
-                CCActiveSectionReturnToLists(section, false);
-                return error;
-            }
-
-            break;
-        }
-
-copy:;
-
-     // Copy into/from the user's buffer.
-
-     if (buffer) {
-         if (flags & CC_ACCESS_MAP) {
-             if ((start & (K_PAGE_SIZE - 1)) || (end & (K_PAGE_SIZE - 1)) || ((uintptr_t) buffer & (K_PAGE_SIZE - 1))) {
-                 KernelPanic("CCSpaceAccess - Passed READ_MAP flag, but start/end/buffer misaligned.\n");
-             }
-
-             for (uintptr_t i = start; i < end; i += K_PAGE_SIZE) {
-                 uintptr_t physicalAddress = MMArchTranslateAddress((uintptr_t) sectionBase + i, false);
-                 KMutexAcquire(&pmm.pageFrameMutex);
-                 MMPageFrame *frame = &pmm.pageFrames[physicalAddress / K_PAGE_SIZE];
-
-                 if (frame->state != MMPageFrame::ACTIVE || !frame->active.references) {
-                     KernelPanic("CCSpaceAccess - Bad active frame %x; removed while still in use by the active section.\n", frame);
-                 }
-
-                 frame->active.references++;
-
-                 if (!MMArchMapPage(mapSpace, physicalAddress, (uintptr_t) buffer, 
-                             mapFlags | MM_MAP_PAGE_IGNORE_IF_MAPPED /* since this isn't locked */
-                             | MM_MAP_PAGE_FRAME_LOCK_ACQUIRED)) {
-                     // The page was already mapped.
-                     // Don't need to check if this goes to zero, because the page frame mutex is still acquired.
-                     frame->active.references--;
-                 }
-
-                 KMutexRelease(&pmm.pageFrameMutex);
-                 buffer += K_PAGE_SIZE;
-             }
-         } else if (flags & CC_ACCESS_READ) {
-             EsMemoryCopy(buffer, sectionBase + start, end - start);
-             buffer += end - start;
-         } else if (flags & CC_ACCESS_WRITE) {
-             for (uintptr_t i = pageStart; i < pageEnd; i++) {
-                 uintptr_t left = i == pageStart ? (start & (K_PAGE_SIZE - 1)) : 0;
-                 uintptr_t right = i == pageEnd - 1 ? (end & (K_PAGE_SIZE - 1)) : K_PAGE_SIZE;
-                 if (!right) right = K_PAGE_SIZE;
-
-                 if (~alreadyWritten[i >> 3] & (1 << (i & 7))) {
-                     EsMemoryCopy(sectionBase + i * K_PAGE_SIZE + left, buffer, right - left);
-                 }
-
-                 buffer += right - left;
-
-                 if (!preciseWriteBack) {
-                     __sync_fetch_and_or(section->modifiedPages + (i >> 3), 1 << (i & 7));
-                 }
-             }
-
-             if (!preciseWriteBack) {
-                 section->modified = true;
-             } else {
-                 uint8_t *sectionBase = activeSectionManager.baseAddress + (section - activeSectionManager.sections) * CC_ACTIVE_SECTION_SIZE;
-                 EsError error = section->cache->callbacks->writeFrom(section->cache, sectionBase + start, section->offset + start, end - start);
-
-                 if (error != ES_SUCCESS) {
-                     CCActiveSectionReturnToLists(section, writeBack);
-                     return error;
-                 }
-             }
-         }
-     }
-
-     CCActiveSectionReturnToLists(section, writeBack);
-    }
-
-    return ES_SUCCESS;
-}
 
 extern "C" bool MMHandlePageFault(MMSpace *space, uintptr_t address, unsigned faultFlags);
 
@@ -4562,476 +3494,15 @@ struct KBlockDevice : KDevice {
 	KMutex detectFileSystemMutex;
 };
 
-struct KFileSystem : KDevice {
-	KBlockDevice *block; // Gives the sector size and count.
-
-	KNode *rootDirectory;
-
-	// Only use this for file system metadata that isn't cached in a Node. 
-	// This must be used consistently, i.e. if you ever read a region cached, then you must always write that region cached, and vice versa.
-#define FS_BLOCK_ACCESS_CACHED (1) 
-#define FS_BLOCK_ACCESS_SOFT_ERRORS (2)
-	// Access the block device. Returns true on success.
-	// Offset and count must be sector aligned. Buffer must be DWORD aligned.
-	EsError Access(EsFileOffset offset, size_t count, int operation, void *buffer, uint32_t flags, KWorkGroup *dispatchGroup = nullptr);
-
-	// Fill these fields in before registering the file system:
-
-	char name[64];
-	size_t nameBytes;
-
-	size_t directoryEntryDataBytes; // The size of the driverData passed to FSDirectoryEntryFound and received in the load callback.
-	size_t nodeDataBytes; // The average bytes allocated by the driver per node (used for managing cache sizes).
-
-	EsFileOffsetDifference rootDirectoryInitialChildren;
-	EsFileOffset spaceTotal, spaceUsed;
-	EsUniqueIdentifier identifier;
-
-	size_t  	(*read)		(KNode *node, void *buffer, EsFileOffset offset, EsFileOffset count);
-	size_t  	(*write)	(KNode *node, const void *buffer, EsFileOffset offset, EsFileOffset count);
-	void  		(*sync)		(KNode *directory, KNode *node); // TODO Error reporting?
-	EsError		(*scan)		(const char *name, size_t nameLength, KNode *directory); // Add the entry with FSDirectoryEntryFound.
-	EsError		(*load)		(KNode *directory, KNode *node, KNodeMetadata *metadata /* for if you need to update it */, 
-						const void *entryData /* driverData passed to FSDirectoryEntryFound */);
-	EsFileOffset  	(*resize)	(KNode *file, EsFileOffset newSize, EsError *error);
-	EsError		(*create)	(const char *name, size_t nameLength, EsNodeType type, KNode *parent, KNode *node, void *driverData);
-	EsError 	(*enumerate)	(KNode *directory); // Add the entries with FSDirectoryEntryFound.
-	EsError		(*remove)	(KNode *directory, KNode *file);
-	EsError  	(*move)		(KNode *oldDirectory, KNode *file, KNode *newDirectory, const char *newName, size_t newNameLength);
-	void  		(*close)	(KNode *node);
-	void		(*unmount)	(KFileSystem *fileSystem);
-
-	// TODO Normalizing file names, for case-insensitive filesystems.
-	// void *       (*normalize)    (const char *name, size_t nameLength, size_t *resultLength); 
-
-	// Internals.
-
-	KMutex moveMutex;
-	bool isBootFileSystem, unmounting;
-	EsUniqueIdentifier installationIdentifier;
-	volatile uint64_t totalHandleCount;
-	CCSpace cacheSpace;
-
-	MMObjectCache cachedDirectoryEntries, // Directory entries without a loaded node.
-		      cachedNodes; // Nodes with no handles or directory entries.
-};
-
-struct {
-	KWriterLock fileSystemsLock;
-
-	KFileSystem *bootFileSystem;
-	KEvent foundBootFileSystemEvent;
-
-	KSpinlock updateNodeHandles; // Also used for node/directory entry cache operations.
-
-	bool shutdown;
-
-	volatile uint64_t totalHandleCount;
-	volatile uintptr_t fileSystemsUnmounting;
-	KEvent fileSystemUnmounted;
-} fs = {
-	.fileSystemUnmounted = { .autoReset = true },
-};
-
-void MMObjectCacheInsert(MMObjectCache *cache, MMObjectCacheItem *item) {
-	KSpinlockAcquire(&cache->lock);
-	cache->items.Insert(item, false /* end */);
-	cache->count++;
-	__sync_fetch_and_add(&pmm.approximateTotalObjectCacheBytes, cache->averageObjectBytes);
-
-	if (MM_OBJECT_CACHE_SHOULD_TRIM()) {
-		KEventSet(&pmm.trimObjectCaches, true);
-	}
-
-	KSpinlockRelease(&cache->lock);
-}
-
-void MMObjectCacheUnregister(MMObjectCache *cache) {
-	KMutexAcquire(&pmm.objectCacheListMutex);
-	pmm.objectCacheList.Remove(&cache->item);
-	KMutexRelease(&pmm.objectCacheListMutex);
-
-	// Wait for any trim threads still using the cache to finish.
-	KWriterLockTake(&cache->trimLock, K_LOCK_EXCLUSIVE);
-	KWriterLockReturn(&cache->trimLock, K_LOCK_EXCLUSIVE);
-}
-
-void MMObjectCacheFlush(MMObjectCache *cache) {
-	if (cache->item.list) KernelPanic("MMObjectCacheFlush - Cache %x must be unregistered before flushing.\n", cache);
-
-	// Wait for any trim threads still using the cache to finish.
-	KWriterLockTake(&cache->trimLock, K_LOCK_EXCLUSIVE);
-
-	// Trim the cache until it is empty.
-	// The trim callback is allowed to increase cache->count,
-	// but nobody else should be increasing it once it has been unregistered.
-	while (cache->count) cache->trim(cache);
-
-	// Return the trim lock.
-	KWriterLockReturn(&cache->trimLock, K_LOCK_EXCLUSIVE);
-}
-
-KDevice *deviceTreeRoot;
-KMutex deviceTreeMutex;
-
-void KDeviceOpenHandle(KDevice *device) {
-	KMutexAcquire(&deviceTreeMutex);
-	if (!device->handles) KernelPanic("KDeviceOpenHandle - Device %s has no handles.\n", device);
-	device->handles++;
-	KMutexRelease(&deviceTreeMutex);
-}
-
-void DeviceDestroy(KDevice *device) {
-	device->children.Free();
-	if (device->destroy) device->destroy(device);
-	EsHeapFree(device, 0, K_FIXED);
-}
-
-void KDeviceCloseHandle(KDevice *device) {
-	KMutexAcquire(&deviceTreeMutex);
-
-	if (!device->handles) KernelPanic("KDeviceCloseHandle - Device %s has no handles.\n", device);
-	device->handles--;
-
-	while (!device->handles && !device->children.Length()) {
-		device->parent->children.FindAndDeleteSwap(device, true /* fail if not found */);
-		KDevice *parent = device->parent;
-		DeviceDestroy(device);
-		device = parent;
-	}
-
-	KMutexRelease(&deviceTreeMutex);
-}
-
-void FSUnmountFileSystem(uintptr_t argument) {
-	KFileSystem *fileSystem = (KFileSystem *) argument;
-	// @Log
-
-	MMObjectCacheUnregister(&fileSystem->cachedNodes);
-	MMObjectCacheUnregister(&fileSystem->cachedDirectoryEntries);
-
-	while (fileSystem->cachedNodes.count || fileSystem->cachedDirectoryEntries.count) {
-		MMObjectCacheFlush(&fileSystem->cachedNodes);
-		MMObjectCacheFlush(&fileSystem->cachedDirectoryEntries);
-	}
-
-	if (fileSystem->unmount) {
-		fileSystem->unmount(fileSystem);
-	}
-
-	// @Log
-	KDeviceCloseHandle(fileSystem);
-	__sync_fetch_and_sub(&fs.fileSystemsUnmounting, 1);
-	KEventSet(&fs.fileSystemUnmounted, true);
-}
-
-void CCSpaceFlush(CCSpace *cache) {
-	while (true) {
-		bool complete = true;
-
-		KMutexAcquire(&cache->activeSectionsMutex);
-		KMutexAcquire(&activeSectionManager.mutex);
-
-		for (uintptr_t i = 0; i < cache->activeSections.Length(); i++) {
-			CCActiveSection *section = activeSectionManager.sections + cache->activeSections[i].index;
-
-			if (section->cache == cache && section->offset == cache->activeSections[i].offset) {
-				if (section->writing) {
-					// The section is being written; wait for it to complete.
-					complete = false;
-				} else if (section->modified) {
-					if (section->accessors) {
-						// Someone is accessing this section; mark it to be written back once they are done.
-						section->flush = true;
-						complete = false;
-					} else {
-						// Nobody is accessing the section; we can write it ourselves.
-						complete = false;
-						CCWriteSectionPrepare(section);
-						KMutexRelease(&activeSectionManager.mutex);
-						KMutexRelease(&cache->activeSectionsMutex);
-						CCWriteSection(section);
-						KMutexAcquire(&cache->activeSectionsMutex);
-						KMutexAcquire(&activeSectionManager.mutex);
-					}
-				}
-			}
-
-		}
-
-		KMutexRelease(&activeSectionManager.mutex);
-		KMutexRelease(&cache->activeSectionsMutex);
-
-		if (!complete) {
-			KEventWait(&cache->writeComplete);
-		} else {
-			break;
-		}
-	}
-}
-
 extern "C" void MMUpdateAvailablePageCount(bool increase);
-
-void CCSpaceDestroy(CCSpace *cache) {
-	CCSpaceFlush(cache);
-
-	for (uintptr_t i = 0; i < cache->activeSections.Length(); i++) {
-		KMutexAcquire(&activeSectionManager.mutex);
-
-		CCActiveSection *section = activeSectionManager.sections + cache->activeSections[i].index;
-
-		if (section->cache == cache && section->offset == cache->activeSections[i].offset) {
-			CCDereferenceActiveSection(section);
-			section->cache = nullptr;
-
-			if (section->accessors || section->modified || section->listItem.list != &activeSectionManager.lruList) {
-				KernelPanic("CCSpaceDestroy - Section %x has invalid state to destroy cache space %x.\n",
-						section, cache);
-			}
-
-			section->listItem.RemoveFromList();
-			activeSectionManager.lruList.InsertStart(&section->listItem);
-		}
-
-		KMutexRelease(&activeSectionManager.mutex);
-	}
-
-	for (uintptr_t i = 0; i < cache->cachedSections.Length(); i++) {
-		CCCachedSection *section = &cache->cachedSections[i];
-
-		for (uintptr_t i = 0; i < section->pageCount; i++) {
-			KMutexAcquire(&pmm.pageFrameMutex);
-
-			if (section->data[i] & MM_SHARED_ENTRY_PRESENT) {
-				uintptr_t page = section->data[i] & ~(K_PAGE_SIZE - 1);
-
-				if (pmm.pageFrames[page >> K_PAGE_BITS].state != MMPageFrame::ACTIVE) {
-                    MMPhysicalActivatePages(page >> K_PAGE_BITS, 1);
-				}
-
-				MMPhysicalFree(page, true, 1);
-			}
-
-			KMutexRelease(&pmm.pageFrameMutex);
-		}
-
-		EsHeapFree(section->data, sizeof(uintptr_t) * section->pageCount, K_CORE);
-	}
-
-	cache->cachedSections.Free();
-	cache->activeSections.Free();
-}
-
-EsError FSNodeOpenHandle(KNode *node, uint32_t flags, uint8_t mode) {
-	{
-		// See comment in FSNodeCloseHandle for why we use the spinlock.
-		KSpinlockAcquire(&fs.updateNodeHandles);
-		EsDefer(KSpinlockRelease(&fs.updateNodeHandles));
-
-		if (node->handles && mode == FS_NODE_OPEN_HANDLE_FIRST) {
-			KernelPanic("FSNodeOpenHandle - Trying to open first handle to %x, but it already has handles.\n", node);
-		} else if (!node->handles && mode == FS_NODE_OPEN_HANDLE_STANDARD) {
-			KernelPanic("FSNodeOpenHandle - Trying to open handle to %x, but it has no handles.\n", node);
-		}
-
-		if (node->handles == NODE_MAX_ACCESSORS) { 
-			return ES_ERROR_INSUFFICIENT_RESOURCES; 
-		}
-
-		if (node->directoryEntry->type == ES_NODE_FILE) {
-			FSFile *file = (FSFile *) node;
-
-			if (flags & ES_FILE_READ) {
-				if (file->countWrite > 0) return ES_ERROR_FILE_HAS_WRITERS; 
-			} else if (flags & ES_FILE_WRITE) {
-				if (flags & _ES_NODE_FROM_WRITE_EXCLUSIVE) {
-					if (!file->countWrite || (~file->flags & NODE_HAS_EXCLUSIVE_WRITER)) {
-						KernelPanic("FSNodeOpenHandle - File %x is invalid state for a handle to have the _ES_NODE_FROM_WRITE_EXCLUSIVE flag.\n", file);
-					}
-				} else {
-					if (file->countWrite) {
-						return ES_ERROR_FILE_CANNOT_GET_EXCLUSIVE_USE; 
-					}
-				}
-			} else if (flags & ES_FILE_WRITE_SHARED) {
-				if ((file->flags & NODE_HAS_EXCLUSIVE_WRITER) || file->countWrite < 0) return ES_ERROR_FILE_IN_EXCLUSIVE_USE;
-			}
-
-			if (flags & (ES_FILE_WRITE_SHARED | ES_FILE_WRITE)) {
-				if (!file->fileSystem->write) {
-					return ES_ERROR_FILE_ON_READ_ONLY_VOLUME;
-				}
-			}
-
-			if (flags & (ES_FILE_WRITE_SHARED | ES_FILE_WRITE)) file->countWrite++;
-			if (flags & ES_FILE_READ) file->countWrite--;
-			if (flags & ES_FILE_WRITE) __sync_fetch_and_or(&node->flags, NODE_HAS_EXCLUSIVE_WRITER);
-		}
-
-		NODE_INCREMENT_HANDLE_COUNT(node);
-
-		// EsPrint("Open handle to %s (%d; %d).\n", node->directoryEntry->item.key.longKeyBytes, 
-		// 		node->directoryEntry->item.key.longKey, node->handles, fs.totalHandleCount);
-	}
-
-	if (node->directoryEntry->type == ES_NODE_FILE && (flags & ES_NODE_PREVENT_RESIZE)) {
-		// Modify blockResize with the resizeLock, to prevent a resize being in progress when blockResize becomes positive.
-		FSFile *file = (FSFile *) node;
-		KWriterLockTake(&file->resizeLock, K_LOCK_EXCLUSIVE);
-		file->blockResize++;
-		KWriterLockReturn(&file->resizeLock, K_LOCK_EXCLUSIVE);
-	}
-
-	return ES_SUCCESS;
-}
-
-void FSNodeFree(KNode *node) {
-	FSDirectoryEntry *entry = node->directoryEntry;
-
-	if (entry->node != node) {
-		KernelPanic("FSNodeFree - FSDirectoryEntry node mismatch for node %x.\n", node);
-	} else if (node->flags & NODE_IN_CACHE_LIST) {
-		KernelPanic("FSNodeFree - Node %x is in the cache list.\n", node);
-	}
-
-	if (entry->type == ES_NODE_FILE) {
-		CCSpaceDestroy(&((FSFile *) node)->cache);
-	} else if (entry->type == ES_NODE_DIRECTORY) {
-		if (((FSDirectory *) node)->entries.root) {
-			KernelPanic("FSNodeFree - Directory %x still had items in its tree.\n", node);
-		}
-	}
-
-	if (node->driverNode) {
-		node->fileSystem->close(node);
-	}
-
-	// EsPrint("Freeing node with name '%s'...\n", entry->item.key.longKeyBytes, entry->item.key.longKey);
-
-	bool deleted = node->flags & NODE_DELETED;
-
-	KFileSystem *fileSystem = node->fileSystem;
-	EsHeapFree(node, entry->type == ES_NODE_DIRECTORY ? sizeof(FSDirectory) : sizeof(FSFile), K_FIXED);
-
-	if (!deleted) {
-		KSpinlockAcquire(&fs.updateNodeHandles);
-		MMObjectCacheInsert(&fileSystem->cachedDirectoryEntries, &entry->cacheItem);
-		entry->node = nullptr;
-		entry->removingNodeFromCache = false;
-		KSpinlockRelease(&fs.updateNodeHandles);
-	} else {
-		// The node has been deleted, and we're about to deallocate the directory entry anyway.
-		// See FSNodeCloseHandle.
-	}
-}
-
-void FSDirectoryEntryFree(FSDirectoryEntry *entry) {
-	if (entry->cacheItem.previous || entry->cacheItem.next) {
-		KernelPanic("FSDirectoryEntryFree - Entry %x is in cache.\n", entry);
-#ifdef TREE_VALIDATE
-	} else if (entry->item.tree) {
-		KernelPanic("FSDirectoryEntryFree - Entry %x is in parent's tree.\n", entry);
-#endif
-	}
-
-	// EsPrint("Freeing directory entry with name '%s'...\n", entry->item.key.longKeyBytes, entry->item.key.longKey);
-
-	if (entry->item.key.longKey != entry->inlineName) {
-		EsHeapFree((void *) entry->item.key.longKey, entry->item.key.longKeyBytes, K_FIXED);
-	}
-
-	EsHeapFree(entry, 0, K_FIXED);
-}
-
-void FSNodeCloseHandle(KNode *node, uint32_t flags) {
-	if (node->directoryEntry->type == ES_NODE_FILE && (flags & ES_NODE_PREVENT_RESIZE)) {
-		FSFile *file = (FSFile *) node;
-		KWriterLockTake(&file->resizeLock, K_LOCK_EXCLUSIVE);
-		file->blockResize--;
-		KWriterLockReturn(&file->resizeLock, K_LOCK_EXCLUSIVE);
-	}
-
-	// Don't use the node's writer lock for this.
-	// It'd be unnecessarily require getting exclusive access.
-	// There's not much to do, so just use a global spinlock.
-	KSpinlockAcquire(&fs.updateNodeHandles);
-
-	if (node->handles) {
-		node->handles--;
-		node->fileSystem->totalHandleCount--;
-		fs.totalHandleCount--;
-
-		// EsPrint("Close handle to %s (%d; %d).\n", node->directoryEntry->item.key.longKeyBytes, 
-		// 		node->directoryEntry->item.key.longKey, node->handles, fs.totalHandleCount);
-	} else {
-		KernelPanic("FSNodeCloseHandle - Node %x had no handles.\n", node);
-	}
-
-	if (node->directoryEntry->type == ES_NODE_FILE) {
-		FSFile *file = (FSFile *) node;
-
-		if ((flags & (ES_FILE_WRITE_SHARED | ES_FILE_WRITE))) {
-			if (file->countWrite <= 0) KernelPanic("FSNodeCloseHandle - Invalid countWrite on node %x.\n", node);
-			file->countWrite--;
-		}
-
-		if ((flags & ES_FILE_READ)) {
-			if (file->countWrite >= 0) KernelPanic("FSNodeCloseHandle - Invalid countWrite on node %x.\n", node);
-			file->countWrite++;
-		}
-
-		if ((flags & ES_FILE_WRITE) && file->countWrite == 0) {
-			if (~file->flags & NODE_HAS_EXCLUSIVE_WRITER) KernelPanic("FSNodeCloseHandle - Missing exclusive flag on node %x.\n", node);
-			__sync_fetch_and_and(&node->flags, ~NODE_HAS_EXCLUSIVE_WRITER);
-		}
-	}
-
-	bool deleted = (node->flags & NODE_DELETED) && !node->handles;
-	bool unmounted = !node->fileSystem->totalHandleCount;
-	bool hasEntries = node->directoryEntry->type == ES_NODE_DIRECTORY && ((FSDirectory *) node)->entryCount;
-	if (unmounted && node->handles) KernelPanic("FSNodeCloseHandle - File system has no handles but this node %x has handles.\n", node);
-	KFileSystem *fileSystem = node->fileSystem;
-
-	if (!node->handles && !deleted && !hasEntries) {
-		if (node->flags & NODE_IN_CACHE_LIST) KernelPanic("FSNodeCloseHandle - Node %x is already in the cache list.\n", node);
-		MMObjectCacheInsert(&node->fileSystem->cachedNodes, &node->cacheItem);
-		__sync_fetch_and_or(&node->flags, NODE_IN_CACHE_LIST);
-		node = nullptr; // The node could be freed at any time after MMObjectCacheInsert.
-	}
-
-	KSpinlockRelease(&fs.updateNodeHandles);
-
-	if (unmounted && !fileSystem->unmounting) {
-		// All handles to all nodes in the file system have been closed.
-		// Spawn a thread to unmount it.
-		fileSystem->unmounting = true;
-		__sync_fetch_and_add(&fs.fileSystemsUnmounting, 1);
-		KThreadCreate("FSUnmount", FSUnmountFileSystem, (uintptr_t) fileSystem); // TODO What should happen if creating the thread fails?
-	}
-
-	if (deleted) {
-		if (!node->directoryEntry->parent) KernelPanic("FSNodeCloseHandle - A root directory %x was deleted.\n", node);
-
-		// The node has been deleted, and no handles remain.
-		// When it was deleted, it should have been removed from its parent directory,
-		// both on the file system and in the directory lookup structures.
-		// So, we are free to deallocate the node.
-
-		FSDirectoryEntry *entry = node->directoryEntry;
-		FSNodeFree(node);
-		FSDirectoryEntryFree(entry);
-	} 
-}
 
 KMutex objectHandleCountChange;
 
 extern "C" bool MMSharedResizeRegion(MMSharedRegion *region, size_t sizeBytes);
 extern "C" void MMSharedDestroyRegion(MMSharedRegion *region);
 extern "C" MMSharedRegion *MMSharedCreateRegion(size_t sizeBytes, bool fixed = false, uintptr_t below = 0);
-
-
-void ProcessRemove(Process *process);
 extern "C" void ThreadRemove(Thread* thread);
+
 void CloseHandleToObject(void *object, KernelObjectType type, uint32_t flags)
 {
 	switch (type) {
@@ -5043,7 +3514,8 @@ void CloseHandleToObject(void *object, KernelObjectType type, uint32_t flags)
 			if (previous == 0) {
 				KernelPanic("CloseHandleToProcess - All handles to process %x have been closed.\n", process);
 			} else if (previous == 1) {
-				ProcessRemove(process);
+                TODO();
+				//ProcessRemove(process);
 			}
 		} break;
 
@@ -5059,7 +3531,8 @@ void CloseHandleToObject(void *object, KernelObjectType type, uint32_t flags)
 		} break;
 
 		case KERNEL_OBJECT_NODE: {
-			FSNodeCloseHandle((KNode *) object, flags);
+			//FSNodeCloseHandle((KNode *) object, flags);
+            TODO();
 		} break;
 
 		case KERNEL_OBJECT_EVENT: {
@@ -5107,42 +3580,14 @@ void CloseHandleToObject(void *object, KernelObjectType type, uint32_t flags)
 		} break;
 
 		case KERNEL_OBJECT_DEVICE: {
-			KDeviceCloseHandle((KDevice *) object);
+			// KDeviceCloseHandle((KDevice *) object);
+            TODO();
 		} break;
 
 		default: {
 			KernelPanic("CloseHandleToObject - Cannot close object of type %x.\n", type);
 		} break;
 	}
-}
-
-void ProcessRemove(Process *process) {
-	// @Log
-
-	if (process->executableNode) {
-		// Close the handle to the executable node.
-		CloseHandleToObject(process->executableNode, KERNEL_OBJECT_NODE, ES_FILE_READ);
-		process->executableNode = nullptr;
-	}
-
-	// Destroy the process's handle table, if it hasn't already been destroyed.
-	// For most processes, the handle table is destroyed when the last thread terminates.
-	process->handleTable.Destroy();
-
-	// Free all the remaining messages in the message queue.
-	// This is done after closing all handles, since closing handles can generate messages.
-	process->messageQueue.messages.Free();
-
-	if (process->blockShutdown) {
-		if (1 == __sync_fetch_and_sub(&scheduler.blockShutdownProcessCount, 1)) {
-			// If this is the last process to exit, set the allProcessesTerminatedEvent.
-			KEventSet(&scheduler.allProcessesTerminatedEvent);
-		}
-	}
-
-	// Free the process.
-	MMSpaceCloseReference(process->vmm);
-	PoolRemove(&scheduler.processPool, process); 
 }
 
 bool OpenHandleToObject(void *object, KernelObjectType type, uint32_t flags = 0) {
@@ -5186,7 +3631,8 @@ bool OpenHandleToObject(void *object, KernelObjectType type, uint32_t flags = 0)
 		} break;
 
 		case KERNEL_OBJECT_NODE: {
-			failed = ES_SUCCESS != FSNodeOpenHandle((KNode *) object, flags, FS_NODE_OPEN_HANDLE_STANDARD);
+			//failed = ES_SUCCESS != FSNodeOpenHandle((KNode *) object, flags, FS_NODE_OPEN_HANDLE_STANDARD);
+            TODO();
 		} break;
 
 		case KERNEL_OBJECT_PIPE: {
@@ -5198,7 +3644,8 @@ bool OpenHandleToObject(void *object, KernelObjectType type, uint32_t flags = 0)
 		} break;
 
 		case KERNEL_OBJECT_DEVICE: {
-			KDeviceOpenHandle((KDevice *) object);
+			//KDeviceOpenHandle((KDevice *) object);
+            TODO();
 		} break;
 
 		default: {
@@ -5392,201 +3839,22 @@ extern "C" MMRegion *MMReserve(MMSpace *space, size_t bytes, unsigned flags, uin
 extern "C" void MMPhysicalInsertFreePagesStart();
 extern "C" void MMPhysicalInsertFreePagesEnd();
 
-#define CC_SECTION_BYTES                          (ClampIntptr(0, 1024L * 1024 * 1024, pmm.commitFixedLimit * K_PAGE_SIZE / 4))
-
 inline intptr_t ClampIntptr(intptr_t low, intptr_t high, intptr_t integer) {
 	if (integer < low) return low;
 	if (integer > high) return high;
 	return integer;
 }
 
-bool CCWriteBehindSection() {
-	CCActiveSection *section = nullptr;
-	KMutexAcquire(&activeSectionManager.mutex);
-
-	if (activeSectionManager.modifiedList.count) {
-		section = activeSectionManager.modifiedList.firstItem->thisItem;
-		CCWriteSectionPrepare(section);
-	}
-
-	KMutexRelease(&activeSectionManager.mutex);
-
-	if (section) {
-		CCWriteSection(section);
-		return true;
-	} else {
-		return false;
-	}
-}
-
-void CCWriteBehindThread() {
-	uintptr_t lastWriteMs = 0;
-
-	while (true) {
-#if 0
-		KEventWait(&activeSectionManager.modifiedNonEmpty);
-
-		if (MM_AVAILABLE_PAGES() > MM_LOW_AVAILABLE_PAGES_THRESHOLD && !scheduler.shutdown) {
-			// If there are sufficient available pages, wait before we start writing sections.
-			KEventWait(&pmm.availableLow, CC_WAIT_FOR_WRITE_BEHIND);
-		}
-
-		while (CCWriteBehindSection());
-#else
-		// Wait until the modified list is non-empty.
-		KEventWait(&activeSectionManager.modifiedNonEmpty); 
-
-		if (lastWriteMs < CC_WAIT_FOR_WRITE_BEHIND) {
-			// Wait for a reason to want to write behind.
-			// - The CC_WAIT_FOR_WRITE_BEHIND timer expires.
-			// - The number of available page frames is low (pmm.availableLow).
-			// - The system is shutting down and so the cache must be flushed (scheduler.allProcessesTerminatedEvent).
-			// - The modified list is getting full (activeSectionManager.modifiedGettingFull).
-			KTimer timer = {};
-			KTimerSet(&timer, CC_WAIT_FOR_WRITE_BEHIND - lastWriteMs);
-			KEvent *events[] = { &timer.event, &pmm.availableLow, &scheduler.allProcessesTerminatedEvent, &activeSectionManager.modifiedGettingFull };
-			KEventWaitMultiple(events, sizeof(events) / sizeof(events[0]));
-			KTimerRemove(&timer);
-		}
-
-		// Write back 1/CC_WRITE_BACK_DIVISORth of the modified list.
-		lastWriteMs = scheduler.timeMs;
-		KMutexAcquire(&activeSectionManager.mutex);
-		uintptr_t writeCount = (activeSectionManager.modifiedList.count + CC_WRITE_BACK_DIVISOR - 1) / CC_WRITE_BACK_DIVISOR;
-		KMutexRelease(&activeSectionManager.mutex);
-		while (writeCount && CCWriteBehindSection()) writeCount--;
-		lastWriteMs = scheduler.timeMs - lastWriteMs;
-#endif
-	}
-}
-
-void CCInitialise() {
-	activeSectionManager.sectionCount = CC_SECTION_BYTES / CC_ACTIVE_SECTION_SIZE;
-	activeSectionManager.sections = (CCActiveSection *) EsHeapAllocate(activeSectionManager.sectionCount * sizeof(CCActiveSection), true, K_FIXED);
-
-	KMutexAcquire(&kernelMMSpace->reserveMutex);
-	activeSectionManager.baseAddress = (uint8_t *) MMReserve(kernelMMSpace, activeSectionManager.sectionCount * CC_ACTIVE_SECTION_SIZE, MM_REGION_CACHE)->baseAddress;
-	KMutexRelease(&kernelMMSpace->reserveMutex);
-
-	for (uintptr_t i = 0; i < activeSectionManager.sectionCount; i++) {
-		activeSectionManager.sections[i].listItem.thisItem = &activeSectionManager.sections[i];
-		activeSectionManager.lruList.InsertEnd(&activeSectionManager.sections[i].listItem);
-	}
-
-	// @Log
-
-	KEventSet(&activeSectionManager.modifiedNonFull);
-	activeSectionManager.writeBackThread = ThreadSpawn("CCWriteBehind", (uintptr_t) CCWriteBehindThread, 0, ES_FLAGS_DEFAULT);
-	activeSectionManager.writeBackThread->isPageGenerator = true;
-}
-
-extern "C" void PMZero(uintptr_t *pages, size_t pageCount, bool contiguous);
-extern "C" void *MMMapPhysical(MMSpace *space, uintptr_t offset, size_t bytes, uint64_t caching);
-extern "C" void MMPhysicalInsertZeroedPage(uintptr_t page);
 extern "C" void MMZeroPageThread();
 extern "C" void MMObjectCacheTrimThread();
 extern "C" void MMBalanceThread();
-extern "C" void *MMMapShared(MMSpace *space, MMSharedRegion *sharedRegion, uintptr_t offset, size_t bytes, uint32_t additionalFlags = ES_FLAGS_DEFAULT, void *baseAddress = nullptr);
-extern "C" bool MMFaultRange(uintptr_t address, uintptr_t byteCount, uint32_t flags = ES_FLAGS_DEFAULT);
 
-void MMInitialise() {
-	{
-		// Initialise coreMMSpace and kernelMMSpace.
-        mmCoreRegions = (MMRegion*)MM_CORE_REGIONS_START;
-		mmCoreRegions[0].core.used = false;
-		mmCoreRegionCount = 1;
-		MMArchInitialise();
-
-		MMRegion *region = (MMRegion *) EsHeapAllocate(sizeof(MMRegion), true, K_CORE);
-		region->baseAddress = MM_KERNEL_SPACE_START; 
-		region->pageCount = MM_KERNEL_SPACE_SIZE / K_PAGE_SIZE;
-		TreeInsert(&kernelMMSpace->freeRegionsBase, &region->itemBase, region, MakeShortKey(region->baseAddress));
-		TreeInsert(&kernelMMSpace->freeRegionsSize, &region->itemSize, region, MakeShortKey(region->pageCount), AVL_DUPLICATE_KEYS_ALLOW);
-	}
-
-	{
-		// Initialise physical memory management.
-
-		KMutexAcquire(&kernelMMSpace->reserveMutex);
-		pmm.pmManipulationRegion = (void *) MMReserve(kernelMMSpace, PHYSICAL_MEMORY_MANIPULATION_REGION_PAGES * K_PAGE_SIZE, ES_FLAGS_DEFAULT)->baseAddress; 
-		KMutexRelease(&kernelMMSpace->reserveMutex);
-
-		// 1 extra for the top page, then round up so the page bitset is byte-aligned.
-		uintptr_t pageFrameDatabaseCount = (MMArchGetPhysicalMemoryHighest() + (K_PAGE_SIZE << 3)) >> K_PAGE_BITS;
-		pmm.pageFrames = (MMPageFrame *) MMStandardAllocate(kernelMMSpace, pageFrameDatabaseCount * sizeof(MMPageFrame), MM_REGION_FIXED);
-		pmm.freeOrZeroedPageBitset.Initialise(pageFrameDatabaseCount, true);
-		pmm.pageFrameDatabaseCount = pageFrameDatabaseCount; // Only set this after the database is ready, or it may be accessed mid-allocation!
-
-		MMPhysicalInsertFreePagesStart();
-		uint64_t commitLimit = MMArchPopulatePageFrameDatabase();
-		MMPhysicalInsertFreePagesEnd();
-		pmm.pageFrameDatabaseInitialised = true;
-
-		pmm.commitLimit = pmm.commitFixedLimit = commitLimit;
-		// @Log
-	}
-
-	{
-		// Initialise file cache.
-
-		CCInitialise();
-	}
-
-	{
-		// Create threads.
-
-		pmm.zeroPageEvent.autoReset = true;
-		MMCommit(PHYSICAL_MEMORY_MANIPULATION_REGION_PAGES * K_PAGE_SIZE, true);
-		pmm.zeroPageThread = ThreadSpawn("MMZero", (uintptr_t) MMZeroPageThread, 0, SPAWN_THREAD_LOW_PRIORITY);
-		ThreadSpawn("MMBalance", (uintptr_t) MMBalanceThread, 0, ES_FLAGS_DEFAULT)->isPageGenerator = true;
-		ThreadSpawn("MMObjTrim", (uintptr_t) MMObjectCacheTrimThread, 0, ES_FLAGS_DEFAULT);
-	}
-
-	{
-		// Create the global data shared region.
-
-        mmGlobalDataRegion = MMSharedCreateRegion(sizeof(GlobalData), false, 0);
-		globalData = (GlobalData *) MMMapShared(kernelMMSpace, mmGlobalDataRegion, 0, sizeof(GlobalData), MM_REGION_FIXED);
-		MMFaultRange((uintptr_t) globalData, sizeof(GlobalData), MM_HANDLE_PAGE_FAULT_FOR_SUPERVISOR);
-	}
+extern "C" void SpawnMemoryThreads()
+{
+    pmm.zeroPageThread = ThreadSpawn("MMZero", (uintptr_t) MMZeroPageThread, 0, SPAWN_THREAD_LOW_PRIORITY);
+    ThreadSpawn("MMBalance", (uintptr_t) MMBalanceThread, 0, ES_FLAGS_DEFAULT)->isPageGenerator = true;
+    ThreadSpawn("MMObjTrim", (uintptr_t) MMObjectCacheTrimThread, 0, ES_FLAGS_DEFAULT);
 }
-
-#define SIGNATURE_RSDP (0x2052545020445352)
-#define SIGNATURE_RSDT (0x54445352)
-#define SIGNATURE_XSDT (0x54445358)
-#define SIGNATURE_MADT (0x43495041)
-#define SIGNATURE_FADT (0x50434146)
-#define SIGNATURE_HPET (0x54455048)
-
-struct RootSystemDescriptorPointer {
-	uint64_t signature;
-	uint8_t checksum;
-	char OEMID[6];
-	uint8_t revision;
-	uint32_t rsdtAddress;
-	uint32_t length;
-	uint64_t xsdtAddress;
-	uint8_t extendedChecksum;
-	uint8_t reserved[3];
-};
-
-struct _ACPIDescriptorTable {
-#define ACPI_DESCRIPTOR_TABLE_HEADER_LENGTH (36)
-	uint32_t signature;
-	uint32_t length;
-	uint64_t id;
-	uint64_t tableID;
-	uint32_t oemRevision;
-	uint32_t creatorID;
-	uint32_t creatorRevision;
-};
-typedef _ACPIDescriptorTable ACPIDescriptorTable __attribute__((aligned(1)));
-
-struct _MultipleAPICDescriptionTable {
-	uint32_t lapicAddress; 
-	uint32_t flags;
-};
-typedef _MultipleAPICDescriptionTable MultipleAPICDescriptionTable __attribute__((aligned(1)));
 
 struct ArchCPU {
 	uint8_t processorID, kernelProcessorID;
@@ -5595,233 +3863,6 @@ struct ArchCPU {
 	uint64_t_unaligned *kernelStack;
 	CPULocalStorage *local;
 };
-
-struct ACPIIoApic {
-	uint8_t id;
-	uint32_t volatile *address;
-	uint32_t gsiBase;
-};
-
-struct ACPIInterruptOverride {
-	uint8_t sourceIRQ;
-	uint32_t gsiNumber;
-	bool activeLow, levelTriggered;
-};
-
-struct ACPILapicNMI {
-	uint8_t processor; // 0xFF for all processors
-	uint8_t lintIndex;
-	bool activeLow, levelTriggered;
-};
-
-struct ACPI {
-	size_t processorCount;
-	size_t ioapicCount;
-	size_t interruptOverrideCount;
-	size_t lapicNMICount;
-
-	ArchCPU processors[256];
-	ACPIIoApic ioApics[16];
-	ACPIInterruptOverride interruptOverrides[256];
-	ACPILapicNMI lapicNMIs[32];
-
-	RootSystemDescriptorPointer *rsdp;
-	ACPIDescriptorTable *madt;
-
-	volatile uint32_t *lapicAddress;
-	size_t lapicTicksPerMs;
-
-	bool ps2ControllerUnavailable;
-	bool vgaControllerUnavailable;
-	uint8_t centuryRegisterIndex;
-
-	volatile uint64_t *hpetBaseAddress;
-	uint64_t hpetPeriod; // 10^-15 seconds.
-
-	KDevice *computer;
-};
-
-extern ACPI acpi;
-
-extern "C" uint32_t ACPIIoApicReadRegister(ACPIIoApic *apic, uint32_t reg);
-extern "C" void ACPICheckTable(const ACPIDescriptorTable *table);
-extern "C" void *ACPIMapPhysicalMemory(uintptr_t physicalAddress, size_t length);
-
-uintptr_t GetBootloaderInformationOffset();
-extern uintptr_t bootloader_information_offset;
-
-extern "C" uintptr_t ArchFindRootSystemDescriptorPointer();
-
-extern "C" void ACPIParseTables()
-{
-    acpi.rsdp = (RootSystemDescriptorPointer *) MMMapPhysical(kernelMMSpace, ArchFindRootSystemDescriptorPointer(), 16384, ES_FLAGS_DEFAULT);
-
-    ACPIDescriptorTable* madtHeader = nullptr;
-    ACPIDescriptorTable* sdt = nullptr; 
-    bool isXSDT = false;
-
-    if (acpi.rsdp) {
-        if (acpi.rsdp->revision == 2 && acpi.rsdp->xsdtAddress) {
-            isXSDT = true;
-            sdt = (ACPIDescriptorTable *) acpi.rsdp->xsdtAddress;
-        } else {
-            isXSDT = false;
-            sdt = (ACPIDescriptorTable *) (uintptr_t) acpi.rsdp->rsdtAddress;
-        }
-
-        sdt = (ACPIDescriptorTable *) MMMapPhysical(kernelMMSpace, (uintptr_t) sdt, 16384, ES_FLAGS_DEFAULT);
-    } else {
-        KernelPanic("ACPIInitialise - Could not find supported root system descriptor pointer.\nACPI support is required.\n");
-    }
-
-    if (((sdt->signature == SIGNATURE_XSDT && isXSDT) || (sdt->signature == SIGNATURE_RSDT && !isXSDT)) 
-            && sdt->length < 16384 && !EsMemorySumBytes((uint8_t *) sdt, sdt->length)) {
-        // The SDT is valid.
-    } else {
-        KernelPanic("ACPIInitialise - Could not find a valid or supported system descriptor table.\nACPI support is required.\n");
-    }
-
-    size_t tablesCount = (sdt->length - sizeof(ACPIDescriptorTable)) >> (isXSDT ? 3 : 2);
-
-    if (tablesCount < 1) {
-        KernelPanic("ACPIInitialise - The system descriptor table contains an unsupported number of tables (%d).\n", tablesCount);
-    } 
-
-    uintptr_t tableListAddress = (uintptr_t) sdt + ACPI_DESCRIPTOR_TABLE_HEADER_LENGTH;
-
-    // @Log
-
-    for (uintptr_t i = 0; i < tablesCount; i++) {
-        uintptr_t address;
-
-        if (isXSDT) {
-            uint64_t_unaligned* ptr = (uint64_t*) tableListAddress;
-            address = ptr[i];
-        } else {
-            uint32_t_unaligned* ptr = (uint32_t*) tableListAddress;
-            address = ptr[i];
-        }
-
-        ACPIDescriptorTable *header = (ACPIDescriptorTable *) MMMapPhysical(kernelMMSpace, address, sizeof(ACPIDescriptorTable), ES_FLAGS_DEFAULT);
-
-        // @Log
-
-        if (header->signature == SIGNATURE_MADT) {
-            madtHeader = (ACPIDescriptorTable *) MMMapPhysical(kernelMMSpace, address, header->length, ES_FLAGS_DEFAULT);
-            ACPICheckTable(madtHeader);
-        } else if (header->signature == SIGNATURE_FADT) {
-            ACPIDescriptorTable *fadt = (ACPIDescriptorTable *) MMMapPhysical(kernelMMSpace, address, header->length, ES_FLAGS_DEFAULT);
-            ACPICheckTable(fadt);
-            
-            if (header->length > 109) {
-                acpi.centuryRegisterIndex = ((uint8_t *) fadt)[108];
-                uint8_t bootArchitectureFlags = ((uint8_t *) fadt)[109];
-                acpi.ps2ControllerUnavailable = ~bootArchitectureFlags & (1 << 1);
-                acpi.vgaControllerUnavailable =  bootArchitectureFlags & (1 << 2);
-                // @Log
-            }
-
-            MMFree(kernelMMSpace, fadt);
-        } else if (header->signature == SIGNATURE_HPET) {
-            ACPIDescriptorTable *hpet = (ACPIDescriptorTable *) MMMapPhysical(kernelMMSpace, address, header->length, ES_FLAGS_DEFAULT);
-            ACPICheckTable(hpet);
-            
-            if (header->length > 52 && ((uint8_t *) header)[52] == 0) {
-                uint64_t baseAddress;
-                EsMemoryCopy(&baseAddress, (uint8_t *) header + 44, sizeof(uint64_t));
-                // @Log
-                acpi.hpetBaseAddress = (uint64_t *) MMMapPhysical(kernelMMSpace, baseAddress, 1024, ES_FLAGS_DEFAULT);
-
-                if (acpi.hpetBaseAddress) {
-                    acpi.hpetBaseAddress[2] |= 1; // Start the main counter.
-
-                    acpi.hpetPeriod = acpi.hpetBaseAddress[0] >> 32;
-                    uint8_t revisionID = acpi.hpetBaseAddress[0] & 0xFF;
-                    uint64_t initialCount = acpi.hpetBaseAddress[30];
-
-                    // @Log
-                }
-            }
-
-            MMFree(kernelMMSpace, hpet);
-        }
-
-        MMFree(kernelMMSpace, header);
-    }
-
-    MultipleAPICDescriptionTable *madt = (MultipleAPICDescriptionTable *) ((uint8_t *) madtHeader + ACPI_DESCRIPTOR_TABLE_HEADER_LENGTH);
-
-    if (!madt) {
-        KernelPanic("ACPIInitialise - Could not find the MADT table.\nThis is required to use the APIC.\n");
-    }
-
-    uintptr_t length = madtHeader->length - ACPI_DESCRIPTOR_TABLE_HEADER_LENGTH - sizeof(MultipleAPICDescriptionTable);
-    uintptr_t startLength = length;
-    uint8_t *data = (uint8_t *) (madt + 1);
-
-#ifdef ES_ARCH_X86_64
-    acpi.lapicAddress = (uint32_t volatile *) ACPIMapPhysicalMemory(madt->lapicAddress, 0x10000);
-#endif
-
-    while (length && length <= startLength) {
-        uint8_t entryType = data[0];
-        uint8_t entryLength = data[1];
-
-        switch (entryType) {
-            case 0: {
-                // A processor and its LAPIC.
-                if ((data[4] & 1) == 0) goto nextEntry;
-                ArchCPU *processor = acpi.processors + acpi.processorCount;
-                processor->processorID = data[2];
-                processor->apicID = data[3];
-                acpi.processorCount++;
-            } break;
-
-            case 1: {
-                // An I/O APIC.
-                acpi.ioApics[acpi.ioapicCount].id = data[2];
-                acpi.ioApics[acpi.ioapicCount].address = (uint32_t volatile *) ACPIMapPhysicalMemory(((uint32_t_unaligned *) data)[1], 0x10000);
-                ACPIIoApicReadRegister(&acpi.ioApics[acpi.ioapicCount], 0); // Make sure it's mapped.
-                acpi.ioApics[acpi.ioapicCount].gsiBase = ((uint32_t_unaligned *) data)[2];
-                acpi.ioapicCount++;
-            } break;
-
-            case 2: {
-                // An interrupt source override structure.
-                acpi.interruptOverrides[acpi.interruptOverrideCount].sourceIRQ = data[3];
-                acpi.interruptOverrides[acpi.interruptOverrideCount].gsiNumber = ((uint32_t_unaligned *) data)[1];
-                acpi.interruptOverrides[acpi.interruptOverrideCount].activeLow = (data[8] & 2) ? true : false;
-                acpi.interruptOverrides[acpi.interruptOverrideCount].levelTriggered = (data[8] & 8) ? true : false;
-                // @Log
-                acpi.interruptOverrideCount++;
-            } break;
-
-            case 4: {
-                // A non-maskable interrupt.
-                acpi.lapicNMIs[acpi.lapicNMICount].processor = data[2];
-                acpi.lapicNMIs[acpi.lapicNMICount].lintIndex = data[5];
-                acpi.lapicNMIs[acpi.lapicNMICount].activeLow = (data[3] & 2) ? true : false;
-                acpi.lapicNMIs[acpi.lapicNMICount].levelTriggered = (data[3] & 8) ? true : false;
-                acpi.lapicNMICount++;
-            } break;
-
-            default: {
-                // @Log
-            } break;
-        }
-
-        nextEntry:
-        length -= entryLength;
-        data += entryLength;
-    }
-
-    if (acpi.processorCount > 256 || acpi.ioapicCount > 16 || acpi.interruptOverrideCount > 256 || acpi.lapicNMICount > 32) {
-        KernelPanic("ACPIInitialise - Invalid number of processors (%d/%d), \n"
-                "                    I/O APICs (%d/%d), interrupt overrides (%d/%d)\n"
-                "                    and LAPIC NMIs (%d/%d)\n", 
-                acpi.processorCount, 256, acpi.ioapicCount, 16, acpi.interruptOverrideCount, 256, acpi.lapicNMICount, 32);
-    }
-}
 
 struct InterruptContext {
 	uint64_t cr2, ds;
@@ -5891,9 +3932,6 @@ const char *const exceptionInformation[] = {
 #define INTERRUPT_VECTOR_MSI_START (0x70)
 #define INTERRUPT_VECTOR_MSI_COUNT (0x40)
 
-extern volatile uintptr_t tlbShootdownVirtualAddress;
-extern volatile size_t tlbShootdownPageCount;
-
 extern volatile uintptr_t callFunctionOnAllProcessorsRemaining;
 extern "C" void CallFunctionOnAllProcessorCallbackWrapper(); // @INFO: this is to avoid ABI issues
 //
@@ -5913,17 +3951,6 @@ extern MSIHandler msiHandlers[INTERRUPT_VECTOR_MSI_COUNT];
 extern IRQHandler irqHandlers[0x40];
 extern KSpinlock irqHandlersLock; // Also for msiHandlers.
 
-extern volatile uint64_t timeStampCounterSynchronizationValue;
-
-extern PhysicalMemoryRegion *physicalMemoryRegions;
-extern size_t physicalMemoryRegionsCount;
-extern size_t physicalMemoryRegionsPagesCount;
-extern size_t physicalMemoryOriginalPagesCount;
-extern size_t physicalMemoryRegionsIndex;
-extern uintptr_t physicalMemoryHighest;
-
-extern EsUniqueIdentifier installation_ID; // The identifier of this OS installation, given to us by the bootloader.
-extern uint32_t bootloader_ID;
 
 int8_t Scheduler::GetThreadEffectivePriority(Thread *thread) {
 	KSpinlockAssertLocked(&dispatchSpinlock);

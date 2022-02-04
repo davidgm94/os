@@ -3,6 +3,8 @@ const assert = std.debug.assert;
 
 const atomic_order: std.builtin.AtomicOrder = .SeqCst;
 
+const Error = i64;
+
 fn zeroes(comptime T: type) T
 {
     @setEvalBranchQuota(100000);
@@ -4750,7 +4752,59 @@ export fn MMUnpinRegion(space: *AddressSpace, region: *Region) callconv(.C) void
 
 export var shutdownEvent: Event = undefined;
 
-extern fn MMInitialise() callconv(.C) void;
+export fn MMInitialise() callconv(.C) void
+{
+    {
+        mmCoreRegions = @intToPtr([*]Region, core_memory_region_start);
+        mmCoreRegions[0].u.core.used = false;
+        mmCoreRegionCount = 1;
+        MMArchInitialise();
+
+        const region = @intToPtr(?*Region, EsHeapAllocate(@sizeOf(Region), true, &heapCore)) orelse unreachable;
+        region.descriptor.base_address = kernel_address_space_start;
+        region.descriptor.page_count = kernel_address_space_size / page_size;
+        _ = _kernelMMSpace.free_region_base.insert(&region.u.item.base, region, region.descriptor.base_address, .panic);
+        _ = _kernelMMSpace.free_region_size.insert(&region.u.item.u.size, region, region.descriptor.page_count, .allow);
+    }
+
+    {
+        _ = _kernelMMSpace.reserve_mutex.acquire();
+        pmm.manipulation_region = @intToPtr(?*Region, (MMReserve(&_kernelMMSpace, Physical.memory_manipulation_region_page_count * page_size, Region.Flags.empty(), 0) orelse unreachable).descriptor.base_address) orelse unreachable;
+        _kernelMMSpace.reserve_mutex.release();
+
+        const pageframe_database_count = (physicalMemoryHighest + (page_size << 3)) >> page_bit_count;
+        pmm.pageframes = @intToPtr(?[*]PageFrame, MMStandardAllocate(&_kernelMMSpace, pageframe_database_count * @sizeOf(PageFrame), Region.Flags.from_flag(.fixed), 0, true)) orelse unreachable;
+        _ = BitsetInitialise(&pmm.free_or_zeroed_page_bitset, pageframe_database_count, true);
+        pmm.pageframeDatabaseCount = pageframe_database_count;
+
+        MMPhysicalInsertFreePagesStart();
+        const commit_limit = MMArchPopulatePageFrameDatabase();
+        MMPhysicalInsertFreePagesEnd();
+        pmm.pageframeDatabaseInitialised = true;
+
+        pmm.commit_limit = @intCast(i64, commit_limit);
+        pmm.commit_fixed_limit = pmm.commit_limit;
+        // @Log
+    }
+
+    {
+    }
+
+    {
+        pmm.zero_page_event.auto_reset.write_volatile(true);
+        _ = MMCommit(Physical.memory_manipulation_region_page_count * page_size, true);
+        SpawnMemoryThreads();
+    }
+
+    {
+        mmGlobalDataRegion = MMSharedCreateRegion(@sizeOf(GlobalData), false, 0) orelse unreachable;
+        globalData = @intToPtr(?*GlobalData, MMMapShared(&_kernelMMSpace, mmGlobalDataRegion, 0, @sizeOf(GlobalData), Region.Flags.from_flag(.fixed), 0)) orelse unreachable;
+        _ = MMFaultRange(@ptrToInt(globalData), @sizeOf(GlobalData), HandlePageFaultFlags.from_flag(.for_supervisor));
+    }
+}
+
+extern fn SpawnMemoryThreads() callconv(.C) void;
+
 extern fn CreateMainThread() callconv(.C) void;
 export fn KThreadCreate(name: [*:0]const u8, entry: fn (u64) callconv(.C) void, argument: u64) callconv(.C) bool
 {
@@ -5388,131 +5442,6 @@ export fn MMDecommitRange(space: *AddressSpace, region: *Region, page_offset: u6
     return true;
 }
 
-const ActiveSection = extern struct
-{
-    load_complete_event: Event,
-    write_complete_event: Event,
-    list_item: LinkedList(ActiveSection).Item,
-    offset: u64,
-    cache: ?*CCSpace,
-    accessors: u64,
-    loading: Volatile(bool),
-    writing: Volatile(bool),
-    modified: Volatile(bool),
-    flush: Volatile(bool),
-    referenced_page_count: u64,
-    referenced_pages: [ActiveSection.size / page_size / 8]u8,
-    modified_pages: [ActiveSection.size / page_size / 8]u8,
-
-    const size = 262144;
-
-    const Manager = extern struct
-    {
-        sections: [*]ActiveSection,
-        section_count: u64,
-        base_address: u64,
-        mutex: Mutex,
-        LRU_list: LinkedList(ActiveSection),
-        modified_list: LinkedList(ActiveSection),
-        modified_non_empty_event: Event,
-        modified_non_full_event: Event,
-        modified_getting_full_event: Event,
-        write_back_thread: ?*Thread,
-    };
-};
-
-export var activeSectionManager: ActiveSection.Manager = undefined;
-
-const Error = i64;
-
-const CCSpace = extern struct
-{
-    cached_sections_mutex: Mutex,
-    cached_sections: Array(CCCachedSection, .core),
-    active_sections_mutex: Mutex,
-    active_sections: Array(CCActiveSectionReference, .core),
-    write_complete_event: Event,
-    callbacks: ?*Callbacks,
-
-    const Callbacks = extern struct
-    {
-        read_into: fn(file_cache: *CCSpace, buffer: u64, offset: u64, count: u64) callconv(.C) Error,
-        write_from: fn(file_cache: *CCSpace, buffer: u64, offset: u64, count: u64) callconv(.C) Error,
-    };
-};
-
-const CCCachedSection = extern struct
-{
-    offset: u64,
-    page_count: u64,
-    mapped_region_count: Volatile(u64),
-    data: ?[*]u64,
-};
-
-export fn CCDereferenceActiveSection(section: *ActiveSection, starting_page: u64) callconv(.C) void
-{
-    activeSectionManager.mutex.assert_locked();
-
-    if (starting_page == 0)
-    {
-        MMArchUnmapPages(&_kernelMMSpace, activeSectionManager.base_address + ((@ptrToInt(section) - @ptrToInt(activeSectionManager.sections)) / @sizeOf(ActiveSection)) * ActiveSection.size, ActiveSection.size / page_size, UnmapPagesFlags.from_flag(.balance_file), 0, null);
-        std.mem.set(u8, section.referenced_pages[0..], 0);
-        std.mem.set(u8, section.modified_pages[0..], 0);
-        section.referenced_page_count = 0;
-    }
-    else
-    {
-        MMArchUnmapPages(&_kernelMMSpace, activeSectionManager.base_address + ((@ptrToInt(section) - @ptrToInt(activeSectionManager.sections)) / @sizeOf(ActiveSection)) * ActiveSection.size + starting_page * page_size, ActiveSection.size / page_size - starting_page, UnmapPagesFlags.from_flag(.balance_file), 0, null);
-
-        var i = starting_page;
-        while (i < ActiveSection.size / page_size) : (i += 1)
-        {
-            const index = i >> 3;
-            const shifter = @as(u8, 1) << @truncate(u3, i);
-
-            if (section.referenced_pages[index] & shifter != 0)
-            {
-                section.referenced_pages[index] &= ~shifter;
-                section.modified_pages[index] &= ~shifter;
-                section.referenced_page_count -= 1;
-            }
-        }
-    }
-}
-
-const CCActiveSectionReference = extern struct
-{
-    offset: u64,
-    index: u64,
-};
-
-export fn CCFindCachedSectionContaining(cache: *CCSpace, section_offset: u64) ?*CCCachedSection
-{
-    cache.cached_sections_mutex.assert_locked();
-
-    if (cache.cached_sections.length() == 0) return null;
-
-    var low: i64 = 0;
-    var high: i64 = @intCast(i64, cache.cached_sections.length()) - 1;
-
-    var found = false;
-    var cached_section: *CCCachedSection = undefined;
-
-    while (low <= high)
-    {
-        const i = low + @divTrunc(high - low,  2);
-        cached_section = &cache.cached_sections.ptr.?[@intCast(u64, i)];
-        if (cached_section.offset + cached_section.page_count * page_size <= section_offset) low = i + 1
-        else if (cached_section.offset > section_offset) high = i - 1
-        else
-        {
-            found = true;
-            break;
-        }
-    }
-
-    return if (found) cached_section else null;
-}
 
 fn round_down(comptime T: type, value: T, divisor: T) T
 {
@@ -6428,6 +6357,7 @@ export fn MMPhysicalAllocate(flags: Physical.Flags, count: u64, alignment: u64, 
     return 0;
 }
 
+extern fn BitsetInitialise(bitset: *Bitset, count: u64, map_all: bool) callconv(.C) u64;
 extern fn BitsetGet(bitset: *Bitset, count: u64, alignment: u64, below: u64) callconv(.C) u64;
 extern fn BitsetTake(bitset: *Bitset, index: u64) callconv(.C) void;
 extern fn BitsetPut(bitset: *Bitset, index: u64) callconv(.C) void;
@@ -6658,18 +6588,23 @@ export fn MMBalanceThread() callconv(.C) void
             }
             else if (region.flags.contains(.cache))
             {
-                _ = activeSectionManager.mutex.acquire();
+                TODO();
+                //_ = activeSectionManager.mutex.acquire();
 
-                var maybe_item2 = activeSectionManager.LRU_list.first;
-                while (maybe_item2 != null and pmm.get_available_page_count() < target_available_pages)
-                {
-                    const item2 = maybe_item2.?;
-                    const section = item2.value.?;
-                    if (section.cache != null and section.referenced_page_count != 0) CCDereferenceActiveSection(section, 0);
-                    maybe_item2 = item2.next;
-                }
+                //var maybe_item2 = activeSectionManager.LRU_list.first;
+                //while (maybe_item2 != null and pmm.get_available_page_count() < target_available_pages)
+                //{
+                    //const item2 = maybe_item2.?;
+                    //const section = item2.value.?;
+                    //if (section.cache != null and section.referenced_page_count != 0) 
+                    //{
+                        //TODO();
+                        //// CCDereferenceActiveSection(section, 0);
+                    //}
+                    //maybe_item2 = item2.next;
+                //}
 
-                activeSectionManager.mutex.release();
+                //activeSectionManager.mutex.release();
             }
 
             region.data.map_mutex.release();
@@ -6873,183 +6808,183 @@ const ACPI = extern struct
         flags: u32,
     };
 
-    //pub fn parse_tables(self: *@This()) void
-    //{
-        //var is_XSDT = false;
-        //const sdt = blk:
-        //{
-            //if (@intToPtr(?*RootSystemDescriptorPointer, MMMapPhysical(&_kernelMMSpace, find_RSDP(), 16384, Region.Flags.empty()))) |rsdp|
-            //{
-                //self.rsdp = rsdp;
+    pub fn parse_tables(self: *@This()) void
+    {
+        var is_XSDT = false;
+        const sdt = blk:
+        {
+            if (@intToPtr(?*RootSystemDescriptorPointer, MMMapPhysical(&_kernelMMSpace, ArchFindRootSystemDescriptorPointer(), 16384, Region.Flags.empty()))) |rsdp|
+            {
+                self.rsdp = rsdp;
 
-                //is_XSDT = self.rsdp.revision == 2 and self.rsdp.XSDT_address != 0;
-                //const sdt_physical_address =
-                    //if (is_XSDT) self.rsdp.XSDT_address
-                    //else self.rsdp.RSDT_address;
+                is_XSDT = self.rsdp.revision == 2 and self.rsdp.XSDT_address != 0;
+                const sdt_physical_address =
+                    if (is_XSDT) self.rsdp.XSDT_address
+                    else self.rsdp.RSDT_address;
 
-                //break :blk @intToPtr(*align(1) DescriptorTable, MMMapPhysical(&_kernelMMSpace, sdt_physical_address, 16384, Region.Flags.empty()));
-            //}
-            //else
-            //{
-                //KernelPanic("unable to get RSDP");
-            //}
-        //};
+                break :blk @intToPtr(*align(1) DescriptorTable, MMMapPhysical(&_kernelMMSpace, sdt_physical_address, 16384, Region.Flags.empty()));
+            }
+            else
+            {
+                KernelPanic("unable to get RSDP");
+            }
+        };
 
-        //const is_valid = ((sdt.signature == XSDT_signature and is_XSDT) or (sdt.signature == RSDT_signature and !is_XSDT)) and sdt.length < 16384 and EsMemorySumBytes(@ptrCast([*]u8, sdt), sdt.length) == 0;
+        const is_valid = ((sdt.signature == XSDT_signature and is_XSDT) or (sdt.signature == RSDT_signature and !is_XSDT)) and sdt.length < 16384 and EsMemorySumBytes(@ptrCast([*]u8, sdt), sdt.length) == 0;
 
-        //if (!is_valid) KernelPanic("system descriptor pointer is invalid");
+        if (!is_valid) KernelPanic("system descriptor pointer is invalid");
 
-        //const table_count = (sdt.length - @sizeOf(DescriptorTable)) >> (@as(u2, 2) + @boolToInt(is_XSDT));
+        const table_count = (sdt.length - @sizeOf(DescriptorTable)) >> (@as(u2, 2) + @boolToInt(is_XSDT));
 
-        //if (table_count == 0) KernelPanic("no tables found");
+        if (table_count == 0) KernelPanic("no tables found");
 
-        //const table_list_address = @ptrToInt(sdt) + DescriptorTable.header_length;
+        const table_list_address = @ptrToInt(sdt) + DescriptorTable.header_length;
 
-        //var found_madt = false;
-        //var i: u64 = 0;
+        var found_madt = false;
+        var i: u64 = 0;
 
-        //while (i < table_count) : (i += 1)
-        //{
-            //const address =
-                //if (is_XSDT) @intToPtr([*]align(1) u64, table_list_address)[i]
-                //else @intToPtr([*]align(1) u32, table_list_address)[i];
+        while (i < table_count) : (i += 1)
+        {
+            const address =
+                if (is_XSDT) @intToPtr([*]align(1) u64, table_list_address)[i]
+                else @intToPtr([*]align(1) u32, table_list_address)[i];
 
-            //const header = @intToPtr(*align(1) DescriptorTable, MMMapPhysical(&_kernelMMSpace, address, @sizeOf(DescriptorTable), Region.Flags.empty()));
+            const header = @intToPtr(*align(1) DescriptorTable, MMMapPhysical(&_kernelMMSpace, address, @sizeOf(DescriptorTable), Region.Flags.empty()));
 
-            //switch (header.signature)
-            //{
-                //MADT_signature =>
-                //{
-                    //const madt_header = @intToPtr(*align(1) DescriptorTable, MMMapPhysical(&_kernelMMSpace, address, header.length, Region.Flags.empty()));
-                    //madt_header.check();
+            switch (header.signature)
+            {
+                MADT_signature =>
+                {
+                    const madt_header = @intToPtr(*align(1) DescriptorTable, MMMapPhysical(&_kernelMMSpace, address, header.length, Region.Flags.empty()));
+                    madt_header.check();
 
-                    //if (@intToPtr(?*align(1) MultipleAPICDescriptionTable, @ptrToInt(madt_header) + DescriptorTable.header_length)) |madt|
-                    //{
-                        //found_madt = true;
+                    if (@intToPtr(?*align(1) MultipleAPICDescriptionTable, @ptrToInt(madt_header) + DescriptorTable.header_length)) |madt|
+                    {
+                        found_madt = true;
 
-                        //const start_length = madt_header.length - DescriptorTable.header_length - @sizeOf(MultipleAPICDescriptionTable);
-                        //var length = start_length;
-                        //var madt_bytes = @intToPtr([*]u8, @ptrToInt(madt) + @sizeOf(MultipleAPICDescriptionTable));
-                        //self.LAPIC_address = @intToPtr([*]volatile u32, map_physical_memory(madt.LAPIC_address, 0x10000));
-                        //_ = length;
-                        //_ = madt_bytes;
+                        const start_length = madt_header.length - DescriptorTable.header_length - @sizeOf(MultipleAPICDescriptionTable);
+                        var length = start_length;
+                        var madt_bytes = @intToPtr([*]u8, @ptrToInt(madt) + @sizeOf(MultipleAPICDescriptionTable));
+                        self.LAPIC_address = @intToPtr([*]volatile u32, map_physical_memory(madt.LAPIC_address, 0x10000));
+                        _ = length;
+                        _ = madt_bytes;
 
-                        //var entry_length: u8 = undefined;
+                        var entry_length: u8 = undefined;
 
-                        //while (length != 0 and length <= start_length) :
-                            //({
-                                //length -= entry_length;
-                                //madt_bytes = @intToPtr([*]u8, @ptrToInt(madt_bytes) + entry_length);
-                            //})
-                        //{
-                            //const entry_type = madt_bytes[0];
-                            //entry_length = madt_bytes[1];
+                        while (length != 0 and length <= start_length) :
+                            ({
+                                length -= entry_length;
+                                madt_bytes = @intToPtr([*]u8, @ptrToInt(madt_bytes) + entry_length);
+                            })
+                        {
+                            const entry_type = madt_bytes[0];
+                            entry_length = madt_bytes[1];
 
-                            //switch (entry_type)
-                            //{
-                                //0 =>
-                                //{
-                                    //if (madt_bytes[4] & 1 == 0) continue;
-                                    //const cpu = &self.processors[self.processor_count];
-                                    //cpu.processor_ID = madt_bytes[2];
-                                    //cpu.APIC_ID = madt_bytes[3];
-                                    //self.processor_count += 1;
-                                //},
-                                //1 =>
-                                //{
-                                    //const madt_u32 = @ptrCast([*]align(1)u32, madt_bytes);
-                                    //var io_apic = &self.IO_APICs[self.IO_APIC_count];
-                                    //io_apic.id = madt_bytes[2];
-                                    //io_apic.address = @intToPtr([*]volatile u32, map_physical_memory(madt_u32[1], 0x10000));
-                                    //// make sure it's mapped
-                                    //_ = io_apic.read(0);
-                                    //io_apic.GSI_base = madt_u32[2];
-                                    //self.IO_APIC_count += 1;
-                                //},
-                                //2 =>
-                                //{
-                                    //const madt_u32 = @ptrCast([*]align(1)u32, madt_bytes);
-                                    //const interrupt_override = &self.interrupt_overrides[self.interrupt_override_count];
-                                    //interrupt_override.source_IRQ = madt_bytes[3];
-                                    //interrupt_override.GSI_number = madt_u32[1];
-                                    //interrupt_override.active_low = madt_bytes[8] & 2 != 0;
-                                    //interrupt_override.level_triggered = madt_bytes[8] & 8 != 0;
-                                    //self.interrupt_override_count += 1;
-                                //},
-                                //4 =>
-                                //{
-                                    //const nmi = &self.LAPIC_NMIs[self.LAPIC_NMI_count];
-                                    //nmi.processor = madt_bytes[2];
-                                    //nmi.lint_index = madt_bytes[5];
-                                    //nmi.active_low = madt_bytes[3] & 2 != 0;
-                                    //nmi.level_triggered = madt_bytes[3] & 8 != 0;
-                                    //self.LAPIC_NMI_count += 1;
-                                //},
-                                //else => {},
-                            //}
-                        //}
+                            switch (entry_type)
+                            {
+                                0 =>
+                                {
+                                    if (madt_bytes[4] & 1 == 0) continue;
+                                    const cpu = &self.processors[self.processor_count];
+                                    cpu.processor_ID = madt_bytes[2];
+                                    cpu.APIC_ID = madt_bytes[3];
+                                    self.processor_count += 1;
+                                },
+                                1 =>
+                                {
+                                    const madt_u32 = @ptrCast([*]align(1)u32, madt_bytes);
+                                    var io_apic = &self.IO_APICs[self.IO_APIC_count];
+                                    io_apic.id = madt_bytes[2];
+                                    io_apic.address = @intToPtr([*]volatile u32, map_physical_memory(madt_u32[1], 0x10000));
+                                    // make sure it's mapped
+                                    _ = io_apic.read(0);
+                                    io_apic.GSI_base = madt_u32[2];
+                                    self.IO_APIC_count += 1;
+                                },
+                                2 =>
+                                {
+                                    const madt_u32 = @ptrCast([*]align(1)u32, madt_bytes);
+                                    const interrupt_override = &self.interrupt_overrides[self.interrupt_override_count];
+                                    interrupt_override.source_IRQ = madt_bytes[3];
+                                    interrupt_override.GSI_number = madt_u32[1];
+                                    interrupt_override.active_low = madt_bytes[8] & 2 != 0;
+                                    interrupt_override.level_triggered = madt_bytes[8] & 8 != 0;
+                                    self.interrupt_override_count += 1;
+                                },
+                                4 =>
+                                {
+                                    const nmi = &self.LAPIC_NMIs[self.LAPIC_NMI_count];
+                                    nmi.processor = madt_bytes[2];
+                                    nmi.lint_index = madt_bytes[5];
+                                    nmi.active_low = madt_bytes[3] & 2 != 0;
+                                    nmi.level_triggered = madt_bytes[3] & 8 != 0;
+                                    self.LAPIC_NMI_count += 1;
+                                },
+                                else => {},
+                            }
+                        }
 
-                        //if (self.processor_count > 256 or self.IO_APIC_count > 16 or self.interrupt_override_count > 256 or self.LAPIC_NMI_count > 32)
-                        //{
-                            //KernelPanic("wrong numbers");
-                        //}
-                    //}
-                    //else
-                    //{
-                        //KernelPanic("ACPI initialization - couldn't find the MADT table");
-                    //}
-                //},
-                //FADT_signature =>
-                //{
-                    //const fadt = @intToPtr(*align(1) DescriptorTable, MMMapPhysical(&_kernelMMSpace, address, header.length, Region.Flags.empty()));
-                    //fadt.check();
+                        if (self.processor_count > 256 or self.IO_APIC_count > 16 or self.interrupt_override_count > 256 or self.LAPIC_NMI_count > 32)
+                        {
+                            KernelPanic("wrong numbers");
+                        }
+                    }
+                    else
+                    {
+                        KernelPanic("ACPI initialization - couldn't find the MADT table");
+                    }
+                },
+                FADT_signature =>
+                {
+                    const fadt = @intToPtr(*align(1) DescriptorTable, MMMapPhysical(&_kernelMMSpace, address, header.length, Region.Flags.empty()));
+                    fadt.check();
 
-                    //if (header.length > 109)
-                    //{
-                        //const fadt_bytes = @ptrCast([*]u8, fadt);
-                        //self.century_register_index = fadt_bytes[108];
-                        //const boot_architecture_flags = fadt_bytes[109];
-                        //self.PS2_controller_unavailable = (~boot_architecture_flags & (1 << 1)) != 0;
-                        //self.VGA_controller_unavailable = (boot_architecture_flags & (1 << 2)) != 0;
-                    //}
+                    if (header.length > 109)
+                    {
+                        const fadt_bytes = @ptrCast([*]u8, fadt);
+                        self.century_register_index = fadt_bytes[108];
+                        const boot_architecture_flags = fadt_bytes[109];
+                        self.PS2_controller_unavailable = (~boot_architecture_flags & (1 << 1)) != 0;
+                        self.VGA_controller_unavailable = (boot_architecture_flags & (1 << 2)) != 0;
+                    }
 
-                    //_ = MMFree(&_kernelMMSpace, @ptrToInt(fadt), 0, false);
-                //},
-                //HPET_signature =>
-                //{
-                    //const hpet = @intToPtr(*align(1) DescriptorTable, MMMapPhysical(&_kernelMMSpace, address, header.length, Region.Flags.empty()));
-                    //hpet.check();
+                    _ = MMFree(&_kernelMMSpace, @ptrToInt(fadt), 0, false);
+                },
+                HPET_signature =>
+                {
+                    const hpet = @intToPtr(*align(1) DescriptorTable, MMMapPhysical(&_kernelMMSpace, address, header.length, Region.Flags.empty()));
+                    hpet.check();
 
-                    //const header_bytes = @ptrCast([*]u8, header);
-                    //if (header.length > 52 and header_bytes[52] == 0)
-                    //{
-                        //if (@intToPtr(?[*]volatile u64, MMMapPhysical(&_kernelMMSpace, @ptrCast(*align(1) u64, &header_bytes[44]).*, 1024, Region.Flags.empty()))) |HPET_base_address|
-                        //{
-                            //self.HPET_base_address = HPET_base_address;
-                            //self.HPET_base_address.?[2] |= 1; // start the main counter
+                    const header_bytes = @ptrCast([*]u8, header);
+                    if (header.length > 52 and header_bytes[52] == 0)
+                    {
+                        if (@intToPtr(?[*]volatile u64, MMMapPhysical(&_kernelMMSpace, @ptrCast(*align(1) u64, &header_bytes[44]).*, 1024, Region.Flags.empty()))) |HPET_base_address|
+                        {
+                            self.HPET_base_address = HPET_base_address;
+                            self.HPET_base_address.?[2] |= 1; // start the main counter
 
-                            //self.HPET_period = self.HPET_base_address.?[0] >> 32;
-                            //// @INFO: Just for logging
-                            ////const revision_ID = @truncate(u8, self.HPET_base_address[0]);
-                            ////const initial_count = self.HPET_base_address[30];
-                        //}
-                        //else
-                        //{
-                            //KernelPanic("failed to map HPET base address\n");
-                        //}
-                    //}
+                            self.HPET_period = self.HPET_base_address.?[0] >> 32;
+                            // @INFO: Just for logging
+                            //const revision_ID = @truncate(u8, self.HPET_base_address[0]);
+                            //const initial_count = self.HPET_base_address[30];
+                        }
+                        else
+                        {
+                            KernelPanic("failed to map HPET base address\n");
+                        }
+                    }
 
-                    //_ = MMFree(&_kernelMMSpace, @ptrToInt(hpet), 0, false);
-                //},
-                //else => {},
-            //}
+                    _ = MMFree(&_kernelMMSpace, @ptrToInt(hpet), 0, false);
+                },
+                else => {},
+            }
 
 
-            //_ = MMFree(&_kernelMMSpace, @ptrToInt(header), 0, false);
-        //}
+            _ = MMFree(&_kernelMMSpace, @ptrToInt(header), 0, false);
+        }
 
-        //if (!found_madt) KernelPanic("MADT not found");
-    //}
+        if (!found_madt) KernelPanic("MADT not found");
+    }
 
     fn map_physical_memory(physical_address: u64, length: u64) u64
     {
@@ -7542,7 +7477,7 @@ const NewProcessorStorage = extern struct
 
 export fn ArchInitialise() callconv(.C) void
 {
-    ACPIParseTables();
+    acpi.parse_tables();
 
     const bootstrap_LAPIC_ID = @intCast(u8, LapicReadRegister(0x20 >> 2) >> 24);
 
