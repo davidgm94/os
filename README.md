@@ -1,3 +1,4 @@
+# Design ideas
 My OS goals come to cover mainly the Jonathan Blow's and part of Casey Muratori's ideas.
 
 - Reduce processes/libraries/cruft to a minimum
