@@ -258,7 +258,6 @@ extern "C" bool MMFree(MMSpace *space, void *address, size_t expectedSize = 0, b
 #define ES_NODE_DIRECTORY		(0x10)
 #define ES_NODE_INVALID			(0x20)
 
-#define ES_INSTANCE_TYPE Instance
 #define ES_FLAGS_DEFAULT (0)
 
 #define ES_NODE_FAIL_IF_FOUND		(0x001000)
@@ -2604,18 +2603,6 @@ struct FSFile : KNode {
 	KWriterLock resizeLock; // Take exclusive for resizing or flushing.
 };
 
-struct EsRectangle {
-	int32_t l; // Inclusive.
-	int32_t r; // Exclusive.
-	int32_t t; // Inclusive.
-	int32_t b; // Exclusive.
-};
-
-struct EsElement;
-struct EsBundle;
-struct Instance;
-struct EsMountPoint;
-
 enum EsMessageType {
 	ES_MSG_INVALID				= 0x0000,
 		
@@ -2788,407 +2775,11 @@ enum EsMessageType {
 	ES_MSG_USER_END				= 0xBFFF,
 };
 
-struct EsFileStore {
-#define FILE_STORE_HANDLE        (1)
-#define FILE_STORE_PATH          (2)
-#define FILE_STORE_EMBEDDED_FILE (3)
-	uint8_t type;
-
-	bool operationComplete;
-	uint32_t handles;
-	EsError error;
-
-	union {
-		EsHandle handle;
-
-		struct {
-			const EsBundle *bundle;
-			char *path;
-			size_t pathBytes;
-		};
-	};
-};
-
-struct EsBuffer {
-	union { const uint8_t *in; uint8_t *out; };
-	size_t position, bytes;
-	void *context;
-	EsFileStore *fileStore;
-	bool error, canGrow;
-};
-
-struct EsMessageMouseMotion {
-	int newPositionX;
-	int newPositionY;
-	int originalPositionX; // For MOUSE_DRAGGED only.
-	int originalPositionY;
-};
-
-struct EsMessageMouseButton {
-	int positionX;
-	int positionY;
-	uint8_t clickChainCount;
-};
-
-struct EsMessageKeyboard {
-	uint16_t scancode; 
-	uint8_t modifiers;
-	bool repeat, numpad, numlock, single;
-};
-
-struct EsMessageWindowActivated {
-	uint8_t leftModifiers, rightModifiers;
-};
-
-struct EsMessageScrollWheel {
-	int32_t dx, dy;
-};
-
-struct EsMessageAnimate {
-	int64_t deltaMs, waitMs;
-	bool complete;
-};
-
-struct EsMessageLayout {
-	bool sizeChanged;
-};
-
-struct EsMessageWindowResized {
-	EsRectangle content;
-	bool hidden;
-};
-
-struct EsMessageMeasure {
-	int width, height;
-};
-
-struct EsMessageHitTest {
-	int x, y;
-	bool inside;
-};
-
-struct EsMessageZOrder {
-	uintptr_t index;
-	EsElement *child;
-};
-
-struct EsMessageBeforeZOrder {
-	uintptr_t start, end, nonClient;
-	EsRectangle clip;
-};
-
-struct EsMessageItemToString {
-	EsGeneric item;
-	const char* text;
-};
-
-// List view messages.
-
-struct EsMessageIterateIndex {
-	EsListViewIndex group;
-	EsListViewIndex index;
-
-	// FIND_INDEX and FIND_POSITION: (TODO Pass the reference item?)
-	int64_t position;
-};
-
-struct EsMessageItemRange {
-	EsListViewIndex group;
-	EsListViewIndex firstIndex;
-	uint64_t count;
-	int64_t result;
-};
-
-struct EsMessageMeasureItem {
-	EsListViewIndex group;
-	EsListViewIndex index;
-	int64_t result;
-};
-
-struct EsMessageCreateItem {
-	EsListViewIndex group;
-	EsListViewIndex index;
-	EsElement *item;
-};
-
-struct EsMessageGetContent {
-	EsListViewIndex index;
-	EsListViewIndex group;
-	uint32_t icon;
-	uint32_t drawContentFlags;
-	EsBuffer *buffer;
-	uint8_t column;
-};
-
-struct EsMessageGetIndent {
-	EsListViewIndex group;
-	EsListViewIndex index;
-
-	uint8_t indent;
-};
-
-struct EsMessageSelectRange {
-	EsListViewIndex fromIndex, toIndex;
-	EsListViewIndex group; 
-	bool select, toggle;
-};
-
-struct EsMessageSelectItem {
-	EsListViewIndex group;
-	EsListViewIndex index;
-	bool isSelected;
-};
-
-struct EsMessageChooseItem {
-	EsListViewIndex group;
-	EsListViewIndex index;
-};
-
-struct EsMessageSearchItem {
-	EsListViewIndex group;
-	EsListViewIndex index;
-	const char* query;
-};
-
-struct EsMessageFocus {
-	uint32_t flags;
-};
-
-struct EsMessageColumnMenu {
-	uint8_t index;
-	EsElement *source;
-};
-
-struct EsMessageGetColumnSort {
-	uint8_t index;
-};
-
-// Specific element messages.
-
-struct EsMessageScrollbarMoved {
-	int scroll, previous;
-};
-
-struct EsMessageSliderMoved {
-	double value, previous;
-	bool inDrag;
-};
-
-struct EsMessageColorChanged {
-	uint32_t newColor;
-	bool pickerClosed;
-};
-
-struct EsMessageNumberDragDelta {
-	int delta;
-	int32_t hoverCharacter;
-	bool fast;
-};
-
-struct EsMessageNumberUpdated {
-	double delta;
-	double newValue;
-};
-
-struct EsMessageGetBreadcrumb {
-	uintptr_t index; // Set response to ES_REJECTED if this equals the number of breadcrumbs.
-	EsBuffer *buffer;
-	uint32_t icon;
-};
-
-struct EsMessageEndEdit {
-	bool rejected, unchanged;
-};
-
-// Instance messages.
-
-struct EsMessageInstanceOpen {
-	ES_INSTANCE_TYPE *instance;
-	EsFileStore *file;
-	const char* name;
-	bool update;
-};
-
-struct EsMessageInstanceSave {
-	ES_INSTANCE_TYPE *instance;
-	EsFileStore *file;
-	const char* name;
-};
-
-struct EsMessageInstanceDestroy {
-	ES_INSTANCE_TYPE *instance;
-};
-
-struct EsMessageInstanceClose {
-	ES_INSTANCE_TYPE *instance;
-};
-
-// Internal system messages.
-
-struct EsMessageProcessCrash {
-	EsCrashReason reason;
-	uintptr_t pid;
-};
-
-struct EsMessageDesktop {
-	EsObjectID windowID, processID;
-	EsHandle buffer, pipe;
-	size_t bytes;
-};
-
-struct EsMessageEyedrop {
-	uint32_t color;
-	bool cancelled;
-};
-
-struct EsMessageCreateInstance {
-	EsHandle window;
-	EsHandle data;
-	size_t dataBytes;
-};
-
-struct EsMessageTabOperation {
-	EsObjectID id;
-	EsHandle handle;
-	union { size_t bytes; bool isSource; };
-	EsError error;
-};
-
-struct EsMessageRegisterFileSystem {
-	EsHandle rootDirectory;
-	bool isBootFileSystem;
-	EsMountPoint *mountPoint;
-};
-
-struct EsMessageUnregisterFileSystem {
-	EsObjectID id;
-	EsMountPoint *mountPoint;
-};
-
-struct EsMessageDevice {
-	EsObjectID id;
-	EsHandle handle;
-	EsDeviceType type;
-};
-
-// Message structure.
-
-struct EsMessageUser {
-	EsGeneric context1, context2, context3, context4;
-};
-
-struct EsStyle;
-struct EsPainter;
-
-enum EsCursorStyle {
-	ES_CURSOR_NORMAL,
-	ES_CURSOR_TEXT ,
-	ES_CURSOR_RESIZE_VERTICAL ,
-	ES_CURSOR_RESIZE_HORIZONTAL,
-	ES_CURSOR_RESIZE_DIAGONAL_1, // '/'
-	ES_CURSOR_RESIZE_DIAGONAL_2, // '\'
-	ES_CURSOR_SPLIT_VERTICAL,
-	ES_CURSOR_SPLIT_HORIZONTAL,
-	ES_CURSOR_HAND_HOVER,
-	ES_CURSOR_HAND_DRAG,
-	ES_CURSOR_HAND_POINT,
-	ES_CURSOR_SCROLL_UP_LEFT,
-	ES_CURSOR_SCROLL_UP,
-	ES_CURSOR_SCROLL_UP_RIGHT,
-	ES_CURSOR_SCROLL_LEFT,
-	ES_CURSOR_SCROLL_CENTER,
-	ES_CURSOR_SCROLL_RIGHT,
-	ES_CURSOR_SCROLL_DOWN_LEFT,
-	ES_CURSOR_SCROLL_DOWN,
-	ES_CURSOR_SCROLL_DOWN_RIGHT,
-	ES_CURSOR_SELECT_LINES,
-	ES_CURSOR_DROP_TEXT,
-	ES_CURSOR_CROSS_HAIR_PICK,
-	ES_CURSOR_CROSS_HAIR_RESIZE,
-	ES_CURSOR_MOVE_HOVER,
-	ES_CURSOR_MOVE_DRAG,
-	ES_CURSOR_ROTATE_HOVER,
-	ES_CURSOR_ROTATE_DRAG,
-	ES_CURSOR_BLANK,
-	ES_CURSOR_COUNT,
-};
-
-enum EsCheckState {
-	ES_CHECK_UNCHECKED = 0,
-	ES_CHECK_CHECKED = 1,
-	ES_CHECK_INDETERMINATE = 2,
-};
-
 struct EsMessage {
 	EsMessageType type;
 
 	union {
 		struct { uintptr_t _size[4]; } _size; // EsMessagePost supports messages at most 4 pointers in size.
-		EsMessageUser user; // For application specific messages.
-
-		// User interface messages:
-		EsMessageMouseMotion mouseMoved;
-		EsMessageMouseMotion mouseDragged;
-		EsMessageMouseButton mouseDown;
-		EsMessageKeyboard keyboard;
-		EsMessageWindowResized windowResized;
-		EsMessageAnimate animate;
-		EsMessageLayout layout;
-		EsMessageMeasure measure;
-		EsMessageHitTest hitTest;
-		EsMessageZOrder zOrder;
-		EsMessageBeforeZOrder beforeZOrder;
-		EsMessageItemToString itemToString;
-		EsMessageFocus focus;
-		EsMessageScrollWheel scrollWheel;
-		EsMessageWindowActivated windowActivated;
-		const EsStyle *childStyleVariant;
-		EsRectangle *accessKeyHintBounds;
-		EsPainter *painter;
-		EsElement *child;
-		EsCursorStyle cursorStyle;
-
-		// List view messages:
-		EsMessageIterateIndex iterateIndex;
-		EsMessageItemRange itemRange;
-		EsMessageMeasureItem measureItem;
-		EsMessageCreateItem createItem;
-		EsMessageGetContent getContent;
-		EsMessageGetIndent getIndent;
-		EsMessageSelectRange selectRange;
-		EsMessageSelectItem selectItem;
-		EsMessageChooseItem chooseItem;
-		EsMessageSearchItem searchItem;
-		EsMessageColumnMenu columnMenu;
-		EsMessageGetColumnSort getColumnSort;
-
-		// Specific element messages:
-		EsMessageScrollbarMoved scrollbarMoved;
-		EsMessageSliderMoved sliderMoved;
-		EsMessageColorChanged colorChanged;
-		EsMessageNumberDragDelta numberDragDelta;
-		EsMessageNumberUpdated numberUpdated;
-		EsMessageGetBreadcrumb getBreadcrumb;
-		EsMessageEndEdit endEdit;
-		uintptr_t activateBreadcrumb;
-		EsCheckState checkState;
-
-		// Instance messages:
-		EsMessageInstanceOpen instanceOpen;
-		EsMessageInstanceSave instanceSave;
-		EsMessageInstanceDestroy instanceDestroy;
-		EsMessageInstanceClose instanceClose;
-
-		// Internal messages:
-		void *_argument;
-		EsMessageProcessCrash crash;
-		EsMessageDesktop desktop;
-		EsMessageEyedrop eyedrop;
-		EsMessageCreateInstance createInstance;
-		EsMessageTabOperation tabOperation;
-		EsMessageRegisterFileSystem registerFileSystem;
-		EsMessageUnregisterFileSystem unregisterFileSystem;
-		EsMessageDevice device;
 	};
 };
 
@@ -3198,10 +2789,6 @@ struct _EsMessageWithObject {
 };
 
 struct MessageQueue {
-	//bool SendMessage(void *target, EsMessage *message); // Returns false if the message queue is full.
-	//bool SendMessage(_EsMessageWithObject *message); // Returns false if the message queue is full.
-	//bool GetMessage(_EsMessageWithObject *message);
-
 #define MESSAGE_QUEUE_MAX_LENGTH (4096)
 	Array<_EsMessageWithObject, K_FIXED> messages;
 
@@ -4025,49 +3612,6 @@ extern MMSharedRegion* mmGlobalDataRegion;
 extern GlobalData *globalData; // Shared with all processes.
 
 typedef bool (*KIRQHandler)(uintptr_t interruptIndex /* tag for MSI */, void *context);
-struct KPCIDevice : KDevice {
-	void WriteBAR8(uintptr_t index, uintptr_t offset, uint8_t value);
-	uint8_t ReadBAR8(uintptr_t index, uintptr_t offset);
-	void WriteBAR16(uintptr_t index, uintptr_t offset, uint16_t value);
-	uint16_t ReadBAR16(uintptr_t index, uintptr_t offset);
-	void WriteBAR32(uintptr_t index, uintptr_t offset, uint32_t value);
-	uint32_t ReadBAR32(uintptr_t index, uintptr_t offset);
-	void WriteBAR64(uintptr_t index, uintptr_t offset, uint64_t value);
-	uint64_t ReadBAR64(uintptr_t index, uintptr_t offset);
-
-	void WriteConfig8(uintptr_t offset, uint8_t value);
-	uint8_t ReadConfig8(uintptr_t offset);
-	void WriteConfig16(uintptr_t offset, uint16_t value);
-	uint16_t ReadConfig16(uintptr_t offset);
-	void WriteConfig32(uintptr_t offset, uint32_t value);
-	uint32_t ReadConfig32(uintptr_t offset);
-
-#define K_PCI_FEATURE_BAR_0                     (1 <<  0)
-#define K_PCI_FEATURE_BAR_1                     (1 <<  1)
-#define K_PCI_FEATURE_BAR_2                     (1 <<  2)
-#define K_PCI_FEATURE_BAR_3                     (1 <<  3)
-#define K_PCI_FEATURE_BAR_4                     (1 <<  4)
-#define K_PCI_FEATURE_BAR_5                     (1 <<  5)
-#define K_PCI_FEATURE_INTERRUPTS 		(1 <<  8)
-#define K_PCI_FEATURE_BUSMASTERING_DMA 		(1 <<  9)
-#define K_PCI_FEATURE_MEMORY_SPACE_ACCESS 	(1 << 10)
-#define K_PCI_FEATURE_IO_PORT_ACCESS		(1 << 11)
-	bool EnableFeatures(uint64_t features);
-	bool EnableSingleInterrupt(KIRQHandler irqHandler, void *context, const char *cOwnerName); 
-
-	uint32_t deviceID, subsystemID, domain;
-	uint8_t  classCode, subclassCode, progIF;
-	uint8_t  bus, slot, function;
-	uint8_t  interruptPin, interruptLine;
-
-	uint8_t  *baseAddressesVirtual[6];
-	uintptr_t baseAddressesPhysical[6];
-	size_t    baseAddressesSizes[6];
-
-	uint32_t baseAddresses[6];
-
-	bool EnableMSI(KIRQHandler irqHandler, void *context, const char *cOwnerName); 
-};
 
 extern "C" MMRegion *MMFindRegion(MMSpace *space, uintptr_t address);
 extern "C" void MMDecommit(uint64_t bytes, bool fixed);
@@ -4108,7 +3652,7 @@ struct MMActiveSectionManager {
 	Thread *writeBackThread;
 };
 
-MMActiveSectionManager activeSectionManager;
+extern MMActiveSectionManager activeSectionManager;
 
 #define CC_MAX_MODIFIED                           (67108864 / CC_ACTIVE_SECTION_SIZE)
 #define CC_MODIFIED_GETTING_FULL                  (CC_MAX_MODIFIED * 2 / 3)
@@ -4892,7 +4436,6 @@ copy:;
     }
 
     return ES_SUCCESS;
-
 }
 
 extern "C" bool MMHandlePageFault(MMSpace *space, uintptr_t address, unsigned faultFlags);

@@ -5438,11 +5438,11 @@ export fn MMDecommitRange(space: *AddressSpace, region: *Region, page_offset: u6
     return true;
 }
 
-const ActiveSession = extern struct
+const ActiveSection = extern struct
 {
     load_complete_event: Event,
     write_complete_event: Event,
-    list_item: LinkedList(ActiveSession).Item,
+    list_item: LinkedList(ActiveSection).Item,
     offset: u64,
     cache: ?*CCSpace,
     accessors: u64,
@@ -5451,25 +5451,27 @@ const ActiveSession = extern struct
     modified: Volatile(bool),
     flush: Volatile(bool),
     referenced_page_count: u64,
-    referenced_pages: [ActiveSession.size / page_size / 8]u8,
-    modified_pages: [ActiveSession.size / page_size / 8]u8,
+    referenced_pages: [ActiveSection.size / page_size / 8]u8,
+    modified_pages: [ActiveSection.size / page_size / 8]u8,
 
     const size = 262144;
 
     const Manager = extern struct
     {
-        sections: [*]ActiveSession,
+        sections: [*]ActiveSection,
         section_count: u64,
         base_address: u64,
         mutex: Mutex,
-        LRU_list: LinkedList(ActiveSession),
-        modified_list: LinkedList(ActiveSession),
+        LRU_list: LinkedList(ActiveSection),
+        modified_list: LinkedList(ActiveSection),
         modified_non_empty_event: Event,
         modified_non_full_event: Event,
         modified_getting_full_event: Event,
         write_back_thread: ?*Thread,
     };
 };
+
+export var activeSectionManager: ActiveSection.Manager = undefined;
 
 const Error = i64;
 
@@ -5497,25 +5499,23 @@ const CCCachedSection = extern struct
     data: ?[*]u64,
 };
 
-export var activeSessionManager: ActiveSession.Manager = undefined;
-
-export fn CCDereferenceActiveSection(section: *ActiveSession, starting_page: u64) callconv(.C) void
+export fn CCDereferenceActiveSection(section: *ActiveSection, starting_page: u64) callconv(.C) void
 {
-    activeSessionManager.mutex.assert_locked();
+    activeSectionManager.mutex.assert_locked();
 
     if (starting_page == 0)
     {
-        MMArchUnmapPages(&_kernelMMSpace, activeSessionManager.base_address + ((@ptrToInt(section) - @ptrToInt(activeSessionManager.sections)) / @sizeOf(ActiveSession)) * ActiveSession.size, ActiveSession.size / page_size, UnmapPagesFlags.from_flag(.balance_file), 0, null);
+        MMArchUnmapPages(&_kernelMMSpace, activeSectionManager.base_address + ((@ptrToInt(section) - @ptrToInt(activeSectionManager.sections)) / @sizeOf(ActiveSection)) * ActiveSection.size, ActiveSection.size / page_size, UnmapPagesFlags.from_flag(.balance_file), 0, null);
         std.mem.set(u8, section.referenced_pages[0..], 0);
         std.mem.set(u8, section.modified_pages[0..], 0);
         section.referenced_page_count = 0;
     }
     else
     {
-        MMArchUnmapPages(&_kernelMMSpace, activeSessionManager.base_address + ((@ptrToInt(section) - @ptrToInt(activeSessionManager.sections)) / @sizeOf(ActiveSession)) * ActiveSession.size + starting_page * page_size, ActiveSession.size / page_size - starting_page, UnmapPagesFlags.from_flag(.balance_file), 0, null);
+        MMArchUnmapPages(&_kernelMMSpace, activeSectionManager.base_address + ((@ptrToInt(section) - @ptrToInt(activeSectionManager.sections)) / @sizeOf(ActiveSection)) * ActiveSection.size + starting_page * page_size, ActiveSection.size / page_size - starting_page, UnmapPagesFlags.from_flag(.balance_file), 0, null);
 
         var i = starting_page;
-        while (i < ActiveSession.size / page_size) : (i += 1)
+        while (i < ActiveSection.size / page_size) : (i += 1)
         {
             const index = i >> 3;
             const shifter = @as(u8, 1) << @truncate(u3, i);
@@ -6708,9 +6708,9 @@ export fn MMBalanceThread() callconv(.C) void
             }
             else if (region.flags.contains(.cache))
             {
-                _ = activeSessionManager.mutex.acquire();
+                _ = activeSectionManager.mutex.acquire();
 
-                var maybe_item2 = activeSessionManager.LRU_list.first;
+                var maybe_item2 = activeSectionManager.LRU_list.first;
                 while (maybe_item2 != null and pmm.get_available_page_count() < target_available_pages)
                 {
                     const item2 = maybe_item2.?;
@@ -6719,7 +6719,7 @@ export fn MMBalanceThread() callconv(.C) void
                     maybe_item2 = item2.next;
                 }
 
-                activeSessionManager.mutex.release();
+                activeSectionManager.mutex.release();
             }
 
             region.data.map_mutex.release();
