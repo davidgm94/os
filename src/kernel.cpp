@@ -6373,40 +6373,6 @@ uint8_t HandleTable::ResolveHandle(Handle *outHandle, EsHandle inHandle, KernelO
 	return RESOLVE_HANDLE_FAILED;
 }
 
-#define SYSCALL(_name_) uintptr_t _name_(uintptr_t argument0, uintptr_t argument1, uintptr_t argument2, uintptr_t argument3, Thread* currentThread, Process* currentProcess, MMSpace* currentVMM, uintptr_t *userStackPointer, bool *fatalError)
-
-typedef SYSCALL(SyscallFunction);
-extern "C" SYSCALL(syscall_process_exit);
-
-extern "C" void process_exit(Process* process, int32_t status);
-
-SYSCALL(syscall_process_exit)
-{
-    // TODO Prevent the termination of the kernel/desktop.
-    bool self = false;
-
-    {
-        Handle process_out;
-        uint8_t status_out = currentProcess->handleTable.ResolveHandle(&process_out, argument0, KERNEL_OBJECT_PROCESS);
-        if (status_out == RESOLVE_HANDLE_FAILED)
-        {
-            *fatalError = ES_FATAL_ERROR_INVALID_HANDLE;
-            return true;
-        }
-
-        EsDefer(if (status_out == RESOLVE_HANDLE_NORMAL) CloseHandleToObject(process_out.object, process_out.type, process_out.flags));
-        Process* process = (Process*) process_out.object;
-
-        if (process == currentProcess) self = true;
-        else process_exit(process, argument1);
-    }
-
-    if (self) process_exit(currentProcess, argument1);
-
-    *fatalError = ES_SUCCESS;
-    return false;
-}
-
 void InterruptHandler(InterruptContext *context) {
 	if (scheduler.panic && context->interruptNumber != 2) {
 		return;

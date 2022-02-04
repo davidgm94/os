@@ -3859,7 +3859,7 @@ pub const Handle = extern struct
 {
     object: u64,
     flags: u32,
-    type: u32,
+    type: KernelObjectType,
 };
 
 const HandleTableL2 = extern struct
@@ -8409,7 +8409,7 @@ export fn MMCheckUnusable(physical_start: u64, byte_count: u64) callconv(.C) voi
     }
 }
 
-const SyscallFn = fn (argument0: u64, argument1: u64, argument2: u64, argument3: u64, current_thread: *Thread, current_process: *Process, current_address_space: *AddressSpace, user_stack_pointer: ?*u64, fatal_error: ?*bool) callconv(.C) u64;
+    const SyscallFn = fn (argument0: u64, argument1: u64, argument2: u64, argument3: u64, current_thread: *Thread, current_process: *Process, current_address_space: *AddressSpace, user_stack_pointer: ?*u64, fatal_error: *u8) callconv(.C) u64;
 
 const SyscallType = enum(u32)
 {
@@ -8455,7 +8455,7 @@ export fn DoSyscall(index: SyscallType, argument0: u64, argument1: u64, argument
     }
     else
     {
-        return_value = function(argument0, argument1, argument2, argument3, current_thread, current_process, current_address_space, user_stack_pointer, &fatal_error);
+        return_value = function(argument0, argument1, argument2, argument3, current_thread, current_process, current_address_space, user_stack_pointer, @ptrCast(*u8, &fatal_error));
     }
 
     if (fatal) |fatal_u| fatal_u.* = false;
@@ -8530,7 +8530,47 @@ export fn process_exit(process: *Process, status: i32) callconv(.C) void
     }
 }
 
-extern fn syscall_process_exit (argument0: u64, argument1: u64, argument2: u64, argument3: u64, current_thread: *Thread, current_process: *Process, current_address_space: *AddressSpace, user_stack_pointer: ?*u64, fatal_error: ?*bool) callconv(.C) u64;
+//extern fn syscall_process_exit (argument0: u64, argument1: u64, argument2: u64, argument3: u64, current_thread: *Thread, current_process: *Process, current_address_space: *AddressSpace, user_stack_pointer: ?*u64, fatal_error: ?*bool) callconv(.C) u64;
+export fn syscall_process_exit(argument0: u64, argument1: u64, argument2: u64, argument3: u64, current_thread: *Thread, current_process: *Process, current_address_space: *AddressSpace, user_stack_pointer: ?*u64, fatal_error: *u8) callconv(.C) u64
+{
+    _ = argument2;
+    _ = argument3;
+    _ = current_thread;
+    _ = current_address_space;
+    _ = user_stack_pointer;
+
+    var self = false;
+
+    {
+        var process_out: Handle = undefined;
+        const status = HandleTableResolveHandle(&current_process.handle_table, &process_out, argument0, KernelObjectType.process);
+        if (status == .failed)
+        {
+            fatal_error.* = @enumToInt(FatalError.invalid_handle);
+            return @boolToInt(true);
+        }
+
+        defer if (status == .normal) CloseHandleToObject(process_out.object, process_out.type, process_out.flags);
+        const process = @intToPtr(*Process, process_out.object);
+        if (process == current_process) self = true
+        else process_exit(process, @intCast(i32, argument1));
+    }
+
+    if (self) process_exit(current_process, @intCast(i32, argument1));
+
+    // @AIDS
+    fatal_error.* = @bitCast(u8, @intCast(i8, ES_SUCCESS));
+    return @boolToInt(false);
+}
+
+const ResolveHandleStatus = enum(u8)
+{
+    failed = 0,
+    no_close = 1,
+    normal = 2,
+};
+
+extern fn HandleTableResolveHandle(self: *HandleTable, out_handle: *Handle, in_handle: u64, type_mask: KernelObjectType) callconv(.C) ResolveHandleStatus;
 
 export fn KernelInitialise() callconv(.C) void
 {
