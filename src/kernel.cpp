@@ -6378,42 +6378,7 @@ uint8_t HandleTable::ResolveHandle(Handle *outHandle, EsHandle inHandle, KernelO
 typedef SYSCALL(SyscallFunction);
 extern "C" SYSCALL(syscall_process_exit);
 
-void process_exit(Process* process, int32_t status)
-{
-    KMutexAcquire(&process->threadsMutex);
-
-    // @Log
-    process->exitStatus = status;
-    process->preventNewThreads = true;
-
-    Thread *currentThread = GetCurrentThread();
-    bool isCurrentProcess = process == currentThread->process;
-    bool foundCurrentThread = false;
-
-    LinkedItem<Thread> *thread = process->threads.firstItem;
-
-    while (thread) {
-        Thread *threadObject = thread->thisItem;
-        thread = thread->nextItem;
-
-        if (threadObject != currentThread) {
-            thread_exit(threadObject);
-        } else if (isCurrentProcess) {
-            foundCurrentThread = true;
-        } else {
-            KernelPanic("Scheduler::ProcessTerminate - Found current thread in the wrong process?!\n");
-        }
-    }
-
-    KMutexRelease(&process->threadsMutex);
-
-    if (!foundCurrentThread && isCurrentProcess) {
-        KernelPanic("Scheduler::ProcessTerminate - Could not find current thread in the current process?!\n");
-    } else if (isCurrentProcess) {
-        // This doesn't return.
-        thread_exit(currentThread);
-    }
-}
+extern "C" void process_exit(Process* process, int32_t status);
 
 SYSCALL(syscall_process_exit)
 {
