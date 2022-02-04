@@ -678,6 +678,12 @@ comptime
         \\_KThreadTerminate:
         \\sub rsp, 8
         \\jmp KThreadTerminate
+        \\
+        
+        \\.global Get_KThreadTerminateAddress
+        \\Get_KThreadTerminateAddress:
+        \\mov rax, OFFSET _KThreadTerminate
+        \\ret
 
         \\.global ProcessorReadCR3
         \\ProcessorReadCR3:
@@ -4752,7 +4758,6 @@ export fn KThreadCreate(name: [*:0]const u8, entry: fn (u64) callconv(.C) void, 
 }
 
 extern fn OpenHandleToObject(object: u64, type: KernelObjectType, flags: u32) callconv(.C) bool;
-extern fn ArchInitialiseThread(kernel_stack: u64, kernel_stack_size: u64, thread: *Thread, start_address: u64, argument1: u64, argument2: u64, userland: bool, user_stack: u64, user_stack_size: u64) callconv(.C) *InterruptContext;
 
 export fn ThreadSpawn(name: [*:0]const u8, start_address: u64, argument1: u64, flags: Thread.Flags, maybe_process: ?*Process, argument2: u64) callconv(.C) ?*Thread
 {
@@ -10419,6 +10424,46 @@ export fn MMArchInvalidatePages(virtual_address_start: u64, page_count: u64) cal
 export fn CallFunctionOnAllProcessorCallbackWrapper() callconv(.C) void
 {
     @ptrCast(*volatile CallFunctionOnAllProcessorsCallback, &callFunctionOnAllProcessorsCallback).*();
+}
+
+extern fn Get_KThreadTerminateAddress() callconv(.C) u64;
+
+//extern fn ArchInitialiseThread(kernel_stack: u64, kernel_stack_size: u64, thread: *Thread, start_address: u64, argument1: u64, argument2: u64, userland: bool, user_stack: u64, user_stack_size: u64) callconv(.C) *InterruptContext;
+export fn ArchInitialiseThread(kernel_stack: u64, kernel_stack_size: u64, thread: *Thread, start_address: u64, argument1: u64, argument2: u64, userland: bool, user_stack: u64, user_stack_size: u64) callconv(.C) *InterruptContext
+{
+    const base = kernel_stack + kernel_stack_size - 8;
+    const context = @intToPtr(*InterruptContext, base - @sizeOf(InterruptContext));
+    thread.kernel_stack = base;
+    var ptr = @intToPtr(*u64, base);
+    // @TODO: workaround since Zig gives us 0 address sometimes for function pointers...
+    const fn_ptr = Get_KThreadTerminateAddress();
+    ptr.* = fn_ptr;
+
+    context.fx_save[32] = 0x80;
+    context.fx_save[33] = 0x1f;
+
+    if (userland)
+    {
+        context.cs = 0x5b;
+        context.ds = 0x63;
+        context.ss = 0x63;
+    }
+    else
+    {
+        context.cs = 0x48;
+        context.ds = 0x50;
+        context.ss = 0x50;
+    }
+
+    context._check = 0x123456789ABCDEF;
+    context.flags = 1 << 9;
+    context.rip = start_address;
+    if (context.rip == 0) KernelPanic("RIP is 0");
+    context.rsp = user_stack + user_stack_size - 8;
+    context.rdi = argument1;
+    context.rsi = argument2;
+
+    return context;
 }
 
 export fn get_size_zig() callconv(.C) u64

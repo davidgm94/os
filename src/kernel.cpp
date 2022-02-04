@@ -323,9 +323,6 @@ extern "C"
     void MMInitialise();
     void ArchNextTimer(size_t ms); // Schedule the next TIMER_INTERRUPT.
     uint64_t ArchGetTimeMs(); // Called by the scheduler on the boot processor every context switch.
-    InterruptContext *ArchInitialiseThread(uintptr_t kernelStack, uintptr_t kernelStackSize, struct Thread *thread, 
-            uintptr_t startAddress, uintptr_t argument1, uintptr_t argument2,
-            bool userland, uintptr_t stack, uintptr_t userStackSize);
     void ArchSwitchContext(struct InterruptContext *context, struct MMArchVAS *virtualAddressSpace, uintptr_t threadKernelStack, 
             struct Thread *newThread, struct MMSpace *oldAddressSpace);
     EsError ArchApplyRelocation(uintptr_t type, uint8_t *buffer, uintptr_t offset, uintptr_t result);
@@ -5647,16 +5644,14 @@ struct ACPI {
 extern ACPI acpi;
 
 extern "C" uint32_t ACPIIoApicReadRegister(ACPIIoApic *apic, uint32_t reg);
-extern "C" void ACPIIoApicWriteRegister(ACPIIoApic *apic, uint32_t reg, uint32_t value);
 extern "C" void ACPICheckTable(const ACPIDescriptorTable *table);
 extern "C" void *ACPIMapPhysicalMemory(uintptr_t physicalAddress, size_t length);
-extern "C" void *ACPIGetRSDP();
-extern "C" uint8_t ACPIGetCenturyRegisterIndex();
 
 uintptr_t GetBootloaderInformationOffset();
+extern uintptr_t bootloader_information_offset;
 
 uintptr_t ArchFindRootSystemDescriptorPointer() {
-    uint64_t uefiRSDP = *((uint64_t *) (LOW_MEMORY_MAP_START + GetBootloaderInformationOffset() + 0x7FE8));
+    uint64_t uefiRSDP = *((uint64_t *) (LOW_MEMORY_MAP_START + bootloader_information_offset + 0x7FE8));
 
     if (uefiRSDP) {
         return uefiRSDP;
@@ -5869,9 +5864,6 @@ extern "C" void ACPIParseTables()
     }
 }
 
-extern "C" size_t KGetCPUCount();
-extern "C" CPULocalStorage *KGetCPULocal(uintptr_t index);
-
 struct InterruptContext {
 	uint64_t cr2, ds;
 	uint8_t  fxsave[512 + 16];
@@ -5881,39 +5873,6 @@ struct InterruptContext {
 	uint64_t interruptNumber, errorCode;
 	uint64_t rip, cs, flags, rsp, ss;
 };
-
-InterruptContext *ArchInitialiseThread(uintptr_t kernelStack, uintptr_t kernelStackSize, Thread *thread, 
-		uintptr_t startAddress, uintptr_t argument1, uintptr_t argument2,
-		bool userland, uintptr_t stack, uintptr_t userStackSize) {
-	InterruptContext *context = ((InterruptContext *) (kernelStack + kernelStackSize - 8)) - 1;
-	thread->kernelStack = kernelStack + kernelStackSize - 8;
-	
-	// Terminate the thread when the outermost function exists.
-	*((uintptr_t *) (kernelStack + kernelStackSize - 8)) = (uintptr_t) &_KThreadTerminate;
-
-	context->fxsave[32] = 0x80;
-	context->fxsave[33] = 0x1F;
-
-	if (userland) {
-		context->cs = 0x5B;
-		context->ds = 0x63;
-		context->ss = 0x63;
-	} else {
-		context->cs = 0x48;
-		context->ds = 0x50;
-		context->ss = 0x50;
-	}
-
-	context->_check = 0x123456789ABCDEF; // Stack corruption detection.
-	context->flags = 1 << 9; // Interrupt flag
-	context->rip = startAddress;
-    if (context->rip == 0) KernelPanic("RIP is 0");
-	context->rsp = stack + userStackSize - 8; // The stack should be 16-byte aligned before the call instruction.
-	context->rdi = argument1;
-	context->rsi = argument2;
-
-	return context;
-}
 
 struct MSIHandler {
 	KIRQHandler callback;
@@ -5968,7 +5927,6 @@ const char *const exceptionInformation[] = {
 #define YIELD_IPI (0x41)
 #define IRQ_BASE (0x50)
 #define CALL_FUNCTION_ON_ALL_PROCESSORS_IPI (0xF0)
-#define TLB_SHOOTDOWN_IPI (0xF1)
 #define KERNEL_PANIC_IPI (0) // NMIs ignore the interrupt vector.
 
 #define INTERRUPT_VECTOR_MSI_START (0x70)
@@ -6007,57 +5965,6 @@ extern uintptr_t physicalMemoryHighest;
 
 extern EsUniqueIdentifier installation_ID; // The identifier of this OS installation, given to us by the bootloader.
 extern uint32_t bootloader_ID;
-extern uintptr_t bootloader_information_offset;
-
-uintptr_t GetBootloaderInformationOffset() {
-	return bootloader_information_offset;
-}
-
-#define ENTRIES_PER_PAGE_TABLE_BITS (9)
-
-
-extern uint8_t core_L1_commit[(0xFFFF800200000000 - 0xFFFF800100000000) >> (/* ENTRIES_PER_PAGE_TABLE_BITS */ 9 + K_PAGE_BITS + 3)];
-
-#define IO_PIC_1_COMMAND		(0x0020)
-#define IO_PIC_1_DATA			(0x0021)
-#define IO_PIT_DATA			(0x0040)
-#define IO_PIT_COMMAND			(0x0043)
-#define IO_PS2_DATA			(0x0060)
-#define IO_PC_SPEAKER			(0x0061)
-#define IO_PS2_STATUS			(0x0064)
-#define IO_PS2_COMMAND			(0x0064)
-#define IO_RTC_INDEX 			(0x0070)
-#define IO_RTC_DATA 			(0x0071)
-#define IO_UNUSED_DELAY			(0x0080)
-#define IO_PIC_2_COMMAND		(0x00A0)
-#define IO_PIC_2_DATA			(0x00A1)
-#define IO_BGA_INDEX			(0x01CE)
-#define IO_BGA_DATA			(0x01CF)
-#define IO_ATA_1			(0x0170) // To 0x0177.
-#define IO_ATA_2			(0x01F0) // To 0x01F7.
-#define IO_COM_4			(0x02E8) // To 0x02EF.
-#define IO_COM_2			(0x02F8) // To 0x02FF.
-#define IO_ATA_3			(0x0376)
-#define IO_VGA_AC_INDEX 		(0x03C0)
-#define IO_VGA_AC_WRITE 		(0x03C0)
-#define IO_VGA_AC_READ  		(0x03C1)
-#define IO_VGA_MISC_WRITE 		(0x03C2)
-#define IO_VGA_MISC_READ  		(0x03CC)
-#define IO_VGA_SEQ_INDEX 		(0x03C4)
-#define IO_VGA_SEQ_DATA  		(0x03C5)
-#define IO_VGA_DAC_READ_INDEX  		(0x03C7)
-#define IO_VGA_DAC_WRITE_INDEX 		(0x03C8)
-#define IO_VGA_DAC_DATA        		(0x03C9)
-#define IO_VGA_GC_INDEX 		(0x03CE)
-#define IO_VGA_GC_DATA  		(0x03CF)
-#define IO_VGA_CRTC_INDEX 		(0x03D4)
-#define IO_VGA_CRTC_DATA  		(0x03D5)
-#define IO_VGA_INSTAT_READ 		(0x03DA)
-#define IO_COM_3			(0x03E8) // To 0x03EF.
-#define IO_ATA_4			(0x03F6)
-#define IO_COM_1			(0x03F8) // To 0x03FF.
-#define IO_PCI_CONFIG 			(0x0CF8)
-#define IO_PCI_DATA   			(0x0CFC)
 
 int8_t Scheduler::GetThreadEffectivePriority(Thread *thread) {
 	KSpinlockAssertLocked(&dispatchSpinlock);
@@ -6393,23 +6300,6 @@ void InterruptHandler(InterruptContext *context) {
 	if (local && local->spinlockCount && context->cr8 != 0xE) {
 		KernelPanic("InterruptHandler - Local spinlockCount is %d but interrupts were enabled (%x/%x).\n", local->spinlockCount, local, context);
 	}
-
-#if 0
-#ifdef EARLY_DEBUGGING
-#ifdef VGA_TEXT_MODE
-	if (local) {
-		TERMINAL_ADDRESS[local->processorID] += 0x1000;
-	}
-#else
-	if (graphics.target && graphics.target->debugPutBlock) {
-		graphics.target->debugPutBlock(local->processorID * 3 + 3, 3, true);
-		graphics.target->debugPutBlock(local->processorID * 3 + 4, 3, true);
-		graphics.target->debugPutBlock(local->processorID * 3 + 3, 4, true);
-		graphics.target->debugPutBlock(local->processorID * 3 + 4, 4, true);
-	}
-#endif
-#endif
-#endif
 
 	if (interrupt < 0x20) {
 		// If we received a non-maskable interrupt, halt execution.
