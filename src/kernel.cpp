@@ -289,9 +289,8 @@ struct InterruptContext;
 extern "C" uintptr_t _KThreadTerminate;
 extern "C"
 {
-    void KernelLog(KLogLevel level, const char *subsystem, const char *event, const char *format, ...);
-    void KernelPanic(const char *format, ...);
-    void EsPrint(const char *format, ...);
+    void TODO() __attribute__((noreturn));
+    void KernelPanic(const char *format, ...) __attribute__((noreturn));
 
     void *EsHeapAllocate(size_t size, bool zeroMemory, EsHeap *kernelHeap);
     void *EsHeapReallocate(void *oldAddress, size_t newAllocationSize, bool zeroNewSpace, EsHeap *_heap);
@@ -307,7 +306,7 @@ extern "C"
     void InterruptHandler(InterruptContext *context);
     uintptr_t Syscall(uintptr_t argument0, uintptr_t argument1, uintptr_t argument2, uintptr_t returnAddress, uintptr_t argument3, uintptr_t argument4, uintptr_t *userStackPointer);
     void PCProcessMemoryMap();
-    void ProcessorHalt();
+    void ProcessorHalt() __attribute__((noreturn));
     void ProcessorInstallTSS(uint32_t *gdt, uint32_t *tss);
     bool ProcessorAreInterruptsEnabled();
     Thread* GetCurrentThread();
@@ -323,7 +322,6 @@ extern "C"
     uint64_t ProcessorReadMXCSR();
     void ProcessCrash(Process *process, EsCrashReason *crashReason);
     void MMInitialise();
-    void ArchShutdown();
     void ArchNextTimer(size_t ms); // Schedule the next TIMER_INTERRUPT.
     uint64_t ArchGetTimeMs(); // Called by the scheduler on the boot processor every context switch.
     InterruptContext *ArchInitialiseThread(uintptr_t kernelStack, uintptr_t kernelStackSize, struct Thread *thread, 
@@ -853,7 +851,6 @@ int TreeValidate(AVLItem<T> *root, bool before, AVLTree<T> *tree, AVLItem<T> *pa
 	static int maxSeenDepth = 0;
 	if (maxSeenDepth < depth) {
 		maxSeenDepth = depth;
-		EsPrint("New depth reached! %d\n", maxSeenDepth);
 	}
 #endif
 
@@ -1269,26 +1266,12 @@ extern "C" uintptr_t HeapCalculateIndex(uintptr_t size) {
 	return msb - 4;
 }
 
-#ifdef MEMORY_LEAK_DETECTOR
-
-struct MemoryLeakDetectorEntry {
-	void *address;
-	size_t bytes;
-	uintptr_t stack[8];
-	size_t seenCount;
-};
-#else
 #define MemoryLeakDetectorAdd(...)
 #define MemoryLeakDetectorRemove(...)
 #define MemoryLeakDetectorCheckpoint(...)
-#endif
 
 struct EsHeap {
-#ifdef KERNEL
 	KMutex mutex;
-#else
-	EsMutex mutex;
-#endif
 
 	HeapRegion *regions[12];
 	volatile size_t allocationsCount, size, blockCount;
@@ -1304,85 +1287,16 @@ struct EsHeap {
 // TODO Better heap panic messages.
 #define HEAP_PANIC(n, x, y) EsPanic("Heap panic (%d/%x/%x).\n", n, x, y)
 
-#ifdef KERNEL
 #define HEAP_ACQUIRE_MUTEX(a) KMutexAcquire(&(a))
 #define HEAP_RELEASE_MUTEX(a) KMutexRelease(&(a))
 #define HEAP_ALLOCATE_CALL(x) MMStandardAllocate(_heap == &heapCore ? coreMMSpace : kernelMMSpace, x, MM_REGION_FIXED)
 #define HEAP_FREE_CALL(x) MMFree(_heap == &heapCore ? coreMMSpace : kernelMMSpace, x)
-#else
-EsHeap heap;
-#define HEAP_ACQUIRE_MUTEX(a) EsMutexAcquire(&(a))
-#define HEAP_RELEASE_MUTEX(a) EsMutexRelease(&(a))
-#define HEAP_ALLOCATE_CALL(x) EsMemoryReserve(x)
-#define HEAP_FREE_CALL(x) EsMemoryUnreserve(x)
-#endif
 
 #define HEAP_REGION_HEADER(region) ((HeapRegion *) ((uint8_t *) region - USED_HEAP_REGION_HEADER_SIZE))
 #define HEAP_REGION_DATA(region) ((uint8_t *) region + USED_HEAP_REGION_HEADER_SIZE)
 #define HEAP_REGION_NEXT(region) ((HeapRegion *) ((uint8_t *) region + region->next))
 #define HEAP_REGION_PREVIOUS(region) (region->previous ? ((HeapRegion *) ((uint8_t *) region - region->previous)) : nullptr)
 
-#ifdef USE_PLATFORM_HEAP
-void *PlatformHeapAllocate(size_t size, bool zero);
-void PlatformHeapFree(void *address);
-void *PlatformHeapReallocate(void *oldAddress, size_t newAllocationSize, bool zeroNewSpace);
-#endif
-
-#ifdef MEMORY_LEAK_DETECTOR
-static void MemoryLeakDetectorAdd(EsHeap *heap, void *address, size_t bytes) {
-	if (!address || !bytes) {
-		return;
-	}
-
-	for (uintptr_t i = 0; i < sizeof(heap->leakDetectorEntries) / sizeof(heap->leakDetectorEntries[0]); i++) {
-		MemoryLeakDetectorEntry *entry = &heap->leakDetectorEntries[i];
-
-		if (entry->address) {
-			continue;
-		}
-
-		entry->address = address;
-		entry->bytes = bytes;
-		entry->seenCount = 0;
-
-		uint64_t rbp = ProcessorGetRBP();
-		uintptr_t traceDepth = 0;
-
-		while (rbp && traceDepth < sizeof(entry->stack) / sizeof(entry->stack[0])) {
-			uint64_t value = *(uint64_t *) (rbp + 8);
-			entry->stack[traceDepth++] = value;
-			if (!value) break;
-			rbp = *(uint64_t *) rbp;
-		}
-
-		break;
-	}
-}
-
-static void MemoryLeakDetectorRemove(EsHeap *heap, void *address) {
-	if (!address) {
-		return;
-	}
-
-	for (uintptr_t i = 0; i < sizeof(heap->leakDetectorEntries) / sizeof(heap->leakDetectorEntries[0]); i++) {
-		if (heap->leakDetectorEntries[i].address == address) {
-			heap->leakDetectorEntries[i].address = nullptr;
-			break;
-		}
-	}
-}
-
-static void MemoryLeakDetectorCheckpoint(EsHeap *heap) {
-	EsPrint("--- MemoryLeakDetectorCheckpoint ---\n");
-
-	for (uintptr_t i = 0; i < sizeof(heap->leakDetectorEntries) / sizeof(heap->leakDetectorEntries[0]); i++) {
-		MemoryLeakDetectorEntry *entry = &heap->leakDetectorEntres[i];
-		if (!entry->address) continue;
-		entry->seenCount++;
-		EsPrint("  %d %d %x %d\n", i, entry->seenCount, entry->address, entry->bytes);
-	}
-}
-#endif
 
 static void HeapRemoveFreeRegion(HeapRegion *region) {
 	if (!region->regionListReference || region->used) {
@@ -1460,30 +1374,6 @@ static void HeapValidate(EsHeap *heap) {
 	}
 }
 
-static void HeapPrintAllocatedRegions(EsHeap *heap) {
-	EsPrint("--- Heap (%d allocations, %d bytes, %d blocks) ---\n", heap->allocationsCount, heap->size, heap->blockCount);
-	HeapValidate(heap);
-	if (heap->cannotValidate) return;
-
-	for (uintptr_t i = 0; i < heap->blockCount; i++) {
-		HeapRegion *start = (HeapRegion *) heap->blocks[i];
-		if (!start) continue;
-
-		HeapRegion *end = (HeapRegion *) ((uint8_t *) heap->blocks[i] + 65536);
-		HeapRegion *region = start;
-
-		while (region < end) {
-			if (region->used == USED_HEAP_REGION_MAGIC) {
-				EsPrint("%x %d\n", HEAP_REGION_DATA(region), region->size);
-			}
-
-			region = HEAP_REGION_NEXT(region);
-		}
-	}
-
-	MemoryLeakDetectorCheckpoint(heap);
-}
-
 extern "C" void *EsHeapAllocate(size_t size, bool zeroMemory, EsHeap *_heap)
 {
 #ifndef KERNEL
@@ -1497,12 +1387,6 @@ extern "C" void *EsHeapAllocate(size_t size, bool zeroMemory, EsHeap *_heap)
 #endif
 
 	size_t largeAllocationThreshold = LARGE_ALLOCATION_THRESHOLD;
-
-#ifndef KERNEL
-	// EsPrint("Allocate: %d\n", size);
-#else
-	// EsPrint("%z: %d\n", mmvmm ? "CORE" : "KERN", size);
-#endif
 
 	size_t originalSize = size;
 
@@ -2176,20 +2060,10 @@ struct RangeSet {
             previousTo = range->to;
         }
 #endif
-
-#if 0
-        for (uintptr_t i = 0; i < sizeof(check); i++) {
-            if (check[i]) {
-                assert(Find(set, i, false));
-            } else {
-                assert(!Find(set, i, false));
-            }
-        }
-#endif
     }
 
     bool Normalize() {
-        KernelLog(LOG_INFO, "RangeSet", "normalize", "Normalizing range set %x...\n", this);
+        // @Log
 
         if (contiguous) {
             uintptr_t oldContiguous = contiguous;
@@ -2204,12 +2078,6 @@ struct RangeSet {
     }
 
     bool Set(uintptr_t from, uintptr_t to, intptr_t *delta, bool modify) {
-#if 0
-        for (uintptr_t i = from; i < to; i++) {
-            check[i] = true;
-        }
-#endif
-
         if (to <= from) {
             KernelPanic("RangeSet::Set - Invalid range %x to %x.\n", from, to);
         }
@@ -4530,7 +4398,7 @@ EsError CCSpaceAccess(CCSpace *cache, K_USER_BUFFER void *_buffer, EsFileOffset 
 
     for (EsFileOffset sectionOffset = firstSection; sectionOffset < lastSection; sectionOffset += CC_ACTIVE_SECTION_SIZE) {
         if (MM_AVAILABLE_PAGES() < MM_CRITICAL_AVAILABLE_PAGES_THRESHOLD && !GetCurrentThread()->isPageGenerator) {
-            KernelLog(LOG_ERROR, "Memory", "waiting for non-critical state", "File cache read on non-generator thread, waiting for more available pages.\n");
+            // @Log
             KEventWait(&pmm.availableNotCritical);
         }
 
@@ -5297,7 +5165,7 @@ void KDeviceCloseHandle(KDevice *device) {
 
 void FSUnmountFileSystem(uintptr_t argument) {
 	KFileSystem *fileSystem = (KFileSystem *) argument;
-	KernelLog(LOG_INFO, "FS", "unmount start", "Unmounting file system %x...\n", fileSystem);
+	// @Log
 
 	MMObjectCacheUnregister(&fileSystem->cachedNodes);
 	MMObjectCacheUnregister(&fileSystem->cachedDirectoryEntries);
@@ -5311,7 +5179,7 @@ void FSUnmountFileSystem(uintptr_t argument) {
 		fileSystem->unmount(fileSystem);
 	}
 
-	KernelLog(LOG_INFO, "FS", "unmount complete", "Unmounted file system %x.\n", fileSystem);
+	// @Log
 	KDeviceCloseHandle(fileSystem);
 	__sync_fetch_and_sub(&fs.fileSystemsUnmounting, 1);
 	KEventSet(&fs.fileSystemUnmounted, true);
@@ -5621,299 +5489,6 @@ extern "C" bool MMSharedResizeRegion(MMSharedRegion *region, size_t sizeBytes);
 extern "C" void MMSharedDestroyRegion(MMSharedRegion *region);
 extern "C" MMSharedRegion *MMSharedCreateRegion(size_t sizeBytes, bool fixed = false, uintptr_t below = 0);
 
-struct EmbeddedWindow {
-	void Destroy() {};
-	void Close();
-	void SetEmbedOwner(Process *process);
-
-	Process *volatile owner;
-	void *volatile apiWindow;
-	volatile uint32_t handles;
-	struct Window *container;
-	EsObjectID id;
-	bool closed;
-};
-
-struct EsPoint {
-	int32_t x;
-	int32_t y;
-};
-
-enum EsWindowStyle {
-	ES_WINDOW_NORMAL,
-	ES_WINDOW_CONTAINER,
-	ES_WINDOW_MENU,
-	ES_WINDOW_TIP,
-	ES_WINDOW_PLAIN,
-	ES_WINDOW_INSPECTOR,
-};
-
-struct EsPaintTarget {
-	void *bits;
-	uint32_t width, height, stride;
-	bool fullAlpha, readOnly, fromBitmap, forWindowManager;
-};
-
-struct Surface : EsPaintTarget {
-	bool Resize(size_t newResX, size_t newResY, uint32_t clearColor = 0, bool copyOldBits = false);
-	void Copy(Surface *source, EsPoint destinationPoint, EsRectangle sourceRegion, bool addToModifiedRegion); 
-	void Draw(Surface *source, EsRectangle destinationRegion, int sourceX, int sourceY, uint16_t alpha);
-	void BlendWindow(Surface *source, EsPoint destinationPoint, EsRectangle sourceRegion, int material, uint8_t alpha, EsRectangle materialRegion);
-	void Blur(EsRectangle region, EsRectangle clip);
-	void SetBits(K_USER_BUFFER const void *bits, uintptr_t stride, EsRectangle region);
-	void Scroll(EsRectangle region, ptrdiff_t delta, bool vertical);
-	void CreateCursorShadow(Surface *source);
-
-	EsRectangle modifiedRegion;
-};
-
-#define ES_GAME_CONTROLLER_MAX_COUNT (16)
-
-struct Pipe {
-#define PIPE_READER (1)
-#define PIPE_WRITER (2)
-#define PIPE_BUFFER_SIZE (K_PAGE_SIZE)
-#define PIPE_CLOSED (0)
-
-	volatile char buffer[PIPE_BUFFER_SIZE];
-	volatile size_t writers, readers;
-	volatile uintptr_t writePosition, readPosition, unreadData;
-	KEvent canWrite, canRead;
-	KMutex mutex;
-
-	size_t Access(void *buffer, size_t bytes, bool write, bool userBlockRequest);
-};
-
-struct EsAnalogInput {
-	uint8_t x, y, z;
-};
-
-struct EsGameControllerState {
-	EsObjectID id; 
-	uint8_t buttonCount, analogCount; // Number of buttons and analog inputs.
-	uint8_t directionalPad; // Directions given from 0-7, starting at up, going clockwise. 15 indicates unpressed.
-	uint32_t buttons; // Bitset of pressed buttons.
-	EsAnalogInput analog[8];
-};
-
-struct WindowManager {
-	void *CreateWindow(Process *process, void *apiWindow, EsWindowStyle style);
-	void *CreateEmbeddedWindow(Process *process, void *apiWindow);
-	Window *FindWindowAtPosition(int cursorX, int cursorY, EsObjectID exclude = 0);
-
-	void Initialise();
-
-	void MoveCursor(int64_t xMovement, int64_t yMovement);
-	void ClickCursor(uint32_t buttons);
-	void ScrollWheel(int32_t dx, int32_t dy);
-	void PressKey(uint32_t scancode);
-
-	void Redraw(EsPoint position, int width, int height, Window *except = nullptr, int startingAt = 0, bool addToModifiedRegion = true);
-
-	bool ActivateWindow(Window *window); // Returns true if any menus were closed.
-	void HideWindow(Window *window);
-	Window *FindWindowToActivate(Window *excluding = nullptr);
-	uintptr_t GetActivationZIndex();
-	void ChangeWindowDepth(Window *window, bool alwaysRedraw, ptrdiff_t newZDepth);
-	intptr_t FindWindowDepth(Window *window);
-	bool CloseMenus(); // Returns true if any menus were closed.
-	
-	void StartEyedrop(uintptr_t object, Window *avoid, uint32_t cancelColor);
-	void EndEyedrop(bool cancelled);
-
-	bool initialised;
-
-	// Windows:
-
-	Array<Window *, K_FIXED> windows; // Sorted by z.
-	Array<EmbeddedWindow *, K_FIXED> embeddedWindows;
-	Window *pressedWindow, *activeWindow, *hoverWindow;
-	KMutex mutex;
-	KEvent windowsToCloseEvent;
-	EsObjectID currentWindowID;
-	size_t inspectorWindowCount;
-	EsMessageType pressedWindowButton;
-
-	// Cursor:
-
-	int32_t cursorX, cursorY;
-	int32_t cursorXPrecise, cursorYPrecise; // Scaled up by a factor of K_CURSOR_MOVEMENT_SCALE.
-	uint32_t lastButtons;
-
-	Surface cursorSurface, cursorSwap, cursorTemporary;
-	int cursorImageOffsetX, cursorImageOffsetY;
-	uintptr_t cursorID;
-	bool cursorShadow;
-	bool changedCursorImage;
-
-	uint32_t cursorProperties; 
-
-	// Keyboard:
-
-	bool numlock;
-	uint8_t leftModifiers, rightModifiers;
-	uint16_t keysHeld, maximumKeysHeld /* cleared when all released */;
-	uint8_t keysHeldBitSet[512 / 8];
-
-	// Eyedropper:
-
-	uintptr_t eyedropObject;
-	bool eyedropping;
-	Process *eyedropProcess;
-	uint64_t eyedropAvoidID;
-	uint32_t eyedropCancelColor;
-
-	// Miscellaneous:
-
-	EsRectangle workArea;
-
-	// Devices:
-
-	KMutex deviceMutex;
-
-	Array<KDevice *, K_FIXED> hiDevices;
-
-	EsGameControllerState gameControllers[ES_GAME_CONTROLLER_MAX_COUNT];
-	size_t gameControllerCount;
-	EsObjectID gameControllerID;
-
-	// Flicker-free resizing:
-
-#define RESIZE_FLICKER_TIMEOUT_MS (40)
-#define RESIZE_SLOW_THRESHOLD (RESIZE_FLICKER_TIMEOUT_MS * 3 / 4)
-	Window *resizeWindow;
-	bool resizeReceivedBitsFromContainer;
-	bool resizeReceivedBitsFromEmbed;
-	uint64_t resizeStartTimeStampMs;
-	EsRectangle resizeQueuedRectangle;
-	bool resizeQueued;
-	bool resizeSlow; // Set if the previous resize went past RESIZE_FLICKER_SLOW_THRESHOLD; 
-			 // when set, the old surface bits are copied on resize, so that if the resize times out the result will be reasonable.
-};
-
-WindowManager windowManager;
-
-struct Window {
-	void Update(EsRectangle *region, bool addToModifiedRegion);
-	bool UpdateDirect(K_USER_BUFFER void *bits, uintptr_t stride, EsRectangle region);
-	void Destroy() {}; 
-	void Close();
-	bool Move(EsRectangle newBounds, uint32_t flags);
-	void SetEmbed(EmbeddedWindow *window);
-	bool IsVisible();
-	void ResizeEmbed(); // Send a message to the embedded window telling it to resize.
-
-	// State:
-	EsWindowStyle style;
-	EsRectangle solidOffsets, embedInsets;
-	bool solid, noClickActivate, hidden, isMaximised, alwaysOnTop, hoveringOverEmbed, activationClick, noBringToFront;
-	volatile bool closed;
-
-	// Appearance:
-	Surface surface;
-	EsRectangle opaqueBounds, blurBounds;
-	uint8_t alpha, material;
-
-	// Owner and children:
-	Process *owner;
-	void *apiWindow;
-	EmbeddedWindow *embed;
-	volatile uint32_t handles;
-	EsObjectID id;
-
-	// Location:
-	EsPoint position;
-	size_t width, height;
-};
-
-struct NetTask {
-	void (*callback)(NetTask *task, void *receivedData);
-	struct NetInterface *interface;
-	uint16_t index;
-	int16_t error;
-	uint8_t step;
-	bool completed;
-};
-
-struct KMACAddress {
-	uint8_t d[6];
-};
-
-struct EsAddress {
-	union {
-		struct {
-			uint32_t ipv4;
-			uint16_t port;
-		};
-
-		uint8_t d[20];
-	};
-};
-
-struct NetTCPConnectionTask : NetTask {
-	uint32_t sendUnacknowledged; // Points at the end of the data the server has acknowledged receiving from us.
-	uint32_t sendNext; // Points at the end of data we've sent.
-	uint32_t sendWindow; // The maximum distance sendNext can be past sendUnacknowledged.
-	uint32_t receiveNext; // Points at the end of data we've acknowledged receiving from the server.
-	uint16_t receiveWindow; // The maximum distance the server can sent data past receiveNext.
-
-	uint32_t initialSend, initialReceive;
-	uint32_t finSequence;
-	uint32_t sendWL1;
-	uint32_t sendWL2;
-
-	KMACAddress destinationMAC;
-};
-
-struct NetConnection {
-	NetTCPConnectionTask task;
-
-	MMSharedRegion *bufferRegion;
-	uint8_t *sendBuffer;
-	uint8_t *receiveBuffer;
-	size_t sendBufferBytes;
-	size_t receiveBufferBytes;
-
-	uintptr_t sendReadPointer; // The end of the data that we've sent to the server (possibly unacknolwedged).
-	uintptr_t sendWritePointer; // The end of the data that the application has written for us to send.
-	uintptr_t receiveWritePointer; // The end of the data that we've received from the server with no missing segments.
-	uintptr_t receiveReadPointer; // The end of the data that the user has processed from the receive buffer.
-
-	RangeSet receivedData;
-
-	EsAddress address;
-	KMutex mutex;
-
-	volatile uintptr_t handles;
-};
-
-// @TODO: implement
-NetConnection *NetConnectionOpen(EsAddress *address, size_t sendBufferBytes, size_t receiveBufferBytes, uint32_t flags)
-{
-    (void)address;
-    (void)sendBufferBytes;
-    (void)receiveBufferBytes;
-    (void)flags;
-    KernelPanic("Unimplemented");
-    return nullptr;
-}
-void NetConnectionClose(NetConnection *connection)
-{
-    (void)connection;
-    KernelPanic("Unimplemented");
-}
-void NetConnectionNotify(NetConnection *connection, uintptr_t sendWritePointer, uintptr_t receiveReadPointer)
-{
-    (void)connection;
-    (void)sendWritePointer;
-    (void)receiveReadPointer;
-    KernelPanic("Unimplemented");
-}
-void NetConnectionDestroy(NetConnection *connection)
-{
-    (void)connection;
-    KernelPanic("Unimplemented");
-}
 
 void ProcessRemove(Process *process);
 extern "C" void ThreadRemove(Thread* thread);
@@ -5923,7 +5498,7 @@ void CloseHandleToObject(void *object, KernelObjectType type, uint32_t flags)
 		case KERNEL_OBJECT_PROCESS: {
 			Process *process = (Process *) object;
 			uintptr_t previous = __sync_fetch_and_sub(&process->handles, 1);
-			KernelLog(LOG_VERBOSE, "Scheduler", "close process handle", "Closed handle to process %d; %d handles remain.\n", process->id, process->handles);
+			// @Log
 
 			if (previous == 0) {
 				KernelPanic("CloseHandleToProcess - All handles to process %x have been closed.\n", process);
@@ -5960,15 +5535,7 @@ void CloseHandleToObject(void *object, KernelObjectType type, uint32_t flags)
 		} break;
 
 		case KERNEL_OBJECT_CONSTANT_BUFFER: {
-			ConstantBuffer *buffer = (ConstantBuffer *) object;
-			KMutexAcquire(&objectHandleCountChange);
-			bool destroy = buffer->handles == 1;
-			buffer->handles--;
-			KMutexRelease(&objectHandleCountChange);
-
-			if (destroy) {
-				EsHeapFree(object, sizeof(ConstantBuffer) + buffer->bytes, buffer->isPaged ? K_PAGED : K_FIXED);
-			}
+                                                TODO();
 		} break;
 
 		case KERNEL_OBJECT_SHMEM: {
@@ -5984,83 +5551,19 @@ void CloseHandleToObject(void *object, KernelObjectType type, uint32_t flags)
 		} break;
 
 		case KERNEL_OBJECT_WINDOW: {
-			Window *window = (Window *) object;
-			unsigned previous = __sync_fetch_and_sub(&window->handles, 1);
-			if (!previous) KernelPanic("CloseHandleToObject - Window %x has no handles.\n", window);
-
-			if (previous == 2) {
-				KEventSet(&windowManager.windowsToCloseEvent, true /* maybe already set */);
-			} else if (previous == 1) {
-				window->Destroy();
-			}
+            TODO();
 		} break;
 
 		case KERNEL_OBJECT_EMBEDDED_WINDOW: {
-			EmbeddedWindow *window = (EmbeddedWindow *) object;
-			unsigned previous = __sync_fetch_and_sub(&window->handles, 1);
-			if (!previous) KernelPanic("CloseHandleToObject - EmbeddedWindow %x has no handles.\n", window);
-
-			if (previous == 2) {
-				KEventSet(&windowManager.windowsToCloseEvent, true /* maybe already set */);
-			} else if (previous == 1) {
-				window->Destroy();
-			}
+            TODO();
 		} break;
-
-#ifdef ENABLE_POSIX_SUBSYSTEM
-		case KERNEL_OBJECT_POSIX_FD: {
-			POSIXFile *file = (POSIXFile *) object;
-			KMutexAcquire(&file->mutex);
-			file->handles--;
-			bool destroy = !file->handles;
-			KMutexRelease(&file->mutex);
-
-			if (destroy) {
-				if (file->type == POSIX_FILE_NORMAL || file->type == POSIX_FILE_DIRECTORY) CloseHandleToObject(file->node, KERNEL_OBJECT_NODE, file->openFlags);
-				if (file->type == POSIX_FILE_PIPE) CloseHandleToObject(file->pipe, KERNEL_OBJECT_PIPE, file->openFlags);
-				EsHeapFree(file->path, 0, K_FIXED);
-				EsHeapFree(file->directoryBuffer, file->directoryBufferLength, K_PAGED);
-				EsHeapFree(file, sizeof(POSIXFile), K_FIXED);
-			}
-		} break;
-#endif
 
 		case KERNEL_OBJECT_PIPE: {
-			Pipe *pipe = (Pipe *) object;
-			KMutexAcquire(&pipe->mutex);
-
-			if (flags & PIPE_READER) {
-				pipe->readers--;
-
-				if (!pipe->readers) {
-					// If there are no more readers, wake up any blocking writers.
-					KEventSet(&pipe->canWrite, true);
-				}
-			} 
-			
-			if (flags & PIPE_WRITER) {
-				pipe->writers--;
-
-				if (!pipe->writers) {
-					// If there are no more writers, wake up any blocking readers.
-					KEventSet(&pipe->canRead, true);
-				}
-			} 
-
-			bool destroy = pipe->readers == 0 && pipe->writers == 0;
-
-			KMutexRelease(&pipe->mutex);
-
-			if (destroy) {
-				EsHeapFree(pipe, sizeof(Pipe), K_PAGED);
-			}
+            TODO();
 		} break;
 
 		case KERNEL_OBJECT_CONNECTION: {
-			NetConnection *connection = (NetConnection *) object;
-			unsigned previous = __sync_fetch_and_sub(&connection->handles, 1);
-			if (!previous) KernelPanic("CloseHandleToObject - NetConnection %x has no handles.\n", connection);
-			if (previous == 1) NetConnectionClose(connection);
+            TODO();
 		} break;
 
 		case KERNEL_OBJECT_DEVICE: {
@@ -6074,7 +5577,7 @@ void CloseHandleToObject(void *object, KernelObjectType type, uint32_t flags)
 }
 
 void ProcessRemove(Process *process) {
-	KernelLog(LOG_INFO, "Scheduler", "remove process", "Removing process %d.\n", process->id);
+	// @Log
 
 	if (process->executableNode) {
 		// Close the handle to the executable node.
@@ -6131,61 +5634,27 @@ bool OpenHandleToObject(void *object, KernelObjectType type, uint32_t flags = 0)
 		} break;
 
 		case KERNEL_OBJECT_WINDOW: {
-			// NOTE The handle count of Window object is modified elsewhere.
-			Window *window = (Window *) object;
-			hadNoHandles = 0 == __sync_fetch_and_add(&window->handles, 1);
+            TODO();
 		} break;
 
 		case KERNEL_OBJECT_EMBEDDED_WINDOW: {
-			EmbeddedWindow *window = (EmbeddedWindow *) object;
-			hadNoHandles = 0 == __sync_fetch_and_add(&window->handles, 1);
+            TODO();
 		} break;
 
 		case KERNEL_OBJECT_CONSTANT_BUFFER: {
-			ConstantBuffer *buffer = (ConstantBuffer *) object;
-			KMutexAcquire(&objectHandleCountChange);
-			if (!buffer->handles) hadNoHandles = true;
-			else buffer->handles++;
-			KMutexRelease(&objectHandleCountChange);
+                                                TODO();
 		} break;
-
-#ifdef ENABLE_POSIX_SUBSYSTEM
-		case KERNEL_OBJECT_POSIX_FD: {
-			POSIXFile *file = (POSIXFile *) object;
-			KMutexAcquire(&file->mutex);
-			if (!file->handles) hadNoHandles = true;
-			else file->handles++;
-			KMutexRelease(&file->mutex);
-		} break;
-#endif
 
 		case KERNEL_OBJECT_NODE: {
 			failed = ES_SUCCESS != FSNodeOpenHandle((KNode *) object, flags, FS_NODE_OPEN_HANDLE_STANDARD);
 		} break;
 
 		case KERNEL_OBJECT_PIPE: {
-			Pipe *pipe = (Pipe *) object;
-			KMutexAcquire(&pipe->mutex);
-
-			if (((flags & PIPE_READER) && !pipe->readers)
-					|| ((flags & PIPE_WRITER) && !pipe->writers)) {
-				hadNoHandles = true;
-			} else {
-				if (flags & PIPE_READER) {
-					pipe->readers++;
-				} 
-
-				if (flags & PIPE_WRITER) {
-					pipe->writers++;
-				} 
-			}
-
-			KMutexRelease(&pipe->mutex);
+            TODO();
 		} break;
 
 		case KERNEL_OBJECT_CONNECTION: {
-			NetConnection *connection = (NetConnection *) object;
-			hadNoHandles = 0 == __sync_fetch_and_add(&connection->handles, 1);
+            TODO();
 		} break;
 
 		case KERNEL_OBJECT_DEVICE: {
@@ -6211,12 +5680,6 @@ extern "C" void thread_exit(Thread *thread);
 extern "C" void KThreadTerminate();
 extern "C" void MMSpaceOpenReference(MMSpace *space);
 extern "C" void MMSpaceDestroy(MMSpace *space);
-
-void DesktopSendMessage(_EsMessageWithObject *message)
-{
-    (void)message;
-    return;
-}
 
 extern "C" MMRegion *MMReserve(MMSpace *space, size_t bytes, unsigned flags, uintptr_t forcedAddress = 0) {
 	// TODO Handling EsHeapAllocate failures.
@@ -6470,8 +5933,7 @@ void CCInitialise() {
 		activeSectionManager.lruList.InsertEnd(&activeSectionManager.sections[i].listItem);
 	}
 
-	KernelLog(LOG_INFO, "Memory", "cache initialised", "MMInitialise - Active section manager initialised with a maximum of %d of entries.\n", 
-			activeSectionManager.sectionCount);
+	// @Log
 
 	KEventSet(&activeSectionManager.modifiedNonFull);
 	activeSectionManager.writeBackThread = ThreadSpawn("CCWriteBehind", (uintptr_t) CCWriteBehindThread, 0, ES_FLAGS_DEFAULT);
@@ -6521,7 +5983,7 @@ void MMInitialise() {
 		pmm.pageFrameDatabaseInitialised = true;
 
 		pmm.commitLimit = pmm.commitFixedLimit = commitLimit;
-		KernelLog(LOG_INFO, "Memory", "pmm initialised", "MMInitialise - PMM initialised with a fixed commit limit of %d pages.\n", pmm.commitLimit);
+		// @Log
 	}
 
 	{
@@ -6730,7 +6192,7 @@ extern "C" void ACPIParseTables()
 
     uintptr_t tableListAddress = (uintptr_t) sdt + ACPI_DESCRIPTOR_TABLE_HEADER_LENGTH;
 
-    KernelLog(LOG_INFO, "ACPI", "table count", "ACPIInitialise - Found %d tables.\n", tablesCount);
+    // @Log
 
     for (uintptr_t i = 0; i < tablesCount; i++) {
         uintptr_t address;
@@ -6745,7 +6207,7 @@ extern "C" void ACPIParseTables()
 
         ACPIDescriptorTable *header = (ACPIDescriptorTable *) MMMapPhysical(kernelMMSpace, address, sizeof(ACPIDescriptorTable), ES_FLAGS_DEFAULT);
 
-        KernelLog(LOG_INFO, "ACPI", "table enumerated", "ACPIInitialise - Found ACPI table '%s'.\n", 4, &header->signature);
+        // @Log
 
         if (header->signature == SIGNATURE_MADT) {
             madtHeader = (ACPIDescriptorTable *) MMMapPhysical(kernelMMSpace, address, header->length, ES_FLAGS_DEFAULT);
@@ -6759,9 +6221,7 @@ extern "C" void ACPIParseTables()
                 uint8_t bootArchitectureFlags = ((uint8_t *) fadt)[109];
                 acpi.ps2ControllerUnavailable = ~bootArchitectureFlags & (1 << 1);
                 acpi.vgaControllerUnavailable =  bootArchitectureFlags & (1 << 2);
-                KernelLog(LOG_INFO, "ACPI", "FADT", "PS/2 controller is %z; VGA controller is %z.\n",
-                        acpi.ps2ControllerUnavailable ? "unavailble" : "present",
-                        acpi.vgaControllerUnavailable ? "unavailble" : "present");
+                // @Log
             }
 
             MMFree(kernelMMSpace, fadt);
@@ -6772,7 +6232,7 @@ extern "C" void ACPIParseTables()
             if (header->length > 52 && ((uint8_t *) header)[52] == 0) {
                 uint64_t baseAddress;
                 EsMemoryCopy(&baseAddress, (uint8_t *) header + 44, sizeof(uint64_t));
-                KernelLog(LOG_INFO, "ACPI", "HPET", "Found primary HPET with base address %x.\n", baseAddress);
+                // @Log
                 acpi.hpetBaseAddress = (uint64_t *) MMMapPhysical(kernelMMSpace, baseAddress, 1024, ES_FLAGS_DEFAULT);
 
                 if (acpi.hpetBaseAddress) {
@@ -6782,8 +6242,7 @@ extern "C" void ACPIParseTables()
                     uint8_t revisionID = acpi.hpetBaseAddress[0] & 0xFF;
                     uint64_t initialCount = acpi.hpetBaseAddress[30];
 
-                    KernelLog(LOG_INFO, "ACPI", "HPET", "HPET has period of %d fs, revision ID %d, and initial count %d.\n",
-                            acpi.hpetPeriod, revisionID, initialCount);
+                    // @Log
                 }
             }
 
@@ -6836,11 +6295,7 @@ extern "C" void ACPIParseTables()
                 acpi.interruptOverrides[acpi.interruptOverrideCount].gsiNumber = ((uint32_t_unaligned *) data)[1];
                 acpi.interruptOverrides[acpi.interruptOverrideCount].activeLow = (data[8] & 2) ? true : false;
                 acpi.interruptOverrides[acpi.interruptOverrideCount].levelTriggered = (data[8] & 8) ? true : false;
-                KernelLog(LOG_INFO, "ACPI", "interrupt override", "ACPIInitialise - Source IRQ %d is mapped to GSI %d%z%z.\n",
-                        acpi.interruptOverrides[acpi.interruptOverrideCount].sourceIRQ,
-                        acpi.interruptOverrides[acpi.interruptOverrideCount].gsiNumber,
-                        acpi.interruptOverrides[acpi.interruptOverrideCount].activeLow ? ", active low" : ", active high",
-                        acpi.interruptOverrides[acpi.interruptOverrideCount].levelTriggered ? ", level triggered" : ", edge triggered");
+                // @Log
                 acpi.interruptOverrideCount++;
             } break;
 
@@ -6854,7 +6309,7 @@ extern "C" void ACPIParseTables()
             } break;
 
             default: {
-                KernelLog(LOG_ERROR, "ACPI", "unrecognised MADT entry", "ACPIInitialise - Found unknown entry of type %d in MADT\n", entryType);
+                // @Log
             } break;
         }
 
@@ -7022,12 +6477,6 @@ uintptr_t GetBootloaderInformationOffset() {
 	return bootloader_information_offset;
 }
 
-// Recursive page table mapping in slot 0x1FE, so that the top 2GB are available for mcmodel kernel.
-#define PAGE_TABLE_L4 ((volatile uint64_t *) 0xFFFFFF7FBFDFE000)
-#define PAGE_TABLE_L3 ((volatile uint64_t *) 0xFFFFFF7FBFC00000)
-#define PAGE_TABLE_L2 ((volatile uint64_t *) 0xFFFFFF7F80000000)
-#define PAGE_TABLE_L1 ((volatile uint64_t *) 0xFFFFFF0000000000)
-#define ENTRIES_PER_PAGE_TABLE (512)
 #define ENTRIES_PER_PAGE_TABLE_BITS (9)
 
 
@@ -7218,7 +6667,7 @@ void Scheduler::Yield(InterruptContext *context) {
 
 	if (killThread) {
 		local->currentThread->state = THREAD_TERMINATED;
-		KernelLog(LOG_INFO, "Scheduler", "terminate yielded thread", "Terminated yielded thread %x\n", local->currentThread);
+		// @Log
 		KRegisterAsyncTask(&local->currentThread->killAsyncTask, ThreadKill);
 	}
 
@@ -7330,1050 +6779,21 @@ void Scheduler::CreateProcessorThreads(CPULocalStorage *local) {
 	}
 }
 
-bool debugKeyPressed;
-
-//struct KGraphicsTarget : KDevice {
-struct KGraphicsTarget {
-	size_t screenWidth, screenHeight;
-	bool reducedColors; // Set to true if using less than 15 bit color.
-
-	void (*updateScreen)(K_USER_BUFFER const uint8_t *source, uint32_t sourceWidth, uint32_t sourceHeight, uint32_t sourceStride, 
-			uint32_t destinationX, uint32_t destinationY);
-	void (*debugPutBlock)(uintptr_t x, uintptr_t y, bool toggle);
-	void (*debugClearScreen)();
-};
-
-struct Graphics {
-    KGraphicsTarget* target;
-    size_t width, height; 
-	Surface frameBuffer;
-	bool debuggerActive;
-	size_t totalSurfaceBytes;
-};
-
-Graphics graphics;
-size_t debugRows, debugColumns, debugCurrentRow, debugCurrentColumn;
-bool printToDebugger = false;
-uintptr_t terminalPosition = 80;
-
-#define KERNEL_LOG_SIZE (262144)
-char kernelLog[KERNEL_LOG_SIZE];
-uintptr_t kernelLogPosition;
-
-KSpinlock terminalLock; 
-KSpinlock printLock;
-#define VGA_FONT_WIDTH (9)
-#define VGA_FONT_HEIGHT (16)
-
-const uint64_t vgaFont[] = {
-	0x0000000000000000UL, 0x0000000000000000UL, 0xBD8181A5817E0000UL, 0x000000007E818199UL, 0xC3FFFFDBFF7E0000UL, 0x000000007EFFFFE7UL, 0x7F7F7F3600000000UL, 0x00000000081C3E7FUL, 
-	0x7F3E1C0800000000UL, 0x0000000000081C3EUL, 0xE7E73C3C18000000UL, 0x000000003C1818E7UL, 0xFFFF7E3C18000000UL, 0x000000003C18187EUL, 0x3C18000000000000UL, 0x000000000000183CUL, 
-	0xC3E7FFFFFFFFFFFFUL, 0xFFFFFFFFFFFFE7C3UL, 0x42663C0000000000UL, 0x00000000003C6642UL, 0xBD99C3FFFFFFFFFFUL, 0xFFFFFFFFFFC399BDUL, 0x331E4C5870780000UL, 0x000000001E333333UL, 
-	0x3C666666663C0000UL, 0x0000000018187E18UL, 0x0C0C0CFCCCFC0000UL, 0x00000000070F0E0CUL, 0xC6C6C6FEC6FE0000UL, 0x0000000367E7E6C6UL, 0xE73CDB1818000000UL, 0x000000001818DB3CUL, 
-	0x1F7F1F0F07030100UL, 0x000000000103070FUL, 0x7C7F7C7870604000UL, 0x0000000040607078UL, 0x1818187E3C180000UL, 0x0000000000183C7EUL, 0x6666666666660000UL, 0x0000000066660066UL, 
-	0xD8DEDBDBDBFE0000UL, 0x00000000D8D8D8D8UL, 0x6363361C06633E00UL, 0x0000003E63301C36UL, 0x0000000000000000UL, 0x000000007F7F7F7FUL, 0x1818187E3C180000UL, 0x000000007E183C7EUL, 
-	0x1818187E3C180000UL, 0x0000000018181818UL, 0x1818181818180000UL, 0x00000000183C7E18UL, 0x7F30180000000000UL, 0x0000000000001830UL, 0x7F060C0000000000UL, 0x0000000000000C06UL, 
-	0x0303000000000000UL, 0x0000000000007F03UL, 0xFF66240000000000UL, 0x0000000000002466UL, 0x3E1C1C0800000000UL, 0x00000000007F7F3EUL, 0x3E3E7F7F00000000UL, 0x0000000000081C1CUL, 
-	0x0000000000000000UL, 0x0000000000000000UL, 0x18183C3C3C180000UL, 0x0000000018180018UL, 0x0000002466666600UL, 0x0000000000000000UL, 0x36367F3636000000UL, 0x0000000036367F36UL, 
-	0x603E0343633E1818UL, 0x000018183E636160UL, 0x1830634300000000UL, 0x000000006163060CUL, 0x3B6E1C36361C0000UL, 0x000000006E333333UL, 0x000000060C0C0C00UL, 0x0000000000000000UL, 
-	0x0C0C0C0C18300000UL, 0x0000000030180C0CUL, 0x30303030180C0000UL, 0x000000000C183030UL, 0xFF3C660000000000UL, 0x000000000000663CUL, 0x7E18180000000000UL, 0x0000000000001818UL, 
-	0x0000000000000000UL, 0x0000000C18181800UL, 0x7F00000000000000UL, 0x0000000000000000UL, 0x0000000000000000UL, 0x0000000018180000UL, 0x1830604000000000UL, 0x000000000103060CUL, 
-	0xDBDBC3C3663C0000UL, 0x000000003C66C3C3UL, 0x1818181E1C180000UL, 0x000000007E181818UL, 0x0C183060633E0000UL, 0x000000007F630306UL, 0x603C6060633E0000UL, 0x000000003E636060UL, 
-	0x7F33363C38300000UL, 0x0000000078303030UL, 0x603F0303037F0000UL, 0x000000003E636060UL, 0x633F0303061C0000UL, 0x000000003E636363UL, 0x18306060637F0000UL, 0x000000000C0C0C0CUL, 
-	0x633E6363633E0000UL, 0x000000003E636363UL, 0x607E6363633E0000UL, 0x000000001E306060UL, 0x0000181800000000UL, 0x0000000000181800UL, 0x0000181800000000UL, 0x000000000C181800UL, 
-	0x060C183060000000UL, 0x000000006030180CUL, 0x00007E0000000000UL, 0x000000000000007EUL, 0x6030180C06000000UL, 0x00000000060C1830UL, 0x18183063633E0000UL, 0x0000000018180018UL, 
-	0x7B7B63633E000000UL, 0x000000003E033B7BUL, 0x7F6363361C080000UL, 0x0000000063636363UL, 0x663E6666663F0000UL, 0x000000003F666666UL, 0x03030343663C0000UL, 0x000000003C664303UL, 
-	0x66666666361F0000UL, 0x000000001F366666UL, 0x161E1646667F0000UL, 0x000000007F664606UL, 0x161E1646667F0000UL, 0x000000000F060606UL, 0x7B030343663C0000UL, 0x000000005C666363UL, 
-	0x637F636363630000UL, 0x0000000063636363UL, 0x18181818183C0000UL, 0x000000003C181818UL, 0x3030303030780000UL, 0x000000001E333333UL, 0x1E1E366666670000UL, 0x0000000067666636UL, 
-	0x06060606060F0000UL, 0x000000007F664606UL, 0xC3DBFFFFE7C30000UL, 0x00000000C3C3C3C3UL, 0x737B7F6F67630000UL, 0x0000000063636363UL, 0x63636363633E0000UL, 0x000000003E636363UL, 
-	0x063E6666663F0000UL, 0x000000000F060606UL, 0x63636363633E0000UL, 0x000070303E7B6B63UL, 0x363E6666663F0000UL, 0x0000000067666666UL, 0x301C0663633E0000UL, 0x000000003E636360UL, 
-	0x18181899DBFF0000UL, 0x000000003C181818UL, 0x6363636363630000UL, 0x000000003E636363UL, 0xC3C3C3C3C3C30000UL, 0x00000000183C66C3UL, 0xDBC3C3C3C3C30000UL, 0x000000006666FFDBUL, 
-	0x18183C66C3C30000UL, 0x00000000C3C3663CUL, 0x183C66C3C3C30000UL, 0x000000003C181818UL, 0x0C183061C3FF0000UL, 0x00000000FFC38306UL, 0x0C0C0C0C0C3C0000UL, 0x000000003C0C0C0CUL, 
-	0x1C0E070301000000UL, 0x0000000040607038UL, 0x30303030303C0000UL, 0x000000003C303030UL, 0x0000000063361C08UL, 0x0000000000000000UL, 0x0000000000000000UL, 0x0000FF0000000000UL, 
-	0x0000000000180C0CUL, 0x0000000000000000UL, 0x3E301E0000000000UL, 0x000000006E333333UL, 0x66361E0606070000UL, 0x000000003E666666UL, 0x03633E0000000000UL, 0x000000003E630303UL, 
-	0x33363C3030380000UL, 0x000000006E333333UL, 0x7F633E0000000000UL, 0x000000003E630303UL, 0x060F0626361C0000UL, 0x000000000F060606UL, 0x33336E0000000000UL, 0x001E33303E333333UL, 
-	0x666E360606070000UL, 0x0000000067666666UL, 0x18181C0018180000UL, 0x000000003C181818UL, 0x6060700060600000UL, 0x003C666660606060UL, 0x1E36660606070000UL, 0x000000006766361EUL, 
-	0x18181818181C0000UL, 0x000000003C181818UL, 0xDBFF670000000000UL, 0x00000000DBDBDBDBUL, 0x66663B0000000000UL, 0x0000000066666666UL, 0x63633E0000000000UL, 0x000000003E636363UL, 
-	0x66663B0000000000UL, 0x000F06063E666666UL, 0x33336E0000000000UL, 0x007830303E333333UL, 0x666E3B0000000000UL, 0x000000000F060606UL, 0x06633E0000000000UL, 0x000000003E63301CUL, 
-	0x0C0C3F0C0C080000UL, 0x00000000386C0C0CUL, 0x3333330000000000UL, 0x000000006E333333UL, 0xC3C3C30000000000UL, 0x00000000183C66C3UL, 0xC3C3C30000000000UL, 0x0000000066FFDBDBUL, 
-	0x3C66C30000000000UL, 0x00000000C3663C18UL, 0x6363630000000000UL, 0x001F30607E636363UL, 0x18337F0000000000UL, 0x000000007F63060CUL, 0x180E181818700000UL, 0x0000000070181818UL, 
-	0x1800181818180000UL, 0x0000000018181818UL, 0x18701818180E0000UL, 0x000000000E181818UL, 0x000000003B6E0000UL, 0x0000000000000000UL, 0x63361C0800000000UL, 0x00000000007F6363UL, 
-};
-
-typedef void (*FormatCallback)(int character, void *data);
-
-#define UTF8_LENGTH_CHAR(character, value) { \
-	char first = *(character); \
- \
-	if (!(first & 0x80)) \
-		value = 1; \
-	else if ((first & 0xE0) == 0xC0) \
-		value = 2; \
-	else if ((first & 0xF0) == 0xE0) \
-		value = 3; \
-  	else if ((first & 0xF8) == 0xF0) \
-		value = 4; \
-	else if ((first & 0xFC) == 0xF8) \
-		value = 5; \
-	else if ((first & 0xFE) == 0xFC) \
-		value = 6; \
-	else \
-		value = 0; \
-}
-
-#define ES_STRING_FORMAT_SIMPLE		(1 << 0)
-
-#define DEFINE_INTERFACE_STRING(name, text) static const char *interfaceString_ ## name = text;
-#define INTERFACE_STRING(name) interfaceString_ ## name, -1
-
-#define ELLIPSIS "…"
-#define HYPHENATION_POINT "‧"
-#define OPEN_SPEECH "\u201C"
-#define CLOSE_SPEECH "\u201D"
-#define SYSTEM_BRAND_SHORT "Essence"
-
-// Common.
-
-DEFINE_INTERFACE_STRING(CommonErrorTitle, "Error");
-
-DEFINE_INTERFACE_STRING(CommonOK, "OK");
-DEFINE_INTERFACE_STRING(CommonCancel, "Cancel");
-
-DEFINE_INTERFACE_STRING(CommonUndo, "Undo");
-DEFINE_INTERFACE_STRING(CommonRedo, "Redo");
-DEFINE_INTERFACE_STRING(CommonClipboardCut, "Cut");
-DEFINE_INTERFACE_STRING(CommonClipboardCopy, "Copy");
-DEFINE_INTERFACE_STRING(CommonClipboardPaste, "Paste");
-DEFINE_INTERFACE_STRING(CommonSelectionSelectAll, "Select all");
-DEFINE_INTERFACE_STRING(CommonSelectionDelete, "Delete");
-
-DEFINE_INTERFACE_STRING(CommonFormatPopup, "Format");
-DEFINE_INTERFACE_STRING(CommonFormatSize, "Text size:");
-DEFINE_INTERFACE_STRING(CommonFormatLanguage, "Language:");
-DEFINE_INTERFACE_STRING(CommonFormatPlainText, "Plain text");
-
-DEFINE_INTERFACE_STRING(CommonFileMenu, "File");
-DEFINE_INTERFACE_STRING(CommonFileSave, "Save");
-DEFINE_INTERFACE_STRING(CommonFileShare, "Share");
-DEFINE_INTERFACE_STRING(CommonFileMakeCopy, "Make a copy");
-DEFINE_INTERFACE_STRING(CommonFileVersionHistory, "Version history" ELLIPSIS);
-DEFINE_INTERFACE_STRING(CommonFileShowInFileManager, "Show in File Manager" ELLIPSIS);
-DEFINE_INTERFACE_STRING(CommonFileMenuFileSize, "Size:");
-DEFINE_INTERFACE_STRING(CommonFileMenuFileLocation, "Where:");
-DEFINE_INTERFACE_STRING(CommonFileUnchanged, "(All changes saved.)");
-
-DEFINE_INTERFACE_STRING(CommonZoomIn, "Zoom in");
-DEFINE_INTERFACE_STRING(CommonZoomOut, "Zoom out");
-
-DEFINE_INTERFACE_STRING(CommonSearchOpen, "Search");
-DEFINE_INTERFACE_STRING(CommonSearchNoMatches, "No matches found.");
-DEFINE_INTERFACE_STRING(CommonSearchNext, "Find next");
-DEFINE_INTERFACE_STRING(CommonSearchPrevious, "Find previous");
-DEFINE_INTERFACE_STRING(CommonSearchPrompt, "Search for:");
-DEFINE_INTERFACE_STRING(CommonSearchPrompt2, "Enter text to search for.");
-
-DEFINE_INTERFACE_STRING(CommonItemFolder, "Folder");
-DEFINE_INTERFACE_STRING(CommonItemFile, "File");
-
-DEFINE_INTERFACE_STRING(CommonSortHeader, "Sort" ELLIPSIS);
-DEFINE_INTERFACE_STRING(CommonSortAscending, "Sort ascending");
-DEFINE_INTERFACE_STRING(CommonSortDescending, "Sort descending");
-DEFINE_INTERFACE_STRING(CommonSortAToZ, "A to Z");
-DEFINE_INTERFACE_STRING(CommonSortZToA, "Z to A");
-DEFINE_INTERFACE_STRING(CommonSortSmallToLarge, "Smallest first");
-DEFINE_INTERFACE_STRING(CommonSortLargeToSmall, "Largest first");
-DEFINE_INTERFACE_STRING(CommonSortOldToNew, "Oldest first");
-DEFINE_INTERFACE_STRING(CommonSortNewToOld, "Newest first");
-
-DEFINE_INTERFACE_STRING(CommonDriveHDD, "Hard disk");
-DEFINE_INTERFACE_STRING(CommonDriveSSD, "SSD");
-DEFINE_INTERFACE_STRING(CommonDriveCDROM, "CD-ROM");
-DEFINE_INTERFACE_STRING(CommonDriveUSBMassStorage, "USB drive");
-
-DEFINE_INTERFACE_STRING(CommonSystemBrand, SYSTEM_BRAND_SHORT " Alpha v0.1");
-
-DEFINE_INTERFACE_STRING(CommonListViewType, "List view");
-DEFINE_INTERFACE_STRING(CommonListViewTypeThumbnails, "Thumbnails");
-DEFINE_INTERFACE_STRING(CommonListViewTypeTiles, "Tiles");
-DEFINE_INTERFACE_STRING(CommonListViewTypeDetails, "Details");
-
-DEFINE_INTERFACE_STRING(CommonAnnouncementCopied, "Copied");
-DEFINE_INTERFACE_STRING(CommonAnnouncementCut, "Cut");
-DEFINE_INTERFACE_STRING(CommonAnnouncementTextCopied, "Text copied");
-DEFINE_INTERFACE_STRING(CommonAnnouncementCopyErrorResources, "There's not enough space to copy this");
-DEFINE_INTERFACE_STRING(CommonAnnouncementCopyErrorOther, "Could not copy");
-DEFINE_INTERFACE_STRING(CommonAnnouncementPasteErrorOther, "Could not paste");
-
-DEFINE_INTERFACE_STRING(CommonEmpty, "empty");
-
-DEFINE_INTERFACE_STRING(CommonUnitPercent, "%");
-DEFINE_INTERFACE_STRING(CommonUnitBytes, " B");
-DEFINE_INTERFACE_STRING(CommonUnitKilobytes, " kB");
-DEFINE_INTERFACE_STRING(CommonUnitMegabytes, " MB");
-DEFINE_INTERFACE_STRING(CommonUnitGigabytes, " GB");
-DEFINE_INTERFACE_STRING(CommonUnitMilliseconds, " ms");
-DEFINE_INTERFACE_STRING(CommonUnitSeconds, " s");
-DEFINE_INTERFACE_STRING(CommonUnitBits, " bits");
-DEFINE_INTERFACE_STRING(CommonUnitPixels, " px");
-DEFINE_INTERFACE_STRING(CommonUnitDPI, " dpi");
-DEFINE_INTERFACE_STRING(CommonUnitBps, " Bps");
-DEFINE_INTERFACE_STRING(CommonUnitKBps, " kBps");
-DEFINE_INTERFACE_STRING(CommonUnitMBps, " MBps");
-DEFINE_INTERFACE_STRING(CommonUnitHz, " Hz");
-DEFINE_INTERFACE_STRING(CommonUnitKHz, " kHz");
-DEFINE_INTERFACE_STRING(CommonUnitMHz, " MHz");
-
-DEFINE_INTERFACE_STRING(CommonBooleanYes, "Yes");
-DEFINE_INTERFACE_STRING(CommonBooleanNo, "No");
-DEFINE_INTERFACE_STRING(CommonBooleanOn, "On");
-DEFINE_INTERFACE_STRING(CommonBooleanOff, "Off");
-
-// Desktop.
-
-DEFINE_INTERFACE_STRING(DesktopNewTabTitle, "New Tab");
-DEFINE_INTERFACE_STRING(DesktopShutdownTitle, "Shut Down");
-DEFINE_INTERFACE_STRING(DesktopShutdownAction, "Shut down");
-DEFINE_INTERFACE_STRING(DesktopRestartAction, "Restart");
-DEFINE_INTERFACE_STRING(DesktopForceQuit, "Force quit");
-DEFINE_INTERFACE_STRING(DesktopCrashedApplication, "The application has crashed. If you're a developer, more information is available in System Monitor.");
-DEFINE_INTERFACE_STRING(DesktopNoSuchApplication, "The requested application could not found. It may have been uninstalled.");
-DEFINE_INTERFACE_STRING(DesktopApplicationStartupError, "The requested application could not be started. Your system may be low on resources, or the application files may have been corrupted.");
-DEFINE_INTERFACE_STRING(DesktopNotResponding, "The application is not responding.\nIf you choose to force quit, any unsaved data may be lost.");
-DEFINE_INTERFACE_STRING(DesktopConfirmShutdown, "Are you sure you want to turn off your computer? All applications will be closed.");
-
-DEFINE_INTERFACE_STRING(DesktopCloseTab, "Close tab");
-DEFINE_INTERFACE_STRING(DesktopMoveTabToNewWindow, "Move tab to new window");
-DEFINE_INTERFACE_STRING(DesktopMoveTabToNewWindowSplitLeft, "Move tab to left of screen");
-DEFINE_INTERFACE_STRING(DesktopMoveTabToNewWindowSplitRight, "Move tab to right of screen");
-DEFINE_INTERFACE_STRING(DesktopInspectUI, "Inspect UI");
-DEFINE_INTERFACE_STRING(DesktopCloseWindow, "Close window");
-DEFINE_INTERFACE_STRING(DesktopCloseAllTabs, "Close all tabs");
-DEFINE_INTERFACE_STRING(DesktopMaximiseWindow, "Fill screen");
-DEFINE_INTERFACE_STRING(DesktopRestoreWindow, "Restore position");
-DEFINE_INTERFACE_STRING(DesktopMinimiseWindow, "Hide");
-DEFINE_INTERFACE_STRING(DesktopCenterWindow, "Center in screen");
-DEFINE_INTERFACE_STRING(DesktopSnapWindowLeft, "Move to left side");
-DEFINE_INTERFACE_STRING(DesktopSnapWindowRight, "Move to right side");
-
-DEFINE_INTERFACE_STRING(DesktopSettingsApplication, "Settings");
-DEFINE_INTERFACE_STRING(DesktopSettingsTitle, "Settings");
-DEFINE_INTERFACE_STRING(DesktopSettingsBackButton, "All settings");
-DEFINE_INTERFACE_STRING(DesktopSettingsUndoButton, "Undo changes");
-DEFINE_INTERFACE_STRING(DesktopSettingsAccessibility, "Accessibility");
-DEFINE_INTERFACE_STRING(DesktopSettingsApplications, "Applications");
-DEFINE_INTERFACE_STRING(DesktopSettingsDateAndTime, "Date and time");
-DEFINE_INTERFACE_STRING(DesktopSettingsDevices, "Devices");
-DEFINE_INTERFACE_STRING(DesktopSettingsDisplay, "Display");
-DEFINE_INTERFACE_STRING(DesktopSettingsKeyboard, "Keyboard");
-DEFINE_INTERFACE_STRING(DesktopSettingsLocalisation, "Localisation");
-DEFINE_INTERFACE_STRING(DesktopSettingsMouse, "Mouse");
-DEFINE_INTERFACE_STRING(DesktopSettingsNetwork, "Network");
-DEFINE_INTERFACE_STRING(DesktopSettingsPower, "Power");
-DEFINE_INTERFACE_STRING(DesktopSettingsSound, "Sound");
-DEFINE_INTERFACE_STRING(DesktopSettingsTheme, "Theme");
-
-DEFINE_INTERFACE_STRING(DesktopSettingsKeyboardKeyRepeatDelay, "Key repeat delay:");
-DEFINE_INTERFACE_STRING(DesktopSettingsKeyboardKeyRepeatRate, "Key repeat rate:");
-DEFINE_INTERFACE_STRING(DesktopSettingsKeyboardCaretBlinkRate, "Caret blink rate:");
-DEFINE_INTERFACE_STRING(DesktopSettingsKeyboardTestTextboxIntroduction, "Try your settings in the textbox below:");
-DEFINE_INTERFACE_STRING(DesktopSettingsKeyboardUseSmartQuotes, "Use smart quotes when typing");
-DEFINE_INTERFACE_STRING(DesktopSettingsKeyboardLayout, "Keyboard layout:");
-
-DEFINE_INTERFACE_STRING(DesktopSettingsMouseDoubleClickSpeed, "Double click time:");
-DEFINE_INTERFACE_STRING(DesktopSettingsMouseSpeed, "Cursor movement speed:");
-DEFINE_INTERFACE_STRING(DesktopSettingsMouseCursorTrails, "Cursor trail count:");
-DEFINE_INTERFACE_STRING(DesktopSettingsMouseLinesPerScrollNotch, "Lines to scroll per wheel notch:");
-DEFINE_INTERFACE_STRING(DesktopSettingsMouseSwapLeftAndRightButtons, "Swap left and right buttons");
-DEFINE_INTERFACE_STRING(DesktopSettingsMouseShowShadow, "Show shadow below cursor");
-DEFINE_INTERFACE_STRING(DesktopSettingsMouseLocateCursorOnCtrl, "Highlight cursor location when Ctrl is pressed");
-DEFINE_INTERFACE_STRING(DesktopSettingsMouseTestDoubleClickIntroduction, "Double click the circle below to try your setting. If it does not change color, increase the double click time.");
-DEFINE_INTERFACE_STRING(DesktopSettingsMouseUseAcceleration, "Move cursor faster when mouse is moved quickly");
-DEFINE_INTERFACE_STRING(DesktopSettingsMouseSlowOnAlt, "Move cursor slower when Alt is held");
-DEFINE_INTERFACE_STRING(DesktopSettingsMouseSpeedSlow, "Slow");
-DEFINE_INTERFACE_STRING(DesktopSettingsMouseSpeedFast, "Fast");
-DEFINE_INTERFACE_STRING(DesktopSettingsMouseCursorTrailsNone, "None");
-DEFINE_INTERFACE_STRING(DesktopSettingsMouseCursorTrailsMany, "Many");
-
-DEFINE_INTERFACE_STRING(DesktopSettingsDisplayUIScale, "Interface scale:");
-
-DEFINE_INTERFACE_STRING(DesktopSettingsThemeWindowColor, "Window color:");
-DEFINE_INTERFACE_STRING(DesktopSettingsThemeEnableHoverState, "Highlight the item the cursor is over");
-DEFINE_INTERFACE_STRING(DesktopSettingsThemeEnableAnimations, "Animate the user interface");
-DEFINE_INTERFACE_STRING(DesktopSettingsThemeWallpaper, "Wallpaper");
-
-// File operations.
-
-DEFINE_INTERFACE_STRING(FileCannotSave, "The document was not saved.");
-DEFINE_INTERFACE_STRING(FileCannotOpen, "The file could not be opened.");
-DEFINE_INTERFACE_STRING(FileCannotRename, "The file could not be renamed.");
-
-DEFINE_INTERFACE_STRING(FileRenameSuccess, "Renamed");
-
-DEFINE_INTERFACE_STRING(FileSaveErrorFileDeleted, "Another application deleted the file.");
-DEFINE_INTERFACE_STRING(FileSaveErrorCorrupt, "The file has been corrupted, and it cannot be modified.");
-DEFINE_INTERFACE_STRING(FileSaveErrorDrive, "The drive containing the file was unable to modify it.");
-DEFINE_INTERFACE_STRING(FileSaveErrorTooLarge, "The drive does not support files large enough to store this document.");
-DEFINE_INTERFACE_STRING(FileSaveErrorConcurrentAccess, "Another application is modifying the file.");
-DEFINE_INTERFACE_STRING(FileSaveErrorDriveFull, "The drive is full. Try deleting some files to free up space.");
-DEFINE_INTERFACE_STRING(FileSaveErrorResourcesLow, "The system is low on resources. Close some applcations and try again.");
-DEFINE_INTERFACE_STRING(FileSaveErrorAlreadyExists, "There is already a file called " OPEN_SPEECH "%s" CLOSE_SPEECH " in this folder.");
-DEFINE_INTERFACE_STRING(FileSaveErrorTooManyFiles, "Too many files already have the same name.");
-DEFINE_INTERFACE_STRING(FileSaveErrorUnknown, "An unknown error occurred. Please try again later.");
-
-DEFINE_INTERFACE_STRING(FileLoadErrorCorrupt, "The file has been corrupted, and it cannot be opened.");
-DEFINE_INTERFACE_STRING(FileLoadErrorDrive, "The drive containing the file was unable to access its contents.");
-DEFINE_INTERFACE_STRING(FileLoadErrorResourcesLow, "The system is low on resources. Close some applcations and try again.");
-DEFINE_INTERFACE_STRING(FileLoadErrorUnknown, "An unknown error occurred. Please try again later.");
-
-DEFINE_INTERFACE_STRING(FileCloseWithModificationsTitle, "Do you want to save this document?");
-DEFINE_INTERFACE_STRING(FileCloseWithModificationsContent, "You need to save your changes to " OPEN_SPEECH "%s" CLOSE_SPEECH " before you can close it.");
-DEFINE_INTERFACE_STRING(FileCloseWithModificationsSave, "Save and close");
-DEFINE_INTERFACE_STRING(FileCloseWithModificationsDelete, "Discard");
-DEFINE_INTERFACE_STRING(FileCloseNewTitle, "Do you want to keep this document?");
-DEFINE_INTERFACE_STRING(FileCloseNewContent, "You need to save it before you can close " OPEN_SPEECH "%s" CLOSE_SPEECH ".");
-DEFINE_INTERFACE_STRING(FileCloseNewName, "Name:");
-
-// Image Editor.
-
-DEFINE_INTERFACE_STRING(ImageEditorToolBrush, "Brush");
-DEFINE_INTERFACE_STRING(ImageEditorToolFill, "Fill");
-DEFINE_INTERFACE_STRING(ImageEditorToolRectangle, "Rectangle");
-DEFINE_INTERFACE_STRING(ImageEditorToolSelect, "Select");
-DEFINE_INTERFACE_STRING(ImageEditorToolText, "Text");
-
-DEFINE_INTERFACE_STRING(ImageEditorCanvasSize, "Canvas size");
-
-DEFINE_INTERFACE_STRING(ImageEditorPropertyWidth, "Width:");
-DEFINE_INTERFACE_STRING(ImageEditorPropertyHeight, "Height:");
-DEFINE_INTERFACE_STRING(ImageEditorPropertyColor, "Color:");
-DEFINE_INTERFACE_STRING(ImageEditorPropertyBrushSize, "Brush size:");
-
-DEFINE_INTERFACE_STRING(ImageEditorImageTransformations, "Transform image");
-DEFINE_INTERFACE_STRING(ImageEditorRotateLeft, "Rotate left");
-DEFINE_INTERFACE_STRING(ImageEditorRotateRight, "Rotate right");
-DEFINE_INTERFACE_STRING(ImageEditorFlipHorizontally, "Flip horizontally");
-DEFINE_INTERFACE_STRING(ImageEditorFlipVertically, "Flip vertically");
-
-DEFINE_INTERFACE_STRING(ImageEditorImage, "Image");
-DEFINE_INTERFACE_STRING(ImageEditorPickTool, "Pick tool");
-
-DEFINE_INTERFACE_STRING(ImageEditorUnsupportedFormat, "The image is in an unsupported format. Try opening it with another application.");
-
-DEFINE_INTERFACE_STRING(ImageEditorNewFileName, "untitled.png");
-DEFINE_INTERFACE_STRING(ImageEditorNewDocument, "New bitmap image");
-
-DEFINE_INTERFACE_STRING(ImageEditorTitle, "Image Editor");
-
-// Text Editor.
-
-DEFINE_INTERFACE_STRING(TextEditorTitle, "Text Editor");
-DEFINE_INTERFACE_STRING(TextEditorNewFileName, "untitled.txt");
-DEFINE_INTERFACE_STRING(TextEditorNewDocument, "New text document");
-
-// Markdown Viewer.
-
-DEFINE_INTERFACE_STRING(MarkdownViewerTitle, "Markdown Viewer");
-
-// POSIX.
-
-DEFINE_INTERFACE_STRING(POSIXUnavailable, "This application depends on the POSIX subsystem. To enable it, select \am]Flag.ENABLE_POSIX_SUBSYSTEM\a] in \am]config\a].");
-DEFINE_INTERFACE_STRING(POSIXTitle, "POSIX Application");
-
-// Font Book.
-
-DEFINE_INTERFACE_STRING(FontBookTitle, "Font Book");
-DEFINE_INTERFACE_STRING(FontBookTextSize, "Text size:");
-DEFINE_INTERFACE_STRING(FontBookPreviewText, "Preview text:");
-DEFINE_INTERFACE_STRING(FontBookVariants, "Variants");
-DEFINE_INTERFACE_STRING(FontBookPreviewTextDefault, "Looking for a change of mind.");
-DEFINE_INTERFACE_STRING(FontBookPreviewTextLongDefault, "Sphinx of black quartz, judge my vow.");
-DEFINE_INTERFACE_STRING(FontBookOpenFont, "Open");
-DEFINE_INTERFACE_STRING(FontBookNavigationBack, "Back to all fonts");
-DEFINE_INTERFACE_STRING(FontBookVariantNormal100, "Thin");
-DEFINE_INTERFACE_STRING(FontBookVariantNormal200, "Extra light");
-DEFINE_INTERFACE_STRING(FontBookVariantNormal300, "Light");
-DEFINE_INTERFACE_STRING(FontBookVariantNormal400, "Normal");
-DEFINE_INTERFACE_STRING(FontBookVariantNormal500, "Medium");
-DEFINE_INTERFACE_STRING(FontBookVariantNormal600, "Semi bold");
-DEFINE_INTERFACE_STRING(FontBookVariantNormal700, "Bold");
-DEFINE_INTERFACE_STRING(FontBookVariantNormal800, "Extra bold");
-DEFINE_INTERFACE_STRING(FontBookVariantNormal900, "Black");
-DEFINE_INTERFACE_STRING(FontBookVariantItalic100, "Thin (italic)");
-DEFINE_INTERFACE_STRING(FontBookVariantItalic200, "Extra light (italic)");
-DEFINE_INTERFACE_STRING(FontBookVariantItalic300, "Light (italic)");
-DEFINE_INTERFACE_STRING(FontBookVariantItalic400, "Normal (italic)");
-DEFINE_INTERFACE_STRING(FontBookVariantItalic500, "Medium (italic)");
-DEFINE_INTERFACE_STRING(FontBookVariantItalic600, "Semi bold (italic)");
-DEFINE_INTERFACE_STRING(FontBookVariantItalic700, "Bold (italic)");
-DEFINE_INTERFACE_STRING(FontBookVariantItalic800, "Extra bold (italic)");
-DEFINE_INTERFACE_STRING(FontBookVariantItalic900, "Black (italic)");
-
-// File Manager.
-
-DEFINE_INTERFACE_STRING(FileManagerOpenFolderError, "The folder could not be opened.");
-DEFINE_INTERFACE_STRING(FileManagerNewFolderError, "Could not create the folder.");
-DEFINE_INTERFACE_STRING(FileManagerRenameItemError, "The item could not be renamed.");
-DEFINE_INTERFACE_STRING(FileManagerUnknownError, "An unknown error occurred.");
-DEFINE_INTERFACE_STRING(FileManagerTitle, "File Manager");
-DEFINE_INTERFACE_STRING(FileManagerRootFolder, "Computer");
-DEFINE_INTERFACE_STRING(FileManagerColumnName, "Name");
-DEFINE_INTERFACE_STRING(FileManagerColumnType, "Type");
-DEFINE_INTERFACE_STRING(FileManagerColumnSize, "Size");
-DEFINE_INTERFACE_STRING(FileManagerOpenFolderTask, "Opening folder" ELLIPSIS);
-DEFINE_INTERFACE_STRING(FileManagerOpenFileError, "The file could not be opened.");
-DEFINE_INTERFACE_STRING(FileManagerNoRegisteredApplicationsForFile, "None of the applications installed on this computer can open this type of file.");
-DEFINE_INTERFACE_STRING(FileManagerFolderNamePrompt, "Folder name:");
-DEFINE_INTERFACE_STRING(FileManagerNewFolderAction, "Create");
-DEFINE_INTERFACE_STRING(FileManagerNewFolderTask, "Creating folder" ELLIPSIS);
-DEFINE_INTERFACE_STRING(FileManagerRenameTitle, "Rename");
-DEFINE_INTERFACE_STRING(FileManagerRenamePrompt, "Type the new name of the item:");
-DEFINE_INTERFACE_STRING(FileManagerRenameAction, "Rename");
-DEFINE_INTERFACE_STRING(FileManagerRenameTask, "Renaming item" ELLIPSIS);
-DEFINE_INTERFACE_STRING(FileManagerEmptyBookmarkView, "Drag folders here to bookmark them.");
-DEFINE_INTERFACE_STRING(FileManagerEmptyFolderView, "Drag items here to add them to the folder.");
-DEFINE_INTERFACE_STRING(FileManagerNewFolderToolbarItem, "New folder");
-DEFINE_INTERFACE_STRING(FileManagerNewFolderName, "New folder");
-DEFINE_INTERFACE_STRING(FileManagerGenericError, "The cause of the error could not be identified.");
-DEFINE_INTERFACE_STRING(FileManagerItemAlreadyExistsError, "The item already exists in the folder.");
-DEFINE_INTERFACE_STRING(FileManagerItemDoesNotExistError, "The item does not exist.");
-DEFINE_INTERFACE_STRING(FileManagerPermissionNotGrantedError, "You don't have permission to modify this folder.");
-DEFINE_INTERFACE_STRING(FileManagerOngoingTaskDescription, "This shouldn't take long.");
-DEFINE_INTERFACE_STRING(FileManagerPlacesDrives, "Drives");
-DEFINE_INTERFACE_STRING(FileManagerPlacesBookmarks, "Bookmarks");
-DEFINE_INTERFACE_STRING(FileManagerBookmarksAddHere, "Add bookmark here");
-DEFINE_INTERFACE_STRING(FileManagerBookmarksRemoveHere, "Remove bookmark here");
-DEFINE_INTERFACE_STRING(FileManagerDrivesPage, "Drives/");
-DEFINE_INTERFACE_STRING(FileManagerInvalidPath, "The current path does not lead to a folder. It may have been deleted or moved.");
-DEFINE_INTERFACE_STRING(FileManagerInvalidDrive, "The drive containing this folder was disconnected.");
-DEFINE_INTERFACE_STRING(FileManagerRefresh, "Refresh");
-DEFINE_INTERFACE_STRING(FileManagerListContextActions, "Actions");
-DEFINE_INTERFACE_STRING(FileManagerCopyTask, "Copying" ELLIPSIS);
-DEFINE_INTERFACE_STRING(FileManagerMoveTask, "Moving" ELLIPSIS);
-DEFINE_INTERFACE_STRING(FileManagerGoBack, "Go back");
-DEFINE_INTERFACE_STRING(FileManagerGoForwards, "Go forwards");
-DEFINE_INTERFACE_STRING(FileManagerGoUp, "Go to containing folder");
-DEFINE_INTERFACE_STRING(FileManagerFileOpenIn, "File is open in " OPEN_SPEECH "%s" CLOSE_SPEECH);
-
-// 2048.
-
-DEFINE_INTERFACE_STRING(Game2048Score, "Score:");
-DEFINE_INTERFACE_STRING(Game2048Instructions, "Use the \aw6]arrow-keys\a] to slide the tiles. When matching tiles touch, they \aw6]merge\a] into one. Try to create the number \aw6]2048\a]!");
-DEFINE_INTERFACE_STRING(Game2048GameOver, "Game over");
-DEFINE_INTERFACE_STRING(Game2048GameOverExplanation, "There are no valid moves left.");
-DEFINE_INTERFACE_STRING(Game2048NewGame, "New game");
-DEFINE_INTERFACE_STRING(Game2048HighScore, "High score: \aw6]%d\a]");
-DEFINE_INTERFACE_STRING(Game2048NewHighScore, "You reached a new high score!");
-
-// Installer.
-
-DEFINE_INTERFACE_STRING(InstallerTitle, "Install " SYSTEM_BRAND_SHORT);
-DEFINE_INTERFACE_STRING(InstallerDrivesList, "Select the drive to install on:");
-DEFINE_INTERFACE_STRING(InstallerDrivesSelectHint, "Choose a drive from the list on the left.");
-DEFINE_INTERFACE_STRING(InstallerDriveRemoved, "The drive was disconnected.");
-DEFINE_INTERFACE_STRING(InstallerDriveReadOnly, "This drive is read-only. You cannot install " SYSTEM_BRAND_SHORT " on this drive.");
-DEFINE_INTERFACE_STRING(InstallerDriveNotEnoughSpace, "This drive does not have enough space to install " SYSTEM_BRAND_SHORT ".");
-DEFINE_INTERFACE_STRING(InstallerDriveCouldNotRead, "The drive could not be accessed. It may not be working correctly.");
-DEFINE_INTERFACE_STRING(InstallerDriveAlreadyHasPartitions, "The drive already has data on it. You cannot install " SYSTEM_BRAND_SHORT " on this drive.");
-DEFINE_INTERFACE_STRING(InstallerDriveUnsupported, "This drive uses unsupported features. You cannot install " SYSTEM_BRAND_SHORT " on this drive.");
-DEFINE_INTERFACE_STRING(InstallerDriveOkay, SYSTEM_BRAND_SHORT " can be installed on this drive.");
-DEFINE_INTERFACE_STRING(InstallerInstall, "Install");
-DEFINE_INTERFACE_STRING(InstallerViewLicenses, "Licenses");
-DEFINE_INTERFACE_STRING(InstallerGoBack, "Back");
-DEFINE_INTERFACE_STRING(InstallerFinish, "Finish");
-DEFINE_INTERFACE_STRING(InstallerCustomizeOptions, "Customize your computer.");
-DEFINE_INTERFACE_STRING(InstallerCustomizeOptionsHint, "More options will be available in Settings.");
-DEFINE_INTERFACE_STRING(InstallerUserName, "User name:");
-DEFINE_INTERFACE_STRING(InstallerTime, "Current time:");
-DEFINE_INTERFACE_STRING(InstallerSystemFont, "System font:");
-DEFINE_INTERFACE_STRING(InstallerFontDefault, "Default");
-DEFINE_INTERFACE_STRING(InstallerProgressMessage, "Installing, please wait" ELLIPSIS "\nDo not turn off your computer.\nProgress: \aw6]");
-DEFINE_INTERFACE_STRING(InstallerCompleteFromOther, "Installation has completed successfully. Remove the installation disk, and restart your computer.");
-DEFINE_INTERFACE_STRING(InstallerCompleteFromUSB, "Installation has completed successfully. Disconnect the installation USB, and restart your computer.");
-DEFINE_INTERFACE_STRING(InstallerVolumeLabel, "Essence HD");
-DEFINE_INTERFACE_STRING(InstallerUseMBR, "Use legacy BIOS boot (select for older computers)");
-DEFINE_INTERFACE_STRING(InstallerFailedArchiveCRCError, "The installation data has been corrupted. Create a new installation USB or disk, and try again.");
-DEFINE_INTERFACE_STRING(InstallerFailedGeneric, "The installation could not complete. This likely means that the drive you selected is failing. Try installing on a different drive.");
-DEFINE_INTERFACE_STRING(InstallerFailedResources, "The installation could not complete. Your computer does not have enough memory to install " SYSTEM_BRAND_SHORT);
-DEFINE_INTERFACE_STRING(InstallerNotSupported, "Your computer does not meet the minimum system requirements to install " SYSTEM_BRAND_SHORT ". Remove the installer, and restart your computer.");
-
-// TODO System Monitor.
-
-void _FormatInteger(FormatCallback callback, void *callbackData, long value, int pad = 0, bool simple = false) {
-	char buffer[32];
-
-	if (value < 0) {
-		callback('-', callbackData);
-	} else if (value == 0) {
-		for (int i = 0; i < (pad ?: 1); i++) {
-			callback('0', callbackData);
-		}
-
-		return;
-	}
-
-	int bp = 0;
-
-	while (value) {
-		int digit = (value % 10);
-		if (digit < 0) digit = -digit;
-		buffer[bp++] = '0' + digit;
-		value /= 10;
-	}
-
-	int cr = bp % 3;
-
-	for (int i = 0; i < pad - bp; i++) {
-		callback('0', callbackData);
-	}
-
-	for (int i = bp - 1; i >= 0; i--, cr--) {
-		if (!cr && !pad) {
-			if (i != bp - 1 && !simple) callback(',', callbackData);
-			cr = 3;
-		}
-
-		callback(buffer[i], callbackData);
-	}
-}
-
-static int utf8_length_char(const char *character) {
-	int value;
-	UTF8_LENGTH_CHAR(character, value);
-	return value;
-}
-
-static int utf8_value(const char *character, int maximumLength, int *_length) {
-	if (!maximumLength) return 0;
-	int length;
-	char first = *character; 
-
-	if (!(first & 0x80)) 
-		length = 1; 
-	else if ((first & 0xE0) == 0xC0) 
-		length = 2; 
-	else if ((first & 0xF0) == 0xE0) 
-		length = 3; 
-	else if ((first & 0xF8) == 0xF0) 
-		length = 4; 
-	else if ((first & 0xFC) == 0xF8) 
-		length = 5; 
-	else if ((first & 0xFE) == 0xFC) 
-		length = 6; 
-	else 
-		length = 0; 
-
-	if (maximumLength < length) return 0;
-	if (_length) *_length = length;
-
-	if (length == 1)
-		return (int)first;
-	else if (length == 2)
-		return (((int)first & 0x1F) << 6) | (((int)character[1]) & 0x3F);
-	else if (length == 3)
-		return (((int)first & 0xF) << 12) | ((((int)character[1]) & 0x3F) << 6) | (((int)character[2]) & 0x3F);
-	else if (length == 4)
-		return (((int)first & 0x7) << 18) | ((((int)character[1]) & 0x3F) << 12) | ((((int)character[2]) & 0x3F) << 6) |
-		(((int)character[3]) & 0x3F);
-	else if (length == 5)
-		return (((int)first & 0x3) << 24) | ((((int)character[1]) & 0x3F) << 18) | ((((int)character[2]) & 0x3F) << 12) |
-		((((int)character[4]) & 0x3F) << 6) | (((int)character[5]) & 0x3F);
-	else if (length == 6)
-		return (((int)first & 0x1) << 30) | ((((int)character[1]) & 0x3F) << 24) | ((((int)character[2]) & 0x3F) << 18) |
-		((((int)character[4]) & 0x3F) << 12) | ((((int)character[5]) & 0x3F) << 6) | (((int)character[6]) & 0x3F);
-	else
-		return 0; // Invalid code point
-}
-
-static int utf8_value(const char *character) {
-	int length;
-	UTF8_LENGTH_CHAR(character, length);
-
-	char first = *character;
-
-	int value;
-
-	if (length == 1)
-		value = (int)first;
-	else if (length == 2)
-		value = (((int)first & 0x1F) << 6) | (((int)character[1]) & 0x3F);
-	else if (length == 3)
-		value = (((int)first & 0xF) << 12) | ((((int)character[1]) & 0x3F) << 6) | (((int)character[2]) & 0x3F);
-	else if (length == 4)
-		value = (((int)first & 0x7) << 18) | ((((int)character[1]) & 0x3F) << 12) | ((((int)character[2]) & 0x3F) << 6) |
-		(((int)character[3]) & 0x3F);
-	else if (length == 5)
-		value = (((int)first & 0x3) << 24) | ((((int)character[1]) & 0x3F) << 18) | ((((int)character[2]) & 0x3F) << 12) |
-		((((int)character[4]) & 0x3F) << 6) | (((int)character[5]) & 0x3F);
-	else if (length == 6)
-		value = (((int)first & 0x1) << 30) | ((((int)character[1]) & 0x3F) << 24) | ((((int)character[2]) & 0x3F) << 18) |
-		((((int)character[4]) & 0x3F) << 12) | ((((int)character[5]) & 0x3F) << 6) | (((int)character[6]) & 0x3F);
-	else
-		value = 0; // Invalid code point
-
-	return value;
-}
-
-static int utf8_encode(int value, char *buffer) {
-	if (value < (1 << 7)) {
-		if (buffer) {
-			buffer[0] = value & 0x7F;
-		}
-
-		return 1;
-	} else if (value < (1 << 11)) {
-		if (buffer) {
-			buffer[0] = 0xC0 | ((value >> 6) & 0x1F);
-			buffer[1] = 0x80 | (value & 0x3F);
-		}
-
-		return 2;
-	} else if (value < (1 << 16)) {
-		if (buffer) {
-			buffer[0] = 0xE0 | ((value >> 12) & 0xF);
-			buffer[1] = 0x80 | ((value >> 6) & 0x3F);
-			buffer[2] = 0x80 | (value & 0x3F);
-		}
-
-		return 3;
-	} else if (value < (1 << 21)) {
-		if (buffer) {
-			buffer[0] = 0xF0 | ((value >> 18) & 0x7);
-			buffer[1] = 0x80 | ((value >> 12) & 0x3F);
-			buffer[2] = 0x80 | ((value >> 6) & 0x3F);
-			buffer[3] = 0x80 | (value & 0x3F);
-		}
-
-		return 4;
-	}
-
-	return 0; // Cannot encode character
-}
-
-static char *utf8_advance(const char *string) {
-	int length;
-	UTF8_LENGTH_CHAR(string, length);
-
-	if (!length) // Invalid code point 
-		return NULL;
-
-	return (char *) string + length;
-}
-
-static char *utf8_retreat(const char *string) {
-	// Keep going backwards until we find a non continuation character
-	do string--;
-	while (((*string) & 0xC0) == 0x80);
-	return (char *) string;
-}
-
-static int utf8_length(char *string, int max_bytes) {
-	if (!string)
-		return 0;
-	if (!(*string))
-		return 0;
-
-	if (!max_bytes) return 0;
-
-	int length = 0;
-	char *limit = string + max_bytes;
-
-	while ((max_bytes == -1 || string < limit) && *string) {
-		if (!string) // Invalid code point
-			return -1;
-
-		length++;
-		string = utf8_advance(string);
-	}
-
-	return length;
-}
-
-void WriteCStringToCallback(FormatCallback callback, void *callbackData, const char *cString) {
-	while (cString && *cString) {
-		callback(utf8_value(cString), callbackData);
-		cString = utf8_advance(cString);
-	}
-}
-
-// @TODO: this implementation is old, update
-void _StringFormat(FormatCallback callback, void *callbackData, const char *format, va_list arguments) {
-	int c;
-	int pad = 0;
-    int decimalPlaces = -1;
-	uint32_t flags = 0;
-
-	char buffer[32];
-	const char *hexChars = "0123456789ABCDEF";
-
-	while ((c = utf8_value((char *) format))) {
-		if (c == '%') {
-			repeat:;
-			format = utf8_advance((char *) format);
-			c = utf8_value((char *) format);
-
-			switch (c) {
-				case 'd': {
-					long value = va_arg(arguments, long);
-					_FormatInteger(callback, callbackData, value, pad, flags & ES_STRING_FORMAT_SIMPLE);
-				} break;
-
-				case 'i': {
-					int value = va_arg(arguments, int);
-					_FormatInteger(callback, callbackData, value, pad, flags & ES_STRING_FORMAT_SIMPLE);
-				} break;
-
-				case 'D': {
-					long value = va_arg(arguments, long);
-
-					if (value == 0) {
-						WriteCStringToCallback(callback, callbackData, interfaceString_CommonEmpty);
-					} else if (value < 1000) {
-						_FormatInteger(callback, callbackData, value, pad);
-						WriteCStringToCallback(callback, callbackData, interfaceString_CommonUnitBytes);
-					} else if (value < 1000000) {
-						_FormatInteger(callback, callbackData, value / 1000, pad);
-						callback('.', callbackData);
-						_FormatInteger(callback, callbackData, (value / 100) % 10, pad);
-						WriteCStringToCallback(callback, callbackData, interfaceString_CommonUnitKilobytes);
-					} else if (value < 1000000000) {
-						_FormatInteger(callback, callbackData, value / 1000000, pad);
-						callback('.', callbackData);
-						_FormatInteger(callback, callbackData, (value / 100000) % 10, pad);
-						WriteCStringToCallback(callback, callbackData, interfaceString_CommonUnitMegabytes);
-					} else {
-						_FormatInteger(callback, callbackData, value / 1000000000, pad);
-						callback('.', callbackData);
-						_FormatInteger(callback, callbackData, (value / 100000000) % 10, pad);
-						WriteCStringToCallback(callback, callbackData, interfaceString_CommonUnitGigabytes);
-					}
-				} break;
-
-				case 'R': {
-					EsRectangle value = va_arg(arguments, EsRectangle);
-					callback('{', callbackData);
-					_FormatInteger(callback, callbackData, value.l);
-					callback('-', callbackData);
-					callback('>', callbackData);
-					_FormatInteger(callback, callbackData, value.r);
-					callback(';', callbackData);
-					_FormatInteger(callback, callbackData, value.t);
-					callback('-', callbackData);
-					callback('>', callbackData);
-					_FormatInteger(callback, callbackData, value.b);
-					callback('}', callbackData);
-				} break;
-
-				case 'X': {
-					uintptr_t value = va_arg(arguments, uintptr_t);
-					callback(hexChars[(value & 0xF0) >> 4], callbackData);
-					callback(hexChars[(value & 0xF)], callbackData);
-				} break;
-
-				case 'W': {
-					uintptr_t value = va_arg(arguments, uintptr_t);
-					callback(hexChars[(value & 0xF000) >> 12], callbackData);
-					callback(hexChars[(value & 0xF00) >> 8], callbackData);
-					callback(hexChars[(value & 0xF0) >> 4], callbackData);
-					callback(hexChars[(value & 0xF)], callbackData);
-				} break;
-
-				case 'x': {
-					uintptr_t value = va_arg(arguments, uintptr_t);
-					bool simple = flags & ES_STRING_FORMAT_SIMPLE;
-					if (!simple) callback('0', callbackData);
-					if (!simple) callback('x', callbackData);
-					int bp = 0;
-					while (value) {
-						buffer[bp++] = hexChars[value % 16];
-						value /= 16;
-					}
-					int j = 0, k = 0;
-					for (int i = 0; i < 16 - bp; i++) {
-						callback('0', callbackData);
-						j++;k++;if (k != 16 && j == 4 && !simple) { callback('_',callbackData); } j&=3;
-					}
-					for (int i = bp - 1; i >= 0; i--) {
-						callback(buffer[i], callbackData);
-						j++;k++;if (k != 16 && j == 4 && !simple) { callback('_',callbackData); } j&=3;
-					}
-				} break;
-
-				case 'c': {
-					callback(va_arg(arguments, int), callbackData);
-				} break;
-
-				case '%': {
-					callback('%', callbackData);
-				} break;
-
-				case 's': {
-					ptrdiff_t length = va_arg(arguments, size_t);
-					char *string = va_arg(arguments, char *);
-                    if (length == -1)
-                    {
-                        WriteCStringToCallback(callback, callbackData, string ?:"[null]");
-                    }
-                    else
-                    {
-                        char *position = string;
-
-                        while (position < string + length) {
-                            callback(utf8_value(position), callbackData);
-                            position = utf8_advance(position);
-                        }
-                    }
-				} break;
-
-				case 'z': {
-					const char *string = va_arg(arguments, const char *);
-					if (!string) string = "[null]";
-					WriteCStringToCallback(callback, callbackData, string);
-				} break;
-
-				case 'F': {
-					double number = va_arg(arguments, double);
-
-					if (__builtin_isnan(number)) {
-						WriteCStringToCallback(callback, callbackData, "NaN");
-						break;
-					} else if (__builtin_isinf(number)) {
-						if (number < 0) callback('-', callbackData);
-						WriteCStringToCallback(callback, callbackData, "inf");
-						break;
-					}
-
-					if (number < 0) {
-						callback('-', callbackData);
-						number = -number;
-					}
-
-					int digits[32];
-					size_t digitCount = 0;
-					const size_t maximumDigits = 12;
-
-					int64_t integer = number;
-					number -= integer;
-					// number is now in the range [0,1).
-
-					while (number && digitCount <= maximumDigits) {
-						// Extract the fractional digits.
-						number *= 10;
-						int digit = number;
-						number -= digit;
-						digits[digitCount++] = digit;
-					}
-
-					if (digitCount > maximumDigits) {
-						if (digits[maximumDigits] >= 5) {
-							// Round up.
-							for (intptr_t i = digitCount - 2; i >= -1; i--) {
-								if (i == -1) { 
-									integer++;
-								} else {
-									digits[i]++;
-
-									if (digits[i] == 10) {
-										digits[i] = 0;
-									} else {
-										break;
-									}
-								}
-							}
-						}
-
-						// Hide the last digit.
-						digitCount = maximumDigits;
-					}
-
-					// Trim trailing zeroes.
-					while (digitCount) {
-						if (!digits[digitCount - 1]) {
-							digitCount--;
-						} else {
-							break;
-						}
-					}
-
-					// Integer digits.
-					_FormatInteger(callback, callbackData, integer, pad, flags & ES_STRING_FORMAT_SIMPLE);
-
-					// Decimal separator.
-					if (digitCount && decimalPlaces) {
-						callback('.', callbackData);
-					}
-
-					// Fractional digits.
-					for (uintptr_t i = 0; i < digitCount; i++) {
-                        if ((int)i == decimalPlaces) break;
-						callback('0' + digits[i], callbackData);
-					}
-
-                    decimalPlaces = -1;
-				} break;
-
-				case '*': {
-					pad = va_arg(arguments, int);
-					goto repeat;
-				} break;
-
-                case '.': {
-                    decimalPlaces = va_arg(arguments, int);
-                    goto repeat;
-                } break;
-
-				case 'f': {
-					flags = va_arg(arguments, uint32_t);
-					goto repeat;
-				} break;
-			}
-
-			pad = 0;
-			flags = 0;
-		} else {
-			callback(c, callbackData);
-		}
-
-		format = utf8_advance((char *) format);
-	}
-}
-
-void StartDebugOutput() {
-	if (graphics.target && graphics.target->debugClearScreen && graphics.target->debugPutBlock && !printToDebugger) {
-		debugRows = (graphics.height - 1) / VGA_FONT_HEIGHT;
-		debugColumns = (graphics.width - 1) / VGA_FONT_WIDTH - 2;
-		debugCurrentRow = debugCurrentColumn = 0;
-		printToDebugger = true;
-		graphics.target->debugClearScreen();
-	}
-}
-
-void DebugWriteCharacter(uintptr_t character) {
-	if (!graphics.target || !graphics.target->debugPutBlock) return;
-
-	if (debugCurrentRow == debugRows) {
-		debugCurrentRow = 0;
-
-		// uint64_t start = ProcessorReadTimeStamp();
-		// uint64_t end = start + 3000 * KGetTimeStampTicksPerMs();
-		// while (ProcessorReadTimeStamp() < end);
-
-		graphics.target->debugClearScreen();
-	}
-
-	uintptr_t row = debugCurrentRow;
-	uintptr_t column = debugCurrentColumn;
-
-	if (character == '\n') {
-		debugCurrentRow++;
-		debugCurrentColumn = 0;
-		return;
-	}
-
-	if (character > 127) character = ' ';
-	if (row >= debugRows) return;
-	if (column >= debugColumns) return;
-
-	for (int j = 0; j < VGA_FONT_HEIGHT; j++) {
-		uint8_t byte = ((uint8_t *) vgaFont)[character * 16 + j];
-
-		for (int i = 0; i < 8; i++) {
-			uint8_t bit = byte & (1 << i);
-			if (bit) graphics.target->debugPutBlock((column + 1) * 9 + i, row * 16 + j, false);
-		}
-	}
-
-	debugCurrentColumn++;
-
-	if (debugCurrentColumn == debugColumns) {
-		debugCurrentRow++;
-		debugCurrentColumn = 4;
-	}
-}
-
-static void TerminalCallback(int character, void *) {
-	if (!character) return;
-
-	KSpinlockAcquire(&terminalLock);
-	EsDefer(KSpinlockRelease(&terminalLock));
-
-	if (sizeof(kernelLog)) {
-		kernelLog[kernelLogPosition] = character;
-		kernelLogPosition++;
-		if (kernelLogPosition == sizeof(kernelLog)) kernelLogPosition = 0;
-	}
-
-#ifdef VGA_TEXT_MODE
-	{
-		if (character == '\n') {
-			terminalPosition = terminalPosition - (terminalPosition % 80) + 80;
-		} else {
-			TERMINAL_ADDRESS[terminalPosition] = (uint16_t) character | 0x0700;
-			terminalPosition++;
-		}
-
-		if (terminalPosition >= 80 * 25) {
-			for (int i = 80; i < 80 * 25; i++) {
-				TERMINAL_ADDRESS[i - 80] = TERMINAL_ADDRESS[i];
-			}
-
-			for (int i = 80 * 24; i < 80 * 25; i++) {
-				TERMINAL_ADDRESS[i] = 0x700;
-			}
-
-			terminalPosition -= 80;
-
-			// uint64_t start = ProcessorReadTimeStamp();
-			// uint64_t end = start + 250 * KGetTimeStampTicksPerMs();
-			// while (ProcessorReadTimeStamp() < end);
-		}
-
-		{
-			ProcessorOut8(0x3D4, 0x0F);
-			ProcessorOut8(0x3D5, terminalPosition);
-			ProcessorOut8(0x3D4, 0x0E);
-			ProcessorOut8(0x3D5, terminalPosition >> 8);
-		}
-	}
-#endif
-
-	{
-		ProcessorDebugOutputByte((uint8_t) character);
-
-		if (character == '\n') {
-			ProcessorDebugOutputByte((uint8_t) 13);
-		}
-	}
-
-	if (printToDebugger) {
-		DebugWriteCharacter(character);
-		if (character == '\t') DebugWriteCharacter(' ');
-	}
-}
-
-void EsPrint(const char *format, ...) {
-	KSpinlockAcquire(&printLock);
-	EsDefer(KSpinlockRelease(&printLock));
-
-	va_list arguments;
-	va_start(arguments, format);
-	_StringFormat(TerminalCallback, (void *) 0x0700, format, arguments);
-	va_end(arguments);
-}
-
+//extern "C" void MMArchInvalidatePages(uintptr_t virtualAddressStart, uintptr_t pageCount);
 extern "C" void MMArchInvalidatePages(uintptr_t virtualAddressStart, uintptr_t pageCount) {
-	// This must be done with spinlock acquired, otherwise this processor could change.
+    // This must be done with spinlock acquired, otherwise this processor could change.
 
-	// TODO Only send the IPI to the processors that are actually executing threads with the virtual address space.
-	// 	Currently we only support the kernel's virtual address space, so this'll apply to all processors.
-	// 	If we use Intel's PCID then we may have to send this to all processors anyway.
-	// 	And we'll probably also have to be careful with shared memory regions.
-	//	...actually I think we might not bother doing this.
+    // TODO Only send the IPI to the processors that are actually executing threads with the virtual address space.
+    // 	Currently we only support the kernel's virtual address space, so this'll apply to all processors.
+    // 	If we use Intel's PCID then we may have to send this to all processors anyway.
+    // 	And we'll probably also have to be careful with shared memory regions.
+    //	...actually I think we might not bother doing this.
 
-	KSpinlockAcquire(&ipiLock);
-	tlbShootdownVirtualAddress = virtualAddressStart;
-	tlbShootdownPageCount = pageCount;
-	ArchCallFunctionOnAllProcessors(TLBShootdownCallback, true);
-	KSpinlockRelease(&ipiLock);
+    KSpinlockAcquire(&ipiLock);
+    tlbShootdownVirtualAddress = virtualAddressStart;
+    tlbShootdownPageCount = pageCount;
+    ArchCallFunctionOnAllProcessors(TLBShootdownCallback, true);
+    KSpinlockRelease(&ipiLock);
 }
 
 extern "C" void MMCheckUnusable(uintptr_t physicalStart, size_t bytes);
@@ -8386,234 +6806,8 @@ void KernelPanic(const char *format, ...) {
 	// so other processors don't start getting "mutex not correctly acquired" panics.
 	scheduler.panic = true; 
 
-	if (debugKeyPressed) {
-        // @TODO
-        while (true) {}
-	}
-
-	StartDebugOutput();
-
-	EsPrint("\n--- System Error ---\n>> ");
-
-	va_list arguments;
-	va_start(arguments, format);
-	_StringFormat(TerminalCallback, (void *) 0x4F00, format, arguments);
-	va_end(arguments);
-
-	EsPrint("Current thread = %x\n", GetCurrentThread());
-	EsPrint("Trace: %x\n", __builtin_return_address(0));
-#ifdef ES_ARCH_X86_64
-	EsPrint("RSP: %x; RBP: %x\n", ProcessorGetRSP(), ProcessorGetRBP());
-#endif
-	// EsPrint("Memory: %x/%x\n", pmm.pagesAllocated, pmm.startPageCount);
-
-	{
-		EsPrint("Threads:\n");
-
-		LinkedItem<Thread> *item = scheduler.allThreads.firstItem;
-
-		while (item) {
-			Thread *thread = item->thisItem;
-
-#ifdef ES_ARCH_X86_64
-			EsPrint("%z %d %x @%x:%x ", (GetCurrentThread() == thread) ? "=>" : "  ", 
-					thread->id, thread, thread->interruptContext->rip, thread->interruptContext->rbp);
-#endif
-
-			if (thread->state == THREAD_WAITING_EVENT) {
-				EsPrint("WaitEvent(Count:%d, %x) ", thread->blocking.eventCount, thread->blocking.events[0]);
-			} else if (thread->state == THREAD_WAITING_MUTEX) {
-				EsPrint("WaitMutex(%x, Owner:%d) ", thread->blocking.mutex, thread->blocking.mutex->owner->id);
-			} else if (thread->state == THREAD_WAITING_WRITER_LOCK) {
-				EsPrint("WaitWriterLock(%x, %d) ", thread->blocking.writerLock, thread->blocking.writerLockType);
-			}
-
-			Process *process = thread->process;
-			EsPrint("%z:%z\n", process->cExecutableName, thread->cName);
-
-			item = item->nextItem;
-		}
-	}
-
-	for (uintptr_t i = 0; i < KGetCPUCount(); i++) {
-		CPULocalStorage *local = KGetCPULocal(i);
-
-		if (local->panicContext) {
-#ifdef ES_ARCH_X86_64
-			EsPrint("CPU %d LS %x RIP/RBP %x:%x TID %d\n", local->processorID, local,
-					local->panicContext->rip, local->panicContext->rbp,
-					local->currentThread ? local->currentThread->id : 0);
-#endif
-		}
-	}
-
-#ifdef POST_PANIC_DEBUGGING
-	uintptr_t kernelLogEnd = kernelLogPosition;
-	EsPrint("Press 'D' to enter debugger.\n");
-
-	while (true) {
-		int key = KWaitKey();
-		if (key == ES_SCANCODE_D) break;
-		if (key == -1) ProcessorHalt();
-	}
-
-	graphics.debuggerActive = true;
-
-	while (true) {
-#ifdef VGA_TEXT_MODE
-		for (uintptr_t i = 0; i < 80 * 25; i++) {
-			TERMINAL_ADDRESS[i] = 0x0700;
-		}
-
-		terminalPosition = 80;
-#else
-		graphics.target->debugClearScreen();
-
-		debugCurrentRow = debugCurrentColumn = 0;
-#endif
-		EsPrint("0 - view log\n1 - reset\n2 - view pmem\n3 - view vmem\n4 - stack trace\n");
-
-		int key = KWaitKey();
-
-		if (key == ES_SCANCODE_0) {
-			uintptr_t position = 0, nextPosition = 0;
-			uintptr_t x = 0, y = 0;
-
-#ifdef VGA_TEXT_MODE
-			for (uintptr_t i = 0; i < 80 * 25; i++) {
-				TERMINAL_ADDRESS[i] = 0x0700;
-			}
-#else
-			graphics.target->debugClearScreen();
-#endif
-
-			while (position < kernelLogEnd) {
-				char c = kernelLog[position];
-
-				if (c != '\n') {
-#ifdef VGA_TEXT_MODE
-					TERMINAL_ADDRESS[x + y * 80] = c | 0x0700;
-#else
-					debugCurrentRow = y, debugCurrentColumn = x;
-					DebugWriteCharacter(c);
-#endif
-				}
-
-				x++;
-
-				if (x == 
-#ifdef VGA_TEXT_MODE
-						80 
-#else
-						debugColumns
-#endif
-						|| c == '\n') {
-					x = 0;
-					y++;
-
-					if (y == 1) {
-						nextPosition = position;
-					}
-				}
-
-				if (y == 
-#ifdef VGA_TEXT_MODE
-						25
-#else
-						debugRows
-#endif
-						) {
-					while (true) {
-						int key = KWaitKey();
-
-						if (key == ES_SCANCODE_SPACE || key == ES_SCANCODE_DOWN_ARROW) {
-							position = nextPosition;
-							break;
-						} else if (key == ES_SCANCODE_UP_ARROW) {
-							position = nextPosition;
-							if (position < 240) position = 0;
-							else position -= 240;
-							break;
-						}
-					}
-
-#ifdef VGA_TEXT_MODE
-					for (uintptr_t i = 0; i < 80 * 25; i++) {
-						TERMINAL_ADDRESS[i] = 0x0700;
-					}
-#else
-					graphics.target->debugClearScreen();
-#endif
-
-					y = 0;
-				}
-
-				position++;
-			}
-
-			KWaitKey();
-		} else if (key == ES_SCANCODE_1) {
-			ProcessorReset();
-		} else if (key == ES_SCANCODE_2) {
-			EsPrint("Enter address: ");
-			uintptr_t address = DebugReadNumber();
-			uintptr_t offset = address & (K_PAGE_SIZE - 1);
-			MMRemapPhysical(kernelMMSpace, pmm.pmManipulationRegion, address - offset);
-			uintptr_t *data = (uintptr_t *) ((uint8_t *) pmm.pmManipulationRegion + offset);
-
-			for (uintptr_t i = 0; i < 8 && (offset + 8 * sizeof(uintptr_t) < K_PAGE_SIZE); i++) {
-				EsPrint("\n%x - %x\n", address + 8 * sizeof(uintptr_t), data[i]);
-			}
-
-			while (KWaitKey() != ES_SCANCODE_ENTER);
-		} else if (key == ES_SCANCODE_3) {
-			EsPrint("Enter address: ");
-			uintptr_t address = DebugReadNumber();
-			uintptr_t offset = address & (K_PAGE_SIZE - 1);
-			uintptr_t *data = (uintptr_t *) address;
-
-			for (uintptr_t i = 0; i < 8 && (offset + i * sizeof(uintptr_t) < K_PAGE_SIZE); i++) {
-				EsPrint("\n%x - %x", address + i * sizeof(uintptr_t), data[i]);
-			}
-
-			while (KWaitKey() != ES_SCANCODE_ENTER);
-		} else if (key == ES_SCANCODE_4) {
-			EsPrint("Enter RBP: ");
-			uintptr_t address = DebugReadNumber();
-
-			while (address) {
-				EsPrint("\n%x", ((uintptr_t *) address)[1]);
-				address = ((uintptr_t *) address)[0];
-			}
-
-			while (KWaitKey() != ES_SCANCODE_ENTER);
-		}
-	}
-#endif
-
+    // @TODO @Log
 	ProcessorHalt();
-}
-
-void __KernelLog(const char *format, ...) {
-	va_list arguments;
-	va_start(arguments, format);
-	_StringFormat(TerminalCallback, nullptr, format, arguments);
-	va_end(arguments);
-}
-
-void KernelLog(KLogLevel level, const char *subsystem, const char *event, const char *format, ...) {
-	if (level == LOG_VERBOSE) return;
-	(void) event;
-
-	KSpinlockAcquire(&printLock);
-	EsDefer(KSpinlockRelease(&printLock));
-
-	__KernelLog("[%z:%z] ", level == LOG_INFO ? "Info" : level == LOG_ERROR ? "**Error**" : level == LOG_VERBOSE ? "Verbose" : "", subsystem);
-
-	va_list arguments;
-	va_start(arguments, format);
-	_StringFormat(TerminalCallback, nullptr, format, arguments);
-	va_end(arguments);
 }
 
 uint8_t HandleTable::ResolveHandle(Handle *outHandle, EsHandle inHandle, KernelObjectType typeMask) {
@@ -8669,8 +6863,7 @@ void process_exit(Process* process, int32_t status)
 {
     KMutexAcquire(&process->threadsMutex);
 
-    KernelLog(LOG_INFO, "Scheduler", "terminate process", "Terminating process %d '%z' with status %i...\n", 
-            process->id, process->cExecutableName, status);
+    // @Log
     process->exitStatus = status;
     process->preventNewThreads = true;
 
@@ -8810,17 +7003,18 @@ void InterruptHandler(InterruptContext *context) {
 			}
 
 			if (interrupt == 0x13) {
-				EsPrint("ProcessorReadMXCSR() = %x\n", ProcessorReadMXCSR());
+				//EsPrint("ProcessorReadMXCSR() = %x\n", ProcessorReadMXCSR());
 			}
 
 			// TODO Usermode exceptions and debugging.
-			KernelLog(LOG_ERROR, "Arch", "unhandled userland exception", 
-					"InterruptHandler - Exception (%z) in userland process (%z).\nRIP = %x\nRSP = %x\nX86_64 error codes: [err] %x, [cr2] %x\n", 
-					exceptionInformation[interrupt], 
-					currentThread->process->cExecutableName,
-					context->rip, context->rsp, context->errorCode, context->cr2);
+            // @Log
+			//KernelLog(LOG_ERROR, "Arch", "unhandled userland exception", 
+					//"InterruptHandler - Exception (%z) in userland process (%z).\nRIP = %x\nRSP = %x\nX86_64 error codes: [err] %x, [cr2] %x\n", 
+					//exceptionInformation[interrupt], 
+					//currentThread->process->cExecutableName,
+					//context->rip, context->rsp, context->errorCode, context->cr2);
 
-			EsPrint("Attempting to make a stack trace...\n");
+			//EsPrint("Attempting to make a stack trace...\n");
 
 			{
 				uint64_t rbp = context->rbp;
@@ -8830,13 +7024,13 @@ void InterruptHandler(InterruptContext *context) {
 					uint64_t value;
 					if (!MMArchIsBufferInUserRange(rbp, 16)) break;
 					if (!MMArchSafeCopy((uintptr_t) &value, rbp + 8, sizeof(uint64_t))) break;
-					EsPrint("\t%d: %x\n", ++traceDepth, value);
+					//EsPrint("\t%d: %x\n", ++traceDepth, value);
 					if (!value) break;
 					if (!MMArchSafeCopy((uintptr_t) &rbp, rbp, sizeof(uint64_t))) break;
 				}
 			}
 
-			EsPrint("Stack trace complete.\n");
+			//EsPrint("Stack trace complete.\n");
 
 			EsCrashReason crashReason;
 			EsMemoryZero(&crashReason, sizeof(EsCrashReason));
@@ -8925,7 +7119,7 @@ void InterruptHandler(InterruptContext *context) {
 		local->irqSwitchThread = false;
 
 		if (!handler.callback) {
-			KernelLog(LOG_ERROR, "Arch", "unexpected MSI", "Unexpected MSI vector %X (no handler).\n", interrupt);
+			// @Log
 		} else {
 			handler.callback(interrupt - INTERRUPT_VECTOR_MSI_START, handler.context);
 		}

@@ -8431,8 +8431,6 @@ export fn MMArchUnmapPages(space: *AddressSpace, virtual_address_start: u64, pag
     MMArchInvalidatePages(virtual_address_start, page_count);
 }
 
-extern fn MMArchInvalidatePages(virtual_address_start: u64, page_count: u64) callconv(.C) void;
-
 export fn MMPhysicalFree(asked_page: u64, mutex_already_acquired: bool, count: u64) callconv(.C) void
 {
     if (asked_page == 0) KernelPanic("invalid page");
@@ -10421,6 +10419,16 @@ export fn MMSpaceInitialise(space: *AddressSpace) callconv(.C) bool
 
     return true;
 }
+
+extern fn MMArchInvalidatePages(virtual_address_start: u64, page_count: u64) callconv(.C) void;
+//export fn MMArchInvalidatePages(virtual_address_start: u64, page_count: u64) callconv(.C) void
+//{
+    //ipiLock.acquire();
+    //tlbShootdownVirtualAddress.access_volatile().* = virtual_address_start;
+    //tlbShootdownPageCount.access_volatile().* = page_count;
+    //ArchCallFunctionOnAllProcessors(TLBShootdownCallback, true);
+    //ipiLock.release();
+//}
 
 export fn get_size_zig() callconv(.C) u64
 {
