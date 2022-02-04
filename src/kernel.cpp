@@ -5650,48 +5650,7 @@ extern "C" void *ACPIMapPhysicalMemory(uintptr_t physicalAddress, size_t length)
 uintptr_t GetBootloaderInformationOffset();
 extern uintptr_t bootloader_information_offset;
 
-uintptr_t ArchFindRootSystemDescriptorPointer() {
-    uint64_t uefiRSDP = *((uint64_t *) (LOW_MEMORY_MAP_START + bootloader_information_offset + 0x7FE8));
-
-    if (uefiRSDP) {
-        return uefiRSDP;
-    }
-
-    PhysicalMemoryRegion searchRegions[2];
-
-    searchRegions[0].baseAddress = (uintptr_t) (((uint16_t *) LOW_MEMORY_MAP_START)[0x40E] << 4) + LOW_MEMORY_MAP_START;
-    searchRegions[0].pageCount = 0x400;
-    searchRegions[1].baseAddress = (uintptr_t) 0xE0000 + LOW_MEMORY_MAP_START;
-    searchRegions[1].pageCount = 0x20000;
-
-    for (uintptr_t i = 0; i < 2; i++) {
-        for (uintptr_t address = searchRegions[i].baseAddress;
-                address < searchRegions[i].baseAddress + searchRegions[i].pageCount;
-                address += 16) {
-            RootSystemDescriptorPointer *rsdp = (RootSystemDescriptorPointer *) address;
-
-            if (rsdp->signature != SIGNATURE_RSDP) {
-                continue;
-            }
-
-            if (rsdp->revision == 0) {
-                if (EsMemorySumBytes((uint8_t *) rsdp, 20)) {
-                    continue;
-                }
-
-                return (uintptr_t) rsdp - LOW_MEMORY_MAP_START;
-            } else if (rsdp->revision == 2) {
-                if (EsMemorySumBytes((uint8_t *) rsdp, sizeof(RootSystemDescriptorPointer))) {
-                    continue;
-                }
-
-                return (uintptr_t) rsdp - LOW_MEMORY_MAP_START;
-            }
-        }
-    }
-
-    return 0;
-}
+extern "C" uintptr_t ArchFindRootSystemDescriptorPointer();
 
 extern "C" void ACPIParseTables()
 {
