@@ -3541,6 +3541,8 @@ pub const SimpleList = extern struct
         self.next_or_first = null;
     }
 };
+
+
 pub const WriterLock = extern struct
 {
     blocked_threads: LinkedList(Thread),
@@ -4811,7 +4813,6 @@ export fn KThreadCreate(name: [*:0]const u8, entry: fn (u64) callconv(.C) void, 
     return ThreadSpawn(name, @ptrToInt(entry), argument, Thread.Flags.empty(), null, 0) != null;
 }
 
-extern fn OpenHandleToObject(object: u64, type: KernelObjectType, flags: u32) callconv(.C) bool;
 
 export fn ThreadSpawn(name: [*:0]const u8, start_address: u64, argument1: u64, flags: Thread.Flags, maybe_process: ?*Process, argument2: u64) callconv(.C) ?*Thread
 {
@@ -5939,8 +5940,6 @@ export fn MMFree(space: *AddressSpace, address: u64, expected_size: u64, user_on
     }
 }
 
-extern fn CloseHandleToObject(object: u64, object_type: KernelObjectType, flags: u32) callconv(.C) void;
-
 const KernelObjectType = enum(u32)
 {
     could_not_resolve = 0,
@@ -6489,63 +6488,6 @@ export fn MMZeroPageThread() callconv(.C) void
             }
 
             pmm.pageframe_mutex.release();
-        }
-    }
-}
-
-export fn MMObjectCacheTrimThread() callconv(.C) void
-{
-    var cache: ?*ObjectCache = null;
-
-    while (true)
-    {
-        while (!pmm.should_trim_object_cache())
-        {
-            pmm.trim_object_cache_event.reset();
-            _ = pmm.trim_object_cache_event.wait();
-        }
-
-        _ = pmm.object_cache_list_mutex.acquire();
-
-        var previous_cache = cache;
-        cache = null;
-
-        var maybe_item = pmm.object_cache_list.first;
-
-        while (maybe_item) |item|
-        {
-            if (item.value == previous_cache)
-            {
-                if (item.next) |next|
-                {
-                    cache = next.value;
-                    break;
-                }
-            }
-
-            maybe_item = item.next;
-        }
-
-        if (cache == null)
-        {
-            if (pmm.object_cache_list.first) |first| cache = first.value;
-        }
-        if (cache) |cache_unwrapped| 
-        {
-            _ = cache_unwrapped.trim_lock.take(WriterLock.shared);
-            pmm.object_cache_list_mutex.release();
-
-            var i: u64 = 0;
-            while (i < ObjectCache.trim_group_count) : (i += 1)
-            {
-                if (cache_unwrapped.trim(cache_unwrapped)) break;
-            }
-
-            cache_unwrapped.trim_lock.return_lock(WriterLock.shared);
-        }
-        else
-        {
-            pmm.object_cache_list_mutex.release();
         }
     }
 }
@@ -10397,6 +10339,63 @@ export fn ArchInitialiseThread(kernel_stack: u64, kernel_stack_size: u64, thread
     context.rsi = argument2;
 
     return context;
+}
+
+export fn OpenHandleToObject(object: u64, object_type: KernelObjectType, flags: u32) callconv(.C) bool
+{
+    _ = flags;
+    var had_no_handles = false;
+    var failed = false;
+
+    switch (object_type)
+    {
+        .process =>
+        {
+            had_no_handles = @intToPtr(*Process, object).handle_count.atomic_fetch_add(1) == 0;
+        },
+        .thread =>
+        {
+            had_no_handles = @intToPtr(*Thread, object).handle_count.atomic_fetch_add(1) == 0;
+        },
+        .shared_memory =>
+        {
+            const region = @intToPtr(*SharedRegion, object);
+            _ = region.mutex.acquire();
+            had_no_handles = (region.handle_count.read_volatile() == 0);
+            if (!had_no_handles) region.handle_count.increment();
+            region.mutex.release();
+        },
+        else => TODO(),
+    }
+
+    if (had_no_handles) KernelPanic("object had no handles");
+
+    return !failed;
+}
+
+export fn CloseHandleToObject(object: u64, object_type: KernelObjectType, flags: u32) callconv(.C) void
+{
+    _ = flags;
+    switch (object_type)
+    {
+        .process =>
+        {
+            const process = @intToPtr(*Process, object);
+            const previous = process.handle_count.atomic_fetch_sub(1);
+            // @Log
+            if (previous == 0) KernelPanic("All handles to process have been closed")
+            else if (previous == 1) TODO();
+        },
+        .thread =>
+        {
+            const thread = @intToPtr(*Thread, object);
+            const previous = thread.handle_count.atomic_fetch_sub(1);
+
+            if (previous == 0) KernelPanic("All handles to thread have been closed")
+            else if (previous == 1) ThreadRemove(thread);
+        },
+        else => TODO(),
+    }
 }
 
 export fn get_size_zig() callconv(.C) u64

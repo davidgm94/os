@@ -32,8 +32,6 @@ typedef uint8_t EsNodeType;
 typedef int64_t EsFileOffsetDifference;
 typedef uint64_t _EsLongConstant;
 
-extern uint32_t kernel_size;
-
 enum KernelObjectType : uint32_t {
 	COULD_NOT_RESOLVE_HANDLE	= 0x00000000,
 	KERNEL_OBJECT_NONE		= 0x80000000,
@@ -369,28 +367,7 @@ uintptr_t /* Returns physical address of first page, or 0 if none were available
     void MMPhysicalFreeAndUnmap(void *virtualAddress, uintptr_t physicalAddress);
 }
 
-union EsGeneric {
-	uintptr_t u;
-	intptr_t i;
-	void *p;
-
-	inline EsGeneric() = default;
-
-#ifdef ES_BITS_64
-	inline EsGeneric(uintptr_t y) { u = y; }
-	inline EsGeneric( intptr_t y) { i = y; }
-#endif
-	inline EsGeneric(unsigned  y) { u = y; }
-	inline EsGeneric(     int  y) { i = y; }
-	inline EsGeneric(    void *y) { p = y; }
-
-	inline bool operator==(EsGeneric r) const { return r.u == u; }
-};
-
-#define ES_FILE_READ_SHARED		(0x1) // Read-only. The file can still be opened for writing.
-#define ES_FILE_READ			(0x2) // Read-only. The file will not openable for writing. This will fail if the file is already opened for writing.
-#define ES_FILE_WRITE_SHARED		(0x4) // Read-write. The file can still be opened for writing. This will fail if the file is already opened for exclusive writing.
-#define ES_FILE_WRITE 			(0x8) // Read-write. The file will not openable for writing. This will fail if the file is already opened for writing.
+typedef uint64_t EsGeneric;
 
 #define MM_REGION_FIXED              (0x01) // A region where all the physical pages are allocated up-front, and cannot be removed from the working set.
 #define MM_REGION_NOT_CACHEABLE      (0x02) // Do not cache the pages in the region.
@@ -489,13 +466,9 @@ void LinkedItem<T>::RemoveFromList() {
 }
 
 struct SimpleList {
-	void Insert(SimpleList *link, bool start);
-	void Remove();
-
 	union { SimpleList *previous, *last; };
 	union { SimpleList *next, *first; };
 };
-typedef SimpleList MMObjectCacheItem;
 
 template <class T>
 void LinkedList<T>::InsertStart(LinkedItem<T> *item) {
@@ -662,44 +635,6 @@ void LinkedList<T>::Validate(int from) {
 #endif
 }
 
-void SimpleList::Insert(SimpleList *item, bool start) {
-	if (item->previous || item->next) {
-		EsPanic("SimpleList::Insert - Bad links in %x.\n", this);
-	}
-
-	if (!first && !last) {
-		item->previous = this;
-		item->next = this;
-		first = item;
-		last = item;
-	} else if (start) {
-		item->previous = this;
-		item->next = first;
-		first->previous = item;
-		first = item;
-	} else {
-		item->previous = last;
-		item->next = this;
-		last->next = item;
-		last = item;
-	}
-}
-
-void SimpleList::Remove() {
-	if (previous->next != this || next->previous != this) {
-		EsPanic("SimpleList::Remove - Bad links in %x.\n", this);
-	}
-
-	if (previous == next) {
-		next->first = nullptr;
-		next->last = nullptr;
-	} else {
-		previous->next = next;
-		next->previous = previous;
-	}
-
-	previous = next = nullptr;
-}
 
 #define AVLPanic KernelPanic
 enum TreeSearchMode {
@@ -1097,16 +1032,6 @@ struct KWriterLock { // One writer or many readers.
 #define K_LOCK_EXCLUSIVE (true)
 #define K_LOCK_SHARED (false)
 
-extern "C"
-{
-    bool KWriterLockTake(KWriterLock *lock, bool write, bool poll = false);
-    void KWriterLockReturn(KWriterLock *lock, bool write);
-    void KWriterLockConvertExclusiveToShared(KWriterLock *lock);
-    void KWriterLockAssertExclusive(KWriterLock *lock);
-    void KWriterLockAssertShared(KWriterLock *lock);
-    void KWriterLockAssertLocked(KWriterLock *lock);
-}
-
 struct KMutex { // Mutual exclusion. Thread-owned.
 	struct Thread *volatile owner;
 #ifdef DEBUG_BUILD
@@ -1159,7 +1084,6 @@ extern "C"
 {
     void KSpinlockAcquire(KSpinlock *spinlock);
     void KSpinlockRelease(KSpinlock *spinlock);
-    void KSpinlockReleaseForced(KSpinlock *spinlock);
     void KSpinlockAssertLocked(KSpinlock *spinlock);
 }
 
@@ -1169,12 +1093,6 @@ struct Pool {
 	size_t cacheEntries;
 	KMutex mutex;
 };
-
-extern "C"
-{
-    void *PoolAdd(Pool* pool, size_t _elementSize); 		// Aligned to the size of a pointer
-    void PoolRemove(Pool* pool, void *address);
-}
 
 struct KEvent { // Waiting and notifying. Can wait on multiple at once. Can be set and reset with interrupts disabled.
 	volatile bool autoReset; // This should be first field in the structure, so that the type of KEvent can be easily declared with {autoReset}.
@@ -1187,9 +1105,7 @@ extern "C"
 {
     bool KEventSet(KEvent *event, bool maybeAlreadySet = false);
     void KEventReset(KEvent *event); 
-    bool KEventPoll(KEvent *event); // TODO Remove this! Currently it is only used by KAudioFillBuffersFromMixer.
     bool KEventWait(KEvent *event, uint64_t timeoutMs = ES_WAIT_NO_TIMEOUT); // See KEventWaitMultiple to wait for multiple events. Returns false if the wait timed out.
-    uintptr_t KEventWaitMultiple(KEvent **events, size_t count);
 }
 
 #ifdef DEBUG_BUILD
@@ -1780,14 +1696,6 @@ enum ProcessType {
 	PROCESS_DESKTOP,
 };
 
-struct EsUniqueIdentifier {
-	uint8_t d[16];
-};
-
-struct PhysicalMemoryRegion {
-	uint64_t baseAddress;
-	uint64_t pageCount;
-};
 
 struct _ArrayHeader {
 	size_t length, allocated;
@@ -1840,26 +1748,6 @@ struct Array
 		return -1;
 	}
 
-	inline bool FindAndDelete(T item, bool failIfNotFound) {
-		intptr_t index = Find(item, failIfNotFound);
-		if (index == -1) return false;
-		Delete(index);
-		return true;
-	}
-
-	inline bool FindAndDeleteSwap(T item, bool failIfNotFound) { 
-		intptr_t index = Find(item, failIfNotFound);
-		if (index == -1) return false;
-		DeleteSwap(index);
-		return true;
-	}
-
-	inline void AddFast(T item) { 
-		if (!array) { Add(item); return; }
-		_ArrayHeader *header = ArrayHeaderGet(array);
-		if (header->length == header->allocated) { Add(item); return; }
-		array[header->length++] = item;
-	}
 };
 
 struct Range {
@@ -3366,300 +3254,12 @@ extern "C" MMRegion *MMFindRegion(MMSpace *space, uintptr_t address);
 extern "C" void MMDecommit(uint64_t bytes, bool fixed);
 extern "C" bool MMDecommitRange(MMSpace *space, MMRegion *region, uintptr_t pageOffset, size_t pageCount);
 extern "C" uintptr_t MMArchTranslateAddress(uintptr_t virtualAddress, bool writeAccess =false);
-
 extern "C" bool MMHandlePageFault(MMSpace *space, uintptr_t address, unsigned faultFlags);
-
-struct KDMASegment
-{
-    uintptr_t physicalAddress;
-    size_t byteCount;
-    bool isLast;
-};
-
-#define K_ACCESS_READ (0)
-#define K_ACCESS_WRITE (1)
-
-struct KDMABuffer {
-	uintptr_t virtualAddress;
-	size_t totalByteCount;
-	uintptr_t offsetBytes;
-
-    bool is_complete()
-    {
-        return offsetBytes == totalByteCount;
-    }
-
-    KDMASegment next_segment(bool peek = false)
-    {
-        if (offsetBytes >= totalByteCount || !virtualAddress)
-        {
-            KernelPanic("Invalid state KDMABuffer\n");
-        }
-
-        size_t transfer_byte_count = K_PAGE_SIZE;
-        uintptr_t virtual_address = virtualAddress + offsetBytes; 
-        uintptr_t physical_address = MMArchTranslateAddress(virtual_address);
-        uintptr_t offset_into_page = virtual_address & (K_PAGE_SIZE - 1);
-
-        if (physical_address == 0) KernelPanic("Page in buffer unmapped\n");
-
-        if (offset_into_page > 0)
-        {
-            transfer_byte_count = K_PAGE_SIZE - offset_into_page;
-            physical_address += offset_into_page;
-        }
-
-        auto total_minus_offset = this->totalByteCount - this->offsetBytes;
-        if (transfer_byte_count > total_minus_offset)
-        {
-            transfer_byte_count = total_minus_offset;
-        }
-
-        bool is_last = this->offsetBytes + transfer_byte_count == this->totalByteCount;
-        if (!peek) this->offsetBytes += transfer_byte_count;
-
-        return { physical_address, transfer_byte_count, is_last };
-    }
-};
-
-struct KWorkGroup {
-	inline void Initialise() {
-		remaining = 1;
-		success = 1;
-		KEventReset(&event);
-	}
-
-	inline bool Wait() {
-		if (__sync_fetch_and_sub(&remaining, 1) != 1) {
-			KEventWait(&event);
-		}
-
-		if (remaining) {
-			KernelPanic("KWorkGroup::Wait - Expected remaining operations to be 0 after event set.\n");
-		}
-
-		return success ? true : false;
-	}
-
-	inline void Start() {
-		if (__sync_fetch_and_add(&remaining, 1) == 0) {
-			KernelPanic("KWorkGroup::Start - Could not start operation on completed dispatch group.\n");
-		}
-	}
-
-	inline void End(bool _success) {
-		if (!_success) {
-			success = false;
-			__sync_synchronize();
-		}
-
-		if (__sync_fetch_and_sub(&remaining, 1) == 1) {
-			KEventSet(&event);
-		}
-	}
-
-	volatile uintptr_t remaining;
-	volatile uintptr_t success;
-	KEvent event;
-};
-
-struct EsBlockDeviceInformation {
-	size_t sectorSize;
-	EsFileOffset sectorCount;
-	bool readOnly;
-	uint8_t nestLevel;
-	uint8_t driveType;
-	uint8_t modelBytes;
-	char model[64];
-};
-
-struct KBlockDeviceAccessRequest {
-	struct KBlockDevice *device;
-	EsFileOffset offset;
-	size_t count;
-	int operation;
-	KDMABuffer *buffer;
-	uint64_t flags;
-	KWorkGroup *dispatchGroup;
-};
-
-typedef void (*KDeviceAccessCallbackFunction)(KBlockDeviceAccessRequest request);
-
-struct KBlockDevice : KDevice {
-	KDeviceAccessCallbackFunction access; // Don't call directly; see KFileSystem::Access.
-	EsBlockDeviceInformation information;
-	size_t maxAccessSectorCount;
-
-	uint8_t *signatureBlock; // Signature block. Only valid during fileSystem detection.
-	KMutex detectFileSystemMutex;
-};
-
 extern "C" void MMUpdateAvailablePageCount(bool increase);
-
-KMutex objectHandleCountChange;
-
 extern "C" bool MMSharedResizeRegion(MMSharedRegion *region, size_t sizeBytes);
 extern "C" void MMSharedDestroyRegion(MMSharedRegion *region);
 extern "C" MMSharedRegion *MMSharedCreateRegion(size_t sizeBytes, bool fixed = false, uintptr_t below = 0);
 extern "C" void ThreadRemove(Thread* thread);
-
-void CloseHandleToObject(void *object, KernelObjectType type, uint32_t flags)
-{
-	switch (type) {
-		case KERNEL_OBJECT_PROCESS: {
-			Process *process = (Process *) object;
-			uintptr_t previous = __sync_fetch_and_sub(&process->handles, 1);
-			// @Log
-
-			if (previous == 0) {
-				KernelPanic("CloseHandleToProcess - All handles to process %x have been closed.\n", process);
-			} else if (previous == 1) {
-                TODO();
-				//ProcessRemove(process);
-			}
-		} break;
-
-		case KERNEL_OBJECT_THREAD: {
-			Thread *thread = (Thread *) object;
-			uintptr_t previous = __sync_fetch_and_sub(&thread->handles, 1);
-
-			if (previous == 0) {
-				KernelPanic("CloseHandleToObject - All handles to thread %x have been closed.\n", thread);
-			} else if (previous == 1) {
-				ThreadRemove(thread);
-			}
-		} break;
-
-		case KERNEL_OBJECT_NODE: {
-			//FSNodeCloseHandle((KNode *) object, flags);
-            TODO();
-		} break;
-
-		case KERNEL_OBJECT_EVENT: {
-			KEvent *event = (KEvent *) object;
-			KMutexAcquire(&objectHandleCountChange);
-			bool destroy = event->handles == 1;
-			event->handles--;
-			KMutexRelease(&objectHandleCountChange);
-
-			if (destroy) {
-				EsHeapFree(event, sizeof(KEvent), K_FIXED);
-			}
-		} break;
-
-		case KERNEL_OBJECT_CONSTANT_BUFFER: {
-                                                TODO();
-		} break;
-
-		case KERNEL_OBJECT_SHMEM: {
-			MMSharedRegion *region = (MMSharedRegion *) object;
-			KMutexAcquire(&region->mutex);
-			bool destroy = region->handles == 1;
-			region->handles--;
-			KMutexRelease(&region->mutex);
-
-			if (destroy) {
-				MMSharedDestroyRegion(region);
-			}
-		} break;
-
-		case KERNEL_OBJECT_WINDOW: {
-            TODO();
-		} break;
-
-		case KERNEL_OBJECT_EMBEDDED_WINDOW: {
-            TODO();
-		} break;
-
-		case KERNEL_OBJECT_PIPE: {
-            TODO();
-		} break;
-
-		case KERNEL_OBJECT_CONNECTION: {
-            TODO();
-		} break;
-
-		case KERNEL_OBJECT_DEVICE: {
-			// KDeviceCloseHandle((KDevice *) object);
-            TODO();
-		} break;
-
-		default: {
-			KernelPanic("CloseHandleToObject - Cannot close object of type %x.\n", type);
-		} break;
-	}
-}
-
-bool OpenHandleToObject(void *object, KernelObjectType type, uint32_t flags = 0) {
-    bool hadNoHandles = false, failed = false;
-
-	switch (type) {
-		case KERNEL_OBJECT_EVENT: {
-			KMutexAcquire(&objectHandleCountChange);
-			KEvent *event = (KEvent *) object;
-			if (!event->handles) hadNoHandles = true;
-			else event->handles++;
-			KMutexRelease(&objectHandleCountChange);
-		} break;
-
-		case KERNEL_OBJECT_PROCESS: {
-			hadNoHandles = 0 == __sync_fetch_and_add(&((Process *) object)->handles, 1);
-		} break;
-
-		case KERNEL_OBJECT_THREAD: {
-			hadNoHandles = 0 == __sync_fetch_and_add(&((Thread *) object)->handles, 1);
-		} break;
-
-		case KERNEL_OBJECT_SHMEM: {
-			MMSharedRegion *region = (MMSharedRegion *) object;
-			KMutexAcquire(&region->mutex);
-			if (!region->handles) hadNoHandles = true;
-			else region->handles++;
-			KMutexRelease(&region->mutex);
-		} break;
-
-		case KERNEL_OBJECT_WINDOW: {
-            TODO();
-		} break;
-
-		case KERNEL_OBJECT_EMBEDDED_WINDOW: {
-            TODO();
-		} break;
-
-		case KERNEL_OBJECT_CONSTANT_BUFFER: {
-                                                TODO();
-		} break;
-
-		case KERNEL_OBJECT_NODE: {
-			//failed = ES_SUCCESS != FSNodeOpenHandle((KNode *) object, flags, FS_NODE_OPEN_HANDLE_STANDARD);
-            TODO();
-		} break;
-
-		case KERNEL_OBJECT_PIPE: {
-            TODO();
-		} break;
-
-		case KERNEL_OBJECT_CONNECTION: {
-            TODO();
-		} break;
-
-		case KERNEL_OBJECT_DEVICE: {
-			//KDeviceOpenHandle((KDevice *) object);
-            TODO();
-		} break;
-
-		default: {
-			KernelPanic("OpenHandleToObject - Cannot open object of type %x.\n", type);
-		} break;
-	}
-
-	if (hadNoHandles) {
-		KernelPanic("OpenHandleToObject - Object %x of type %x had no handles.\n", object, type);
-	}
-
-	return !failed;
-}
-
 extern "C" void MMUnreserve(MMSpace *space, MMRegion *remove, bool unmapPages, bool guardRegion = false);
 extern "C" void ThreadKill(KAsyncTask *task);
 extern "C" void KRegisterAsyncTask(KAsyncTask *task, KAsyncTaskCallback callback);
@@ -3846,14 +3446,13 @@ inline intptr_t ClampIntptr(intptr_t low, intptr_t high, intptr_t integer) {
 }
 
 extern "C" void MMZeroPageThread();
-extern "C" void MMObjectCacheTrimThread();
 extern "C" void MMBalanceThread();
 
 extern "C" void SpawnMemoryThreads()
 {
     pmm.zeroPageThread = ThreadSpawn("MMZero", (uintptr_t) MMZeroPageThread, 0, SPAWN_THREAD_LOW_PRIORITY);
     ThreadSpawn("MMBalance", (uintptr_t) MMBalanceThread, 0, ES_FLAGS_DEFAULT)->isPageGenerator = true;
-    ThreadSpawn("MMObjTrim", (uintptr_t) MMObjectCacheTrimThread, 0, ES_FLAGS_DEFAULT);
+    //ThreadSpawn("MMObjTrim", (uintptr_t) MMObjectCacheTrimThread, 0, ES_FLAGS_DEFAULT);
 }
 
 struct ArchCPU {
