@@ -5977,9 +5977,8 @@ const char *const exceptionInformation[] = {
 extern volatile uintptr_t tlbShootdownVirtualAddress;
 extern volatile size_t tlbShootdownPageCount;
 
-typedef void (*CallFunctionOnAllProcessorsCallbackFunction)();
-extern volatile CallFunctionOnAllProcessorsCallbackFunction callFunctionOnAllProcessorsCallback;
 extern volatile uintptr_t callFunctionOnAllProcessorsRemaining;
+extern "C" void CallFunctionOnAllProcessorCallbackWrapper(); // @INFO: this is to avoid ABI issues
 //
 // Spinlock since some drivers need to access it in IRQs (e.g. ACPICA).
 extern KSpinlock pciConfigSpinlock; 
@@ -5990,12 +5989,6 @@ extern "C" void LapicWriteRegister(uint32_t reg, uint32_t value);
 extern "C" void LapicNextTimer(size_t ms);
 extern "C" void LapicEndOfInterrupt();
 extern "C" size_t ProcessorSendIPI(uintptr_t interrupt, bool nmi = false, int processorID = -1);
-
-extern "C" void ArchCallFunctionOnAllProcessors(CallFunctionOnAllProcessorsCallbackFunction callback, bool includingThisProcessor);
-
-#define INVALIDATE_ALL_PAGES_THRESHOLD (1024)
-
-extern "C" void TLBShootdownCallback();
 
 extern uint8_t pciIRQLines[0x100 /* slots */][4 /* pins */];
 
@@ -6322,23 +6315,6 @@ void Scheduler::CreateProcessorThreads(CPULocalStorage *local) {
 	}
 }
 
-//extern "C" void MMArchInvalidatePages(uintptr_t virtualAddressStart, uintptr_t pageCount);
-extern "C" void MMArchInvalidatePages(uintptr_t virtualAddressStart, uintptr_t pageCount) {
-    // This must be done with spinlock acquired, otherwise this processor could change.
-
-    // TODO Only send the IPI to the processors that are actually executing threads with the virtual address space.
-    // 	Currently we only support the kernel's virtual address space, so this'll apply to all processors.
-    // 	If we use Intel's PCID then we may have to send this to all processors anyway.
-    // 	And we'll probably also have to be careful with shared memory regions.
-    //	...actually I think we might not bother doing this.
-
-    KSpinlockAcquire(&ipiLock);
-    tlbShootdownVirtualAddress = virtualAddressStart;
-    tlbShootdownPageCount = pageCount;
-    ArchCallFunctionOnAllProcessors(TLBShootdownCallback, true);
-    KSpinlockRelease(&ipiLock);
-}
-
 extern "C" void MMCheckUnusable(uintptr_t physicalStart, size_t bytes);
 
 void KernelPanic(const char *format, ...) {
@@ -6649,7 +6625,7 @@ void InterruptHandler(InterruptContext *context) {
 
 		if (interrupt == CALL_FUNCTION_ON_ALL_PROCESSORS_IPI) {
 			if (!callFunctionOnAllProcessorsRemaining) KernelPanic("InterruptHandler - callFunctionOnAllProcessorsRemaining is 0 (a).\n");
-			callFunctionOnAllProcessorsCallback();
+			CallFunctionOnAllProcessorCallbackWrapper();
 			if (!callFunctionOnAllProcessorsRemaining) KernelPanic("InterruptHandler - callFunctionOnAllProcessorsRemaining is 0 (b).\n");
 			__sync_fetch_and_sub(&callFunctionOnAllProcessorsRemaining, 1);
 		}

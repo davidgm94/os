@@ -136,17 +136,17 @@ pub fn Volatile(comptime T: type) type
             self.value = value;
         }
 
-        pub fn access_volatile(self: *volatile @This()) *volatile T
+        pub fn access_volatile(self: *volatile @This()) callconv(.Inline) *volatile T
         {
             return &self.value;
         }
 
-        pub fn increment(self: *@This()) void
+        pub fn increment(self: *@This()) callconv(.Inline) void
         {
             self.write_volatile(self.read_volatile() + 1);
         }
 
-        pub fn decrement(self: *@This()) void
+        pub fn decrement(self: *@This()) callconv(.Inline) void
         {
             self.write_volatile(self.read_volatile() - 1);
         }
@@ -161,67 +161,12 @@ pub fn Volatile(comptime T: type) type
             return @atomicRmw(T, &self.value, .Sub, value, .SeqCst);
         }
 
-        pub fn atomic_compare_and_swap(self: *@This(), expected_value: T, new_value: T) ?T
+        pub fn atomic_compare_and_swap(self: *@This(), expected_value: T, new_value: T) callconv(.Inline) ?T
         {
             return @cmpxchgStrong(@TypeOf(self.value), &self.value, expected_value, new_value, .SeqCst, .SeqCst);
         }
     };
 }
-
-//fn UnalignedVolatilePointer(comptime T: type) type
-//{
-    //return VolatilePointerExtended(T, 1);
-//}
-
-//fn VolatilePointer(comptime T: type) type
-//{
-    //return VolatilePointerExtended(T, null);
-//}
-
-//fn VolatilePointerExtended(comptime T: type, comptime alignment: ?comptime_int) type
-//{
-    //return extern struct
-    //{
-        //ptr: ?PtrType,
-
-        //const PtrType = *volatile align(if (alignment) |alignment_nn| alignment_nn else @alignOf(T)) T;
-
-        //fn equal(self: *volatile @This(), other: ?PtrType) bool
-        //{
-            //return self.ptr == other;
-        //}
-
-        //fn dereference(self: *volatile @This()) T
-        //{
-            //return self.ptr.?.*;
-        //}
-
-        //fn overwrite(self: *volatile @This(), ptr: ?PtrType) void
-        //{
-            //self.ptr = ptr;
-        //}
-
-        //fn access(self: *volatile @This()) PtrType
-        //{
-            //return self.ptr.?;
-        //}
-
-        //fn get(self: *volatile @This()) ?PtrType
-        //{
-            //return self.ptr;
-        //}
-
-        //fn is_null(self: *volatile @This()) bool
-        //{
-            //return self.ptr == null;
-        //}
-
-        //fn atomic_compare_and_swap(self: *volatile @This(), expected_value: ?PtrType, new_value: ?PtrType) ??PtrType
-        //{
-            //return @cmpxchgStrong(?PtrType, @ptrCast(*?PtrType, &self.ptr), expected_value, new_value, .SeqCst, .SeqCst);
-        //}
-    //};
-//}
 
 const CPUDescriptorTable = packed struct 
 {
@@ -7255,7 +7200,7 @@ export fn ProcessorSendIPI(interrupt: u64, nmi: bool, processor_ID: i32) callcon
 export var tlbShootdownVirtualAddress: Volatile(u64) = undefined;
 export var tlbShootdownPageCount: Volatile(u64) = undefined;
 
-const CallFunctionOnAllProcessorsCallback = fn() callconv(.C) void;
+const CallFunctionOnAllProcessorsCallback = fn() void;
 export var callFunctionOnAllProcessorsCallback: CallFunctionOnAllProcessorsCallback = undefined;
 export var callFunctionOnAllProcessorsRemaining: Volatile(u64) = undefined;
 
@@ -7269,14 +7214,15 @@ const kernel_panic_ipi = 0;
 const interrupt_vector_msi_start = 0x70;
 const interrupt_vector_msi_count = 0x40;
 
-export fn ArchCallFunctionOnAllProcessors(callback: CallFunctionOnAllProcessorsCallback, including_this_processor: bool) callconv(.C) void
+fn ArchCallFunctionOnAllProcessors(callback: CallFunctionOnAllProcessorsCallback, including_this_processor: bool) void
 {
     ipiLock.assert_locked();
+    //if (callback == 0) KernelPanic("Callback is null");
 
     const cpu_count = KGetCPUCount();
     if (cpu_count > 1)
     {
-        callFunctionOnAllProcessorsCallback = callback;
+        @ptrCast(*volatile CallFunctionOnAllProcessorsCallback, &callFunctionOnAllProcessorsCallback).* = callback;
         callFunctionOnAllProcessorsRemaining.write_volatile(cpu_count);
         const ignored = ProcessorSendIPI(call_function_on_all_processors_ipi, false, -1);
         _ = callFunctionOnAllProcessorsRemaining.atomic_fetch_sub(ignored);
@@ -7289,7 +7235,7 @@ export fn ArchCallFunctionOnAllProcessors(callback: CallFunctionOnAllProcessorsC
 
 const invalidate_all_pages_threshold = 1024;
 
-export fn TLBShootdownCallback() callconv(.C) void
+fn TLBShootdownCallback() void
 {
     const page_count = tlbShootdownPageCount.read_volatile();
     if (page_count > invalidate_all_pages_threshold)
@@ -10420,15 +10366,20 @@ export fn MMSpaceInitialise(space: *AddressSpace) callconv(.C) bool
     return true;
 }
 
-extern fn MMArchInvalidatePages(virtual_address_start: u64, page_count: u64) callconv(.C) void;
-//export fn MMArchInvalidatePages(virtual_address_start: u64, page_count: u64) callconv(.C) void
-//{
-    //ipiLock.acquire();
-    //tlbShootdownVirtualAddress.access_volatile().* = virtual_address_start;
-    //tlbShootdownPageCount.access_volatile().* = page_count;
-    //ArchCallFunctionOnAllProcessors(TLBShootdownCallback, true);
-    //ipiLock.release();
-//}
+export fn MMArchInvalidatePages(virtual_address_start: u64, page_count: u64) callconv(.C) void
+{
+    ipiLock.acquire();
+    tlbShootdownVirtualAddress.access_volatile().* = virtual_address_start;
+    tlbShootdownPageCount.access_volatile().* = page_count;
+
+    ArchCallFunctionOnAllProcessors(TLBShootdownCallback, true);
+    ipiLock.release();
+}
+
+export fn CallFunctionOnAllProcessorCallbackWrapper() callconv(.C) void
+{
+    @ptrCast(*volatile CallFunctionOnAllProcessorsCallback, &callFunctionOnAllProcessorsCallback).*();
+}
 
 export fn get_size_zig() callconv(.C) u64
 {
