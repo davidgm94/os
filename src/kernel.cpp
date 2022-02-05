@@ -2566,85 +2566,7 @@ struct KTimer {
 	EsGeneric argument;
 };
 
-extern "C"
-{
-    void SchedulerYield(InterruptContext *context);
-    void SchedulerAddActiveThread(Thread *thread, bool start); // Add an active thread into the queue.
-    void SchedulerMaybeUpdateActiveList(Thread *thread); // After changing the priority of a thread, call this to move it to the correct active thread queue if needed.
-    void SchedulerUnblockThread(Thread *unblockedThread, Thread *previousMutexOwner = nullptr);
-    Thread * SchedulerPickThread(CPULocalStorage *local); // Pick the next thread to execute.
-    int8_t SchedulerGetThreadEffectivePriority(Thread *thread);
-}
-
 struct Scheduler {
-    void UnblockThread(Thread *unblockedThread, Thread *previousMutexOwner = nullptr) {
-        KSpinlockAssertLocked(&dispatchSpinlock);
-
-        if (unblockedThread->state == THREAD_WAITING_MUTEX) {
-            if (unblockedThread->item.list) {
-                // If we get here from KMutex::Release -> Scheduler::NotifyObject -> Scheduler::UnblockedThread,
-                // the mutex owner has already been cleared to nullptr, so use the previousMutexOwner parameter.
-                // But if we get here from Scheduler::TerminateThread, the mutex wasn't released;
-                // rather, the waiting thread was unblocked as it is in the WAIT system call, but needs to terminate.
-
-                if (!previousMutexOwner) {
-                    KMutex *mutex = EsContainerOf(KMutex, blockedThreads, unblockedThread->item.list);
-
-                    if (&mutex->blockedThreads != unblockedThread->item.list) {
-                        KernelPanic("Scheduler::UnblockThread - Unblocked thread %x was not in a mutex blockedThreads list.\n", 
-                                unblockedThread);
-                    }
-
-                    previousMutexOwner = mutex->owner;
-                }
-
-                if (!previousMutexOwner->blockedThreadPriorities[unblockedThread->priority]) {
-                    KernelPanic("Scheduler::UnblockThread - blockedThreadPriorities was zero (%x/%x).\n", 
-                            unblockedThread, previousMutexOwner);
-                }
-
-                previousMutexOwner->blockedThreadPriorities[unblockedThread->priority]--;
-                SchedulerMaybeUpdateActiveList(previousMutexOwner);
-
-                unblockedThread->item.RemoveFromList();
-            }
-        } else if (unblockedThread->state == THREAD_WAITING_EVENT) {
-            for (uintptr_t i = 0; i < unblockedThread->blocking.eventCount; i++) {
-                if (unblockedThread->blocking.eventItems[i].list) {
-                    unblockedThread->blocking.eventItems[i].RemoveFromList();
-                }
-            }
-        } else if (unblockedThread->state == THREAD_WAITING_WRITER_LOCK) {
-            if (unblockedThread->item.list) {
-                KWriterLock *lock = EsContainerOf(KWriterLock, blockedThreads, unblockedThread->item.list);
-
-                if (&lock->blockedThreads != unblockedThread->item.list) {
-                    KernelPanic("Scheduler::UnblockThread - Unblocked thread %x was not in a writer lock blockedThreads list.\n", 
-                            unblockedThread);
-                }
-
-                if ((unblockedThread->blocking.writerLockType == K_LOCK_SHARED && lock->state >= 0)
-                        || (unblockedThread->blocking.writerLockType == K_LOCK_EXCLUSIVE && lock->state == 0)) {
-                    unblockedThread->item.RemoveFromList();
-                }
-            }
-        } else {
-            KernelPanic("Scheduler::UnblockedThread - Blocked thread in invalid state %d.\n", 
-                    unblockedThread->state);
-        }
-
-        unblockedThread->state = THREAD_ACTIVE;
-
-        if (!unblockedThread->executing) {
-            // Put the unblocked thread at the start of the activeThreads list
-            // so that it is immediately executed when the scheduler yields.
-            SchedulerAddActiveThread(unblockedThread, true);
-        } 
-
-        // TODO If any processors are idleing, send them a yield IPI.
-
-    }
-
 	KSpinlock dispatchSpinlock; // For accessing synchronisation objects, thread states, scheduling lists, etc. TODO Break this up!
 	KSpinlock activeTimersSpinlock; // For accessing the activeTimers lists.
 	LinkedList<Thread> activeThreads[THREAD_PRIORITY_COUNT];
@@ -2683,15 +2605,7 @@ extern "C"
     void SchedulerAddActiveThread(Thread *thread, bool start); // Add an active thread into the queue.
     void SchedulerMaybeUpdateActiveList(Thread *thread); // After changing the priority of a thread, call this to move it to the correct active thread queue if needed.
     void SchedulerYield(InterruptContext *context);
-    //void SchedulerYield(InterruptContext *context)
-    //{
-        //scheduler.Yield(context);
-    //}
     void SchedulerUnblockThread(Thread *unblockedThread, Thread *previousMutexOwner);
-    //void SchedulerUnblockThread(Thread *unblockedThread, Thread *previousMutexOwner)
-    //{
-        //scheduler.UnblockThread(unblockedThread, previousMutexOwner);
-    //}
 }
 
 struct MMArchVAS {
