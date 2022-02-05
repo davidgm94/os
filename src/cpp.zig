@@ -681,29 +681,6 @@ comptime
         \\jmp KThreadTerminate
         \\
         
-        \\.global Get_KThreadTerminateAddress
-        \\Get_KThreadTerminateAddress:
-        \\mov rax, OFFSET _KThreadTerminate
-        \\ret
-
-        \\.extern ThreadKill:
-        \\.global GetThreadKillAddress
-        \\GetThreadKillAddress:
-        \\mov rax, OFFSET ThreadKill
-        \\ret
-        
-        \\.extern CloseReferenceTask
-        \\.global GetCloseReferenceTaskAddress
-        \\GetCloseReferenceTaskAddress:
-        \\mov rax, OFFSET CloseReferenceTask
-        \\ret
-        
-        \\.extern TimeoutTimerHit
-        \\.global GetTimeoutTimerHitAddress
-        \\GetTimeoutTimerHitAddress:
-        \\mov rax, OFFSET TimeoutTimerHit
-        \\ret
-
         \\.global ProcessorReadCR3
         \\ProcessorReadCR3:
         \\mov rax, cr3
@@ -1121,7 +1098,7 @@ const Scheduler = extern struct
                         self.active_timers.remove(timer_item);
                         _ = timer.event.set(false);
 
-                        if (timer.callback) |callback|
+                        if (@intToPtr(?AsyncTask.Callback, timer.callback)) |callback|
                         {
                             timer.async_task.register(callback);
                         }
@@ -1159,7 +1136,7 @@ const Scheduler = extern struct
             if (kill_thread)
             {
                 local.current_thread.?.state.write_volatile(.terminated);
-                local.current_thread.?.kill_async_task.register(GetThreadKillAddress());
+                local.current_thread.?.kill_async_task.register(ThreadKill);
             }
             else if (local.current_thread.?.state.read_volatile() == .waiting_mutex)
             {
@@ -1306,7 +1283,7 @@ const Scheduler = extern struct
             }
             const next_unblocked_item = unblocked_item.?.next;
             const unblocked_thread = unblocked_item.?.value.?;
-            SchedulerUnblockThread(unblocked_thread, previous_mutex_owner);
+            scheduler.unblock_thread(unblocked_thread, previous_mutex_owner);
             unblocked_item = next_unblocked_item;
             if (!(unblock_all and unblocked_item != null)) break;
         }
@@ -1424,7 +1401,6 @@ const Scheduler = extern struct
     }
 };
 
-extern fn GetThreadKillAddress() callconv(.C) AsyncTask.Callback;
 export fn SchedulerYield(context: *InterruptContext) callconv(.C) void
 {
     scheduler.yield(context);
@@ -1845,7 +1821,7 @@ pub const Timer = extern struct
     async_task: AsyncTask,
     item: LinkedList(Timer).Item,
     trigger_time_ms: u64,
-    callback: ?AsyncTask.Callback,
+    callback: u64, // ?AsyncTask.Callback
     argument: u64,
 
     pub fn set_extended(self: *@This(), trigger_in_ms: u64, maybe_callback: ?AsyncTask.Callback, maybe_argument: u64) void
@@ -1857,7 +1833,7 @@ pub const Timer = extern struct
         self.event.reset();
 
         self.trigger_time_ms = trigger_in_ms + scheduler.time_ms;
-        self.callback = maybe_callback;
+        self.callback = @ptrToInt(maybe_callback);
         self.argument = maybe_argument;
         self.item.value = self;
 
@@ -1892,7 +1868,7 @@ pub const Timer = extern struct
     {
         scheduler.active_timers_spinlock.acquire();
 
-        if (self.callback != null) KernelPanic("timer with callback cannot be removed");
+        if (self.callback != 0) KernelPanic("timer with callback cannot be removed");
 
         if (self.item.list != null) scheduler.active_timers.remove(&self.item);
 
@@ -3848,21 +3824,22 @@ export fn KWriterLockAssertLocked(lock: *WriterLock) callconv(.C) void
 pub const AsyncTask = extern struct
 {
     item: SimpleList,
-    callback: ?Callback,
+    callback: u64, // AsyncTask.Callback
 
     comptime
     {
         assert(@sizeOf(AsyncTask) == @sizeOf(SimpleList) + 8);
     }
 
-    pub const Callback = fn (*@This()) callconv(.C) void;
+    pub const Callback = fn (*@This()) void;
 
     pub fn register(self: *@This(), callback: Callback) void
     {
+        assert(@ptrToInt(callback) != 0);
         scheduler.async_task_spinlock.acquire();
-        if (self.callback == null)
+        if (self.callback == 0)
         {
-            self.callback = callback;
+            self.callback = @ptrToInt(callback);
             GetLocalStorage().?.async_task_list.insert(&self.item, false);
         }
         scheduler.async_task_spinlock.release();
@@ -6191,7 +6168,7 @@ export fn ThreadSetTemporaryAddressSpace(space: ?*AddressSpace) callconv(.C) voi
 
 extern fn ProcessorSetAddressSpace(address_space: *ArchAddressSpace) callconv(.C) void;
 
-export fn ThreadKill(task: *AsyncTask) callconv(.C) void
+fn ThreadKill(task: *AsyncTask) void
 {
     const thread = @fieldParentPtr(Thread, "kill_async_task", task);
     ThreadSetTemporaryAddressSpace(thread.process.?.address_space);
@@ -6240,13 +6217,13 @@ export fn thread_exit(thread: *Thread) callconv(.C) void
                 if (thread.state.read_volatile() != .active) KernelPanic("terminatable thread non-active");
 
                 thread.item.remove_from_list();
-                thread.kill_async_task.register(GetThreadKillAddress());
+                thread.kill_async_task.register(ThreadKill);
                 yield = true;
             },
             .user_block_request =>
             {
                 const thread_state = thread.state.read_volatile();
-                if (thread_state == .waiting_mutex or thread_state == .waiting_event) SchedulerUnblockThread(thread, null);
+                if (thread_state == .waiting_mutex or thread_state == .waiting_event) scheduler.unblock_thread(thread, null);
             },
             else => {}
         }
@@ -6286,7 +6263,7 @@ export fn MMSpaceDestroy(space: *AddressSpace) callconv(.C) void
     MMArchFreeVAS(space);
 }
 
-export fn KThreadTerminate() callconv(.C) void
+fn KThreadTerminate() void
 {
     thread_exit(GetCurrentThread().?);
 }
@@ -6960,17 +6937,16 @@ export fn MMFaultRange(address: u64, byte_count: u64, flags: HandlePageFaultFlag
 
 // @TODO: MMInitialise
 
-extern fn GetCloseReferenceTaskAddress() callconv(.C) AsyncTask.Callback;
 export fn MMSpaceCloseReference(space: *AddressSpace) callconv(.C) void
 {
     if (space == &_kernelMMSpace) return;
     if (space.reference_count.read_volatile() < 1) KernelPanic("space has invalid reference count");
     if (space.reference_count.atomic_fetch_sub(1) > 1) return;
 
-    space.remove_async_task.register(GetCloseReferenceTaskAddress());
+    space.remove_async_task.register(CloseReferenceTask);
 }
 
-export fn CloseReferenceTask(task: *AsyncTask) callconv(.C) void
+fn CloseReferenceTask(task: *AsyncTask) void
 {
     const space = @fieldParentPtr(AddressSpace, "remove_async_task", task);
     MMArchFinalizeVAS(space);
@@ -8485,12 +8461,12 @@ export fn AsyncTaskThread() callconv(.C) void
             scheduler.async_task_spinlock.acquire();
             const item = first;
             const task = @fieldParentPtr(AsyncTask, "item", item);
-            const callback = task.callback.?;
-            task.callback = null;
+            const callback = @intToPtr(?AsyncTask.Callback, task.callback);
+            task.callback = 0;
             local.in_async_task = true;
             item.remove();
             scheduler.async_task_spinlock.release();
-            callback(task);
+            callback.?(task);
             ThreadSetTemporaryAddressSpace(null);
             local.in_async_task = false;
         }
@@ -9450,7 +9426,7 @@ const AHCI = struct
                 if (timeout.hit()) KernelPanic("AHCI timeout hit");
             }
 
-            if (!self.pci.enable_single_interrupt(GetAHCIHandlerAddress(), @ptrToInt(self), "AHCI")) KernelPanic("Unable to initialize AHCI");
+            if (!self.pci.enable_single_interrupt(AHCIHandler, @ptrToInt(self), "AHCI")) KernelPanic("Unable to initialize AHCI");
 
             GHC.write(self, GHC.read(self) | (1 << 31) | (1 << 1));
             self.capabilities = CAP.read(self);
@@ -9733,7 +9709,7 @@ const AHCI = struct
             _ = MMFree(&_kernelMMSpace, identify_data, 0, false);
             MMPhysicalFree(identify_data_physical, false, 1);
 
-            self.timeout_timer.set_extended(general_timeout, GetTimeoutTimerHitAddress(), @ptrToInt(self));
+            self.timeout_timer.set_extended(general_timeout, TimeoutTimerHit, @ptrToInt(self));
 
             for (self.ports) |*port, _port_i|
             {
@@ -9977,19 +9953,6 @@ const AHCI = struct
         return @intToPtr(*AHCI.Driver, context).handle_IRQ();
     }
 };
-
-extern fn GetAHCIHandlerAddress() callconv(.C) KIRQHandler;
-comptime
-{
-    asm(
-        \\.intel_syntax noprefix
-        \\.extern AHCIHandler
-        \\.global GetAHCIHandlerAddress
-        \\GetAHCIHandlerAddress:
-        \\mov rax, OFFSET AHCIHandler
-        \\ret
-    );
-}
 
 const DriveType = enum(u8)
 {
@@ -10572,9 +10535,7 @@ export fn process_start_with_something(process: *Process) bool
     }
 }
 
-extern fn GetTimeoutTimerHitAddress() callconv(.C) AsyncTask.Callback;
-
-export fn TimeoutTimerHit(task: *AsyncTask) callconv(.C) void
+fn TimeoutTimerHit(task: *AsyncTask) void
 {
     const driver = @fieldParentPtr(AHCI.Driver, "timeout_timer", @fieldParentPtr(Timer, "async_task", task));
     const current_timestamp = scheduler.time_ms;
@@ -10598,7 +10559,7 @@ export fn TimeoutTimerHit(task: *AsyncTask) callconv(.C) void
         port.command_spinlock.release();
     }
 
-    driver.timeout_timer.set_extended(AHCI.general_timeout, GetTimeoutTimerHitAddress(), @ptrToInt(driver));
+    driver.timeout_timer.set_extended(AHCI.general_timeout, TimeoutTimerHit, @ptrToInt(driver));
 }
 
 extern fn CreateLoadExecutableThread(process: *Process) callconv(.C) ?*Thread;
@@ -10662,7 +10623,6 @@ export fn CallFunctionOnAllProcessorCallbackWrapper() callconv(.C) void
     @ptrCast(*volatile CallFunctionOnAllProcessorsCallback, &callFunctionOnAllProcessorsCallback).*();
 }
 
-extern fn Get_KThreadTerminateAddress() callconv(.C) u64;
 export fn ArchInitialiseThread(kernel_stack: u64, kernel_stack_size: u64, thread: *Thread, start_address: u64, argument1: u64, argument2: u64, userland: bool, user_stack: u64, user_stack_size: u64) callconv(.C) *InterruptContext
 {
     const base = kernel_stack + kernel_stack_size - 8;
@@ -10670,7 +10630,8 @@ export fn ArchInitialiseThread(kernel_stack: u64, kernel_stack_size: u64, thread
     thread.kernel_stack = base;
     var ptr = @intToPtr(*u64, base);
     // @TODO: workaround since Zig gives us 0 address sometimes for function pointers...
-    const fn_ptr = Get_KThreadTerminateAddress();
+    const fn_ptr = @ptrToInt(KThreadTerminate);
+    assert(fn_ptr != 0);
     ptr.* = fn_ptr;
 
     context.fx_save[32] = 0x80;

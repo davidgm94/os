@@ -316,7 +316,6 @@ extern "C"
     struct CPULocalStorage *GetLocalStorage();
     struct Thread *GetCurrentThread();
     void MMSpaceCloseReference(MMSpace* space);
-    void KThreadTerminate();
     void ThreadSetTemporaryAddressSpace(MMSpace *space);
     void ProcessKill(Process* process);
 
@@ -2605,7 +2604,6 @@ extern "C"
     void SchedulerAddActiveThread(Thread *thread, bool start); // Add an active thread into the queue.
     void SchedulerMaybeUpdateActiveList(Thread *thread); // After changing the priority of a thread, call this to move it to the correct active thread queue if needed.
     void SchedulerYield(InterruptContext *context);
-    void SchedulerUnblockThread(Thread *unblockedThread, Thread *previousMutexOwner);
 }
 
 struct MMArchVAS {
@@ -3071,9 +3069,7 @@ extern "C" MMSharedRegion *MMSharedCreateRegion(size_t sizeBytes, bool fixed = f
 extern "C" void ThreadRemove(Thread* thread);
 extern "C" void MMUnreserve(MMSpace *space, MMRegion *remove, bool unmapPages, bool guardRegion = false);
 extern "C" void ThreadKill(KAsyncTask *task);
-extern "C" void KRegisterAsyncTask(KAsyncTask *task, KAsyncTaskCallback callback);
 extern "C" void thread_exit(Thread *thread);
-extern "C" void KThreadTerminate();
 extern "C" void MMSpaceOpenReference(MMSpace *space);
 extern "C" void MMZeroPageThread();
 extern "C" void MMBalanceThread();
