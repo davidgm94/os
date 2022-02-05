@@ -109,6 +109,7 @@ extern fn ProcessorDebugOutputByte(byte: u8) callconv(.C) void;
 extern fn ProcessorSetThreadStorage(tls_address: u64) callconv(.C) void;
 extern fn ProcessorSetLocalStorage(local_storage: *LocalStorage) callconv(.C) void;
 extern fn ProcessorInstallTSS(gdt: u64, tss: u64) callconv(.C) void;
+extern fn ProcessorHalt() callconv(.C) noreturn;
 extern fn GetLocalStorage() callconv(.C) ?*LocalStorage;
 extern fn GetCurrentThread() callconv(.C) ?*Thread;
 
@@ -1202,7 +1203,7 @@ const Scheduler = extern struct
             {
                 if (local.current_thread.?.type == .normal)
                 {
-                    SchedulerAddActiveThread(local.current_thread.?, false);
+                    scheduler.add_active_thread(local.current_thread.?, false);
                 }
                 else if (local.current_thread.?.type == .idle or local.current_thread.?.type == .async_task)
                 {
@@ -1213,7 +1214,7 @@ const Scheduler = extern struct
                 }
             }
 
-            const new_thread = SchedulerPickThread(local) orelse KernelPanic("Could not find a thread to execute");
+            const new_thread = scheduler.pick_thread(local) orelse KernelPanic("Could not find a thread to execute");
             local.current_thread = new_thread;
             if (new_thread.executing.read_volatile()) KernelPanic("thread in active queue already executing");
 
@@ -1405,32 +1406,8 @@ export fn SchedulerYield(context: *InterruptContext) callconv(.C) void
 {
     scheduler.yield(context);
 }
-
-export fn SchedulerAddActiveThread(thread: *Thread, start: bool) callconv(.C) void
-{
-    scheduler.add_active_thread(thread, start);
-}
-
-//extern fn SchedulerUnblockThread(thread: *Thread, previous_mutex_owner: ?*Thread) callconv(.C) void;
-export fn SchedulerUnblockThread(thread: *Thread, previous_mutex_owner: ?*Thread) callconv(.C) void
-{
-    scheduler.unblock_thread(thread, previous_mutex_owner);
-}
 extern fn SchedulerCreateProcessorThreadsWrapper(local: *LocalStorage) callconv(.C) void;
 
-export fn SchedulerGetThreadEffectivePriority(thread: *Thread) callconv(.C) i8
-{
-    return scheduler.get_thread_effective_priority(thread);
-}
-
-export fn SchedulerMaybeUpdateActiveList(thread: *Thread) callconv(.C) void
-{
-    scheduler.maybe_update_active_list(thread);
-}
-export fn SchedulerPickThread(local: *LocalStorage) callconv(.C) ?*Thread
-{
-    return scheduler.pick_thread(local);
-}
 
 const GlobalData = extern struct
 {
@@ -5099,7 +5076,7 @@ export fn ThreadSpawn(name: [*:0]const u8, start_address: u64, argument1: u64, f
         if (thread.type == .normal)
         {
             scheduler.dispatch_spinlock.acquire();
-            SchedulerAddActiveThread(thread, true);
+            scheduler.add_active_thread(thread, true);
             scheduler.dispatch_spinlock.release();
         }
         else
@@ -7456,16 +7433,16 @@ fn TLBShootdownCallback() void
     }
 }
 
-const KIRQHandler = fn(interrupt_index: u64, context: u64) callconv(.C) bool;
+const KIRQHandler = fn(interrupt_index: u64, context: u64) bool;
 const MSIHandler = extern struct
 {
-    callback: ?KIRQHandler,
+    callback: u64, // ?KIRQHandler
     context: u64,
 };
 
 const IRQHandler = extern struct
 {
-    callback: KIRQHandler,
+    callback: u64, // KIRQHandler
     context: u64,
     line: i64,
     pci_device: u64, // @ABICompatibility
@@ -7884,14 +7861,14 @@ export fn ThreadPause(thread: *Thread, resume_after: bool) callconv(.C) void
             else
             {
                 thread.item.remove_from_list();
-                SchedulerAddActiveThread(thread, false);
+                scheduler.add_active_thread(thread, false);
             }
         }
     }
     else if (resume_after and thread.item.list == &scheduler.paused_threads)
     {
         scheduler.paused_threads.remove(&thread.item);
-        SchedulerAddActiveThread(thread, false);
+        scheduler.add_active_thread(thread, false);
     }
 
     scheduler.dispatch_spinlock.release();
@@ -9081,6 +9058,7 @@ const PCI = struct
 
         fn enable_single_interrupt(self: *@This(), handler: KIRQHandler, context: u64, owner_name: []const u8) bool
         {
+            assert(@ptrToInt(handler) != 0);
             if (self.enable_MSI(handler, context, owner_name)) return true;
             if (self.interrupt_pin == 0) return false;
             if (self.interrupt_pin > 4) return false;
@@ -9096,6 +9074,7 @@ const PCI = struct
 
         fn enable_MSI(self: *@This(), handler: KIRQHandler, context: u64, owner_name: []const u8) bool
         {
+            assert(@ptrToInt(handler) != 0);
             const status = @truncate(u16, self.read_config_32(0x04) >> 16);
             if (~status & (1 << 4) != 0) return false;
 
@@ -9199,14 +9178,15 @@ const MSI = extern struct
     fn register(handler: KIRQHandler, context: u64, owner_name: []const u8) @This()
     {
         _ = owner_name;
+        assert(@ptrToInt(handler) != 0);
         irqHandlersLock.acquire();
         defer irqHandlersLock.release();
 
         for (msiHandlers) |*msi_handler, i|
         {
-            if (msi_handler.callback != null) continue;
+            if (msi_handler.callback != 0) continue;
 
-            msi_handler.* = MSIHandler { .callback = handler, .context = context };
+            msi_handler.* = MSIHandler { .callback = @ptrToInt(handler), .context = context };
 
             return .
             {
@@ -9223,7 +9203,7 @@ const MSI = extern struct
     {
         irqHandlersLock.acquire();
         defer irqHandlersLock.release();
-        msiHandlers[tag].callback = null;
+        msiHandlers[tag].callback = 0;
     }
 };
 
@@ -9948,7 +9928,7 @@ const AHCI = struct
 
     var driver: *Driver = undefined;
 
-    export fn AHCIHandler(_: u64, context: u64) callconv(.C) bool
+    fn AHCIHandler(_: u64, context: u64) bool
     {
         return @intToPtr(*AHCI.Driver, context).handle_IRQ();
     }
@@ -10716,6 +10696,137 @@ export fn CloseHandleToObject(object: u64, object_type: KernelObjectType, flags:
         },
         else => TODO(),
     }
+}
+
+export fn InterruptHandler(context: *InterruptContext) callconv(.C) void
+{
+    if (scheduler.panic.read_volatile() and context.interrupt_number != 2) return;
+
+    if (ProcessorAreInterruptsEnabled()) KernelPanic("Interrupts were enabled at the start of an interrupt handler");
+
+    const interrupt = context.interrupt_number;
+    var maybe_local = GetLocalStorage();
+
+    if (maybe_local) |local|
+    {
+        if (local.current_thread) |current_thread| current_thread.last_interrupt_timestamp = ProcessorReadTimeStamp();
+        if (local.spinlock_count != 0 and context.cr8 != 0xe) KernelPanic("Local spinlock count is not zero but interrrupts were enabled");
+    }
+
+    if (interrupt < 0x20)
+    {
+        if (interrupt == 2)
+        {
+            const local = maybe_local.?;
+            local.panic_context = context;
+            ProcessorHalt();
+        }
+
+        const supervisor = context.cs & 3 == 0;
+        const current_thread = GetCurrentThread();
+        if (!supervisor)
+        {
+            TODO();
+        }
+        else
+        {
+            if (context.cs != 0x48) KernelPanic("interrupt handler, unexpected value of CS");
+
+            if (interrupt == 14)
+            {
+                if (context.error_code & (1 << 3) != 0)
+                {
+                    KernelPanic("Page fault with unexpected error code");
+                }
+
+                if (maybe_local) |local|
+                {
+                    if (local.spinlock_count != 0 and ((context.cr2 >= 0xFFFF900000000000 and context.cr2 < 0xFFFFF00000000000) or context.cr2 < 0x8000000000000000))
+                    {
+                        KernelPanic("HandlePageFault - Page fault occurred with spinlocks active");
+                    }
+                }
+
+                if (context.flags & 0x200 != 0 and context.cr8 != 0xe)
+                {
+                    ProcessorEnableInterrupts();
+                    maybe_local = null;
+                }
+
+                if (!MMArchHandlePageFault(context.cr2, (if (context.error_code & 2 != 0) HandlePageFaultFlags.from_flag(.write) else HandlePageFaultFlags.empty()).or_flag(.for_supervisor)))
+                {
+                    if (current_thread.?.in_safe_copy and context.cr2 < 0x8000000000000000) context.rip = context.r8
+                    else KernelPanic("Couldn't handle page fault");
+                }
+
+                ProcessorDisableInterrupts();
+            }
+            else
+            {
+                KernelPanic("Unexpected interrupt number");
+            }
+        }
+    }
+    else if (interrupt == 0xff)
+    {
+        // spurious interrupt (APIC), ignore
+    }
+    else if (interrupt >= 0x20 and interrupt < 0x30)
+    {
+        // spurious interrupt (PIC), ignore
+    }
+    else if (interrupt >= 0xf0 and interrupt < 0xfe)
+    {
+        TODO();
+    }
+    else if (interrupt >= interrupt_vector_msi_start and interrupt < interrupt_vector_msi_start + interrupt_vector_msi_count and maybe_local != null)
+    {
+        irqHandlersLock.acquire();
+        const handler = msiHandlers[interrupt - interrupt_vector_msi_start];
+        irqHandlersLock.release();
+        maybe_local.?.IRQ_switch_thread = false;
+
+        if (@intToPtr(?KIRQHandler, handler.callback)) |callback|
+        {
+            _ = callback(interrupt - interrupt_vector_msi_start, handler.context);
+        }
+        else
+        {
+            // @TODO: Should this be a @Log ?
+            KernelPanic("No callback found");
+        }
+
+        if (maybe_local.?.IRQ_switch_thread and scheduler.started.read_volatile() and maybe_local.?.scheduler_ready)
+        {
+            scheduler.yield(context);
+            KernelPanic("Returned from yielding");
+        }
+
+        LapicEndOfInterrupt();
+    }
+    else if (maybe_local) |local|
+    {
+        local.IRQ_switch_thread = false;
+
+        if (interrupt == timer_interrupt) local.IRQ_switch_thread = true
+        else if (interrupt == yield_ipi) local.IRQ_switch_thread = true
+        else if (interrupt >= irq_base and interrupt < irq_base + 0x20)
+        {
+            TODO();
+        }
+
+        if (local.IRQ_switch_thread and scheduler.started.read_volatile() and local.scheduler_ready)
+        {
+            scheduler.yield(context);
+            KernelPanic("returned from yield"); 
+        }
+
+        LapicEndOfInterrupt();
+    }
+
+    ContextSanityCheck(context);
+
+    if (ProcessorAreInterruptsEnabled()) KernelPanic("Interrupts were enabled while returning from an interrupt handler");
 }
 
 export fn get_size_zig() callconv(.C) u64
