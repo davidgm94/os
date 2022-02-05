@@ -799,7 +799,7 @@ const qemu_base_command_str = &[_][]const u8
     "-m", "4096",
     //"-serial", "stdio",
     "-d", "int,cpu_reset,in_asm",
-    //"-D", "logging.txt",
+    "-D", "logging.txt",
     //"-d", "guest_errors,int,cpu,cpu_reset,in_asm"
 };
 

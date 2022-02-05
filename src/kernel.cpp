@@ -2568,60 +2568,15 @@ struct KTimer {
 
 extern "C"
 {
-    void KTimerSet(KTimer *timer, uint64_t triggerInMs, KAsyncTaskCallback callback = nullptr, EsGeneric argument = 0);
-    void KTimerRemove(KTimer *timer); // Timers with callbacks cannot be removed (it'd race with async task delivery).
-}
-extern "C"
-{
     void SchedulerYield(InterruptContext *context);
-    void SchedulerCreateProcessorThreads(CPULocalStorage *local);
     void SchedulerAddActiveThread(Thread *thread, bool start); // Add an active thread into the queue.
     void SchedulerMaybeUpdateActiveList(Thread *thread); // After changing the priority of a thread, call this to move it to the correct active thread queue if needed.
-    void SchedulerNotifyObject(LinkedList<Thread> *blockedThreads, bool unblockAll, Thread *previousMutexOwner = nullptr);
     void SchedulerUnblockThread(Thread *unblockedThread, Thread *previousMutexOwner = nullptr);
     Thread * SchedulerPickThread(CPULocalStorage *local); // Pick the next thread to execute.
     int8_t SchedulerGetThreadEffectivePriority(Thread *thread);
 }
 
 struct Scheduler {
-	void Yield(InterruptContext *context);
-	void CreateProcessorThreads(CPULocalStorage *local);
-	void AddActiveThread(Thread *thread, bool start /* put it at the start of the active list */) // Add an active thread into the queue.
-    {
-        if (thread->type == THREAD_ASYNC_TASK) {
-            // An asynchronous task thread was unblocked.
-            // It will be run immediately, so there's no need to add it to the active thread list.
-            return;
-        }
-
-        KSpinlockAssertLocked(&dispatchSpinlock);
-
-        if (thread->state != THREAD_ACTIVE) {
-            KernelPanic("Scheduler::AddActiveThread - Thread %d not active\n", thread->id);
-        } else if (thread->executing) {
-            KernelPanic("Scheduler::AddActiveThread - Thread %d executing\n", thread->id);
-        } else if (thread->type != THREAD_NORMAL) {
-            KernelPanic("Scheduler::AddActiveThread - Thread %d has type %d\n", thread->id, thread->type);
-        } else if (thread->item.list) {
-            KernelPanic("Scheduler::AddActiveThread - Thread %d is already in queue %x.\n", thread->id, thread->item.list);
-        }
-
-        if (thread->paused && thread->terminatableState == THREAD_TERMINATABLE) {
-            // The thread is paused, so we can put it into the paused queue until it is resumed.
-            pausedThreads.InsertStart(&thread->item);
-        } else {
-            int8_t effectivePriority = SchedulerGetThreadEffectivePriority(thread);
-
-            if (start) {
-                activeThreads[effectivePriority].InsertStart(&thread->item);
-            } else {
-                activeThreads[effectivePriority].InsertEnd(&thread->item);
-            }
-        }
-
-    }
-	void MaybeUpdateActiveList(Thread *thread); // After changing the priority of a thread, call this to move it to the correct active thread queue if needed.
-
     void UnblockThread(Thread *unblockedThread, Thread *previousMutexOwner = nullptr) {
         KSpinlockAssertLocked(&dispatchSpinlock);
 
@@ -2689,8 +2644,6 @@ struct Scheduler {
         // TODO If any processors are idleing, send them a yield IPI.
 
     }
-	Thread *PickThread(CPULocalStorage *local); // Pick the next thread to execute.
-	int8_t GetThreadEffectivePriority(Thread *thread);
 
 	KSpinlock dispatchSpinlock; // For accessing synchronisation objects, thread states, scheduling lists, etc. TODO Break this up!
 	KSpinlock activeTimersSpinlock; // For accessing the activeTimers lists.
@@ -2714,40 +2667,31 @@ struct Scheduler {
 	uint64_t timeMs;
 };
 
+extern "C" void AsyncTaskThread();
+extern "C" Thread* ThreadSpawn(const char *cName, uintptr_t startAddress, uintptr_t argument1 = 0, uint32_t flags = ES_FLAGS_DEFAULT, Process *process = nullptr, uintptr_t argument2 = 0);
+extern "C" void SchedulerCreateProcessorThreadsWrapper(CPULocalStorage* local)
+{
+    local->asyncTaskThread = ThreadSpawn("AsyncTasks", (uintptr_t) AsyncTaskThread, 0, SPAWN_THREAD_ASYNC_TASK);
+    local->idleThread = ThreadSpawn("Idle", 0, 0, SPAWN_THREAD_IDLE);
+}
+
 extern Scheduler scheduler;
 extern "C"
 {
-    void SchedulerYield(InterruptContext *context)
-    {
-        scheduler.Yield(context);
-    }
-    void SchedulerCreateProcessorThreads(CPULocalStorage *local)
-    {
-        scheduler.CreateProcessorThreads(local);
-    }
-    void SchedulerAddActiveThread(Thread *thread, bool start) // Add an active thread into the queue.
-    {
-        scheduler.AddActiveThread(thread, start);
-    }
-    void SchedulerMaybeUpdateActiveList(Thread *thread) // After changing the priority of a thread, call this to move it to the correct active thread queue if needed.
-    {
-        scheduler.MaybeUpdateActiveList(thread);
-    }
+    Thread * SchedulerPickThread(CPULocalStorage *local);
+    int8_t SchedulerGetThreadEffectivePriority(Thread *thread);
+    void SchedulerAddActiveThread(Thread *thread, bool start); // Add an active thread into the queue.
+    void SchedulerMaybeUpdateActiveList(Thread *thread); // After changing the priority of a thread, call this to move it to the correct active thread queue if needed.
+    void SchedulerYield(InterruptContext *context);
+    //void SchedulerYield(InterruptContext *context)
     //{
-        //scheduler.NotifyObject(blockedThreads, unblockAll, previousMutexOwner);
+        //scheduler.Yield(context);
     //}
-    void SchedulerUnblockThread(Thread *unblockedThread, Thread *previousMutexOwner)
-    {
-        scheduler.UnblockThread(unblockedThread, previousMutexOwner);
-    }
-    Thread * SchedulerPickThread(CPULocalStorage *local) // Pick the next thread to execute.
-    {
-        return scheduler.PickThread(local);
-    }
-    int8_t SchedulerGetThreadEffectivePriority(Thread *thread)
-    {
-        return scheduler.GetThreadEffectivePriority(thread);
-    }
+    void SchedulerUnblockThread(Thread *unblockedThread, Thread *previousMutexOwner);
+    //void SchedulerUnblockThread(Thread *unblockedThread, Thread *previousMutexOwner)
+    //{
+        //scheduler.UnblockThread(unblockedThread, previousMutexOwner);
+    //}
 }
 
 struct MMArchVAS {
@@ -2875,7 +2819,6 @@ struct MMSharedRegion {
 };
 
 
-extern "C" Thread* ThreadSpawn(const char *cName, uintptr_t startAddress, uintptr_t argument1 = 0, uint32_t flags = ES_FLAGS_DEFAULT, Process *process = nullptr, uintptr_t argument2 = 0);
 
 extern "C" bool KThreadCreate(const char *cName, void (*startAddress)(uintptr_t), uintptr_t argument = 0);
 
@@ -3323,260 +3266,22 @@ extern MSIHandler msiHandlers[INTERRUPT_VECTOR_MSI_COUNT];
 extern IRQHandler irqHandlers[0x40];
 extern KSpinlock irqHandlersLock; // Also for msiHandlers.
 
-
-int8_t Scheduler::GetThreadEffectivePriority(Thread *thread) {
-	KSpinlockAssertLocked(&dispatchSpinlock);
-
-	for (int8_t i = 0; i < thread->priority; i++) {
-		if (thread->blockedThreadPriorities[i]) {
-			// A thread is blocking on a resource owned by this thread,
-			// and the blocking thread has a higher priority than this thread.
-			// Therefore, this thread should assume that higher priority,
-			// until it releases the resource.
-			return i;
-		}
-	}
-
-	return thread->priority;
-}
-
 extern uint64_t timeStampTicksPerMs;
-
-Thread *Scheduler::PickThread(CPULocalStorage *local) {
-	KSpinlockAssertLocked(&dispatchSpinlock);
-
-	if ((local->asyncTaskList.first || local->inAsyncTask) && local->asyncTaskThread->state == THREAD_ACTIVE) {
-		// If the asynchronous task thread for this processor isn't blocked, and has tasks to process, execute it.
-		return local->asyncTaskThread;
-	}
-
-	for (int i = 0; i < THREAD_PRIORITY_COUNT; i++) {
-		// For every priority, check if there is a thread available. If so, execute it.
-		LinkedItem<Thread> *item = activeThreads[i].firstItem;
-		if (!item) continue;
-		item->RemoveFromList();
-		return item->thisItem;
-	}
-
-	// If we couldn't find a thread to execute, idle.
-	return local->idleThread;
-}
-
-void Scheduler::MaybeUpdateActiveList(Thread *thread) {
-	// TODO Is this correct with regards to paused threads?
-
-	if (thread->type == THREAD_ASYNC_TASK) {
-		// Asynchronous task threads do not go in the activeThreads lists.
-		return;
-	}
-
-	if (thread->type != THREAD_NORMAL) {
-		KernelPanic("Scheduler::MaybeUpdateActiveList - Trying to update the active list of a non-normal thread %x.\n", thread);
-	}
-
-	KSpinlockAssertLocked(&dispatchSpinlock);
-
-	if (thread->state != THREAD_ACTIVE || thread->executing) {
-		// The thread is not currently in an active list, 
-		// so it'll end up in the correct activeThreads list when it becomes active.
-		return;
-	}
-
-	if (!thread->item.list) {
-		KernelPanic("Scheduler::MaybeUpdateActiveList - Despite thread %x being active and not executing, it is not in an activeThreads lists.\n", thread);
-	}
-
-	int8_t effectivePriority = SchedulerGetThreadEffectivePriority(thread);
-
-	if (&activeThreads[effectivePriority] == thread->item.list) {
-		// The thread's effective priority has not changed.
-		// We don't need to do anything.
-		return;
-	}
-
-	// Remove the thread from its previous active list.
-	thread->item.RemoveFromList();
-
-	// Add it to the start of its new active list.
-	// TODO I'm not 100% sure we want to always put it at the start.
-	activeThreads[effectivePriority].InsertStart(&thread->item);
-}
-
-void Scheduler::Yield(InterruptContext *context) {
-	CPULocalStorage *local = GetLocalStorage();
-
-	if (!started || !local || !local->schedulerReady) {
-		return;
-	}
-
-	if (!local->processorID) {
-		// Update the scheduler's time.
-		timeMs = ArchGetTimeMs();
-		globalData->schedulerTimeMs = timeMs;
-
-		// Notify the necessary timers.
-		KSpinlockAcquire(&activeTimersSpinlock);
-		LinkedItem<KTimer> *_timer = activeTimers.firstItem;
-
-		while (_timer) {
-			KTimer *timer = _timer->thisItem;
-			LinkedItem<KTimer> *next = _timer->nextItem;
-
-			if (timer->triggerTimeMs <= timeMs) {
-				activeTimers.Remove(_timer);
-				KEventSet(&timer->event);
-
-				if (timer->callback) {
-					KRegisterAsyncTask(&timer->asyncTask, timer->callback);
-				}
-			} else {
-				break; // Timers are kept sorted, so there's no point continuing.
-			}
-
-			_timer = next;
-		}
-
-		KSpinlockRelease(&activeTimersSpinlock);
-	}
-
-	if (local->spinlockCount) {
-		KernelPanic("Scheduler::Yield - Spinlocks acquired while attempting to yield.\n");
-	}
-
-	ProcessorDisableInterrupts(); // We don't want interrupts to get reenabled after the context switch.
-	KSpinlockAcquire(&dispatchSpinlock);
-
-	if (dispatchSpinlock.interruptsEnabled) {
-		KernelPanic("Scheduler::Yield - Interrupts were enabled when scheduler lock was acquired.\n");
-	}
-
-	if (!local->currentThread->executing) {
-		KernelPanic("Scheduler::Yield - Current thread %x marked as not executing (%x).\n", local->currentThread, local);
-	}
-
-	MMSpace *oldAddressSpace = local->currentThread->temporaryAddressSpace ?: local->currentThread->process->vmm;
-
-	local->currentThread->interruptContext = context;
-	local->currentThread->executing = false;
-
-	bool killThread = local->currentThread->terminatableState == THREAD_TERMINATABLE 
-		&& local->currentThread->terminating;
-	bool keepThreadAlive = local->currentThread->terminatableState == THREAD_USER_BLOCK_REQUEST
-		&& local->currentThread->terminating; // The user can't make the thread block if it is terminating.
-
-	if (killThread) {
-		local->currentThread->state = THREAD_TERMINATED;
-		// @Log
-		KRegisterAsyncTask(&local->currentThread->killAsyncTask, ThreadKill);
-	}
-
-	// If the thread is waiting for an object to be notified, put it in the relevant blockedThreads list.
-	// But if the object has been notified yet hasn't made itself active yet, do that for it.
-
-	else if (local->currentThread->state == THREAD_WAITING_MUTEX) {
-		KMutex *mutex = local->currentThread->blocking.mutex;
-
-		if (!keepThreadAlive && mutex->owner) {
-			mutex->owner->blockedThreadPriorities[local->currentThread->priority]++;
-			SchedulerMaybeUpdateActiveList(mutex->owner);
-			mutex->blockedThreads.InsertEnd(&local->currentThread->item);
-		} else {
-			local->currentThread->state = THREAD_ACTIVE;
-		}
-	}
-
-	else if (local->currentThread->state == THREAD_WAITING_EVENT) {
-		if (keepThreadAlive) {
-			local->currentThread->state = THREAD_ACTIVE;
-		} else {
-			bool unblocked = false;
-
-			for (uintptr_t i = 0; i < local->currentThread->blocking.eventCount; i++) {
-				if (local->currentThread->blocking.events[i]->state) {
-					local->currentThread->state = THREAD_ACTIVE;
-					unblocked = true;
-					break;
-				}
-			}
-
-			if (!unblocked) {
-				for (uintptr_t i = 0; i < local->currentThread->blocking.eventCount; i++) {
-					local->currentThread->blocking.events[i]->blockedThreads.InsertEnd(&local->currentThread->blocking.eventItems[i]);
-				}
-			}
-		}
-	}
-
-	else if (local->currentThread->state == THREAD_WAITING_WRITER_LOCK) {
-		KWriterLock *lock = local->currentThread->blocking.writerLock;
-
-		if ((local->currentThread->blocking.writerLockType == K_LOCK_SHARED && lock->state >= 0)
-				|| (local->currentThread->blocking.writerLockType == K_LOCK_EXCLUSIVE && lock->state == 0)) {
-			local->currentThread->state = THREAD_ACTIVE;
-		} else {
-			local->currentThread->blocking.writerLock->blockedThreads.InsertEnd(&local->currentThread->item);
-		}
-	}
-
-	// Put the current thread at the end of the activeThreads list.
-	if (!killThread && local->currentThread->state == THREAD_ACTIVE) {
-		if (local->currentThread->type == THREAD_NORMAL) {
-			SchedulerAddActiveThread(local->currentThread, false);
-		} else if (local->currentThread->type == THREAD_IDLE || local->currentThread->type == THREAD_ASYNC_TASK) {
-			// Do nothing.
-		} else {
-			KernelPanic("Scheduler::Yield - Unrecognised thread type\n");
-		}
-	}
-
-	// Get the next thread to execute.
-	Thread *newThread = local->currentThread = SchedulerPickThread(local);
-
-	if (!newThread) {
-		KernelPanic("Scheduler::Yield - Could not find a thread to execute.\n");
-	}
-
-	if (newThread->executing) {
-		KernelPanic("Scheduler::Yield - Thread (ID %d) in active queue already executing with state %d, type %d.\n", 
-				local->currentThread->id, local->currentThread->state, local->currentThread->type);
-	}
-
-	// Store information about the thread.
-	newThread->executing = true;
-	newThread->executingProcessorID = local->processorID;
-	newThread->cpuTimeSlices++;
-	if (newThread->type == THREAD_IDLE) newThread->process->idleTimeSlices++;
-	else newThread->process->cpuTimeSlices++;
-
-	// Prepare the next timer interrupt.
-	ArchNextTimer(1 /* ms */);
-
-	InterruptContext *newContext = newThread->interruptContext;
-    if (newContext->rip == 0)
-    {
-        KernelPanic("RIP is 0");
-    }
-	MMSpace *addressSpace = newThread->temporaryAddressSpace ?: newThread->process->vmm;
-	MMSpaceOpenReference(addressSpace);
-	ArchSwitchContext(newContext, &addressSpace->data, newThread->kernelStack, newThread, oldAddressSpace);
-	KernelPanic("Scheduler::Yield - DoContextSwitch unexpectedly returned.\n");
-}
 
 extern "C" uint64_t MMArchPopulatePageFrameDatabase();
 extern "C" uintptr_t MMArchGetPhysicalMemoryHighest();
 extern "C" bool MMArchIsBufferInUserRange(uintptr_t baseAddress, size_t byteCount);
 extern "C" void ContextSanityCheck(InterruptContext *context);
-extern "C" void AsyncTaskThread();
 
-void Scheduler::CreateProcessorThreads(CPULocalStorage *local) {
-	local->asyncTaskThread = ThreadSpawn("AsyncTasks", (uintptr_t) AsyncTaskThread, 0, SPAWN_THREAD_ASYNC_TASK);
-	local->currentThread = local->idleThread = ThreadSpawn("Idle", 0, 0, SPAWN_THREAD_IDLE);
-	local->processorID = __sync_fetch_and_add(&nextProcessorID, 1);
+//void Scheduler::CreateProcessorThreads(CPULocalStorage *local) {
+	//local->asyncTaskThread = ThreadSpawn("AsyncTasks", (uintptr_t) AsyncTaskThread, 0, SPAWN_THREAD_ASYNC_TASK);
+	//local->currentThread = local->idleThread = ThreadSpawn("Idle", 0, 0, SPAWN_THREAD_IDLE);
+	//local->processorID = __sync_fetch_and_add(&nextProcessorID, 1);
 
-	if (local->processorID >= K_MAX_PROCESSORS) { 
-		KernelPanic("Scheduler::CreateProcessorThreads - Maximum processor count (%d) exceeded.\n", local->processorID);
-	}
-}
+	//if (local->processorID >= K_MAX_PROCESSORS) { 
+		//KernelPanic("Scheduler::CreateProcessorThreads - Maximum processor count (%d) exceeded.\n", local->processorID);
+	//}
+//}
 
 extern "C" void MMCheckUnusable(uintptr_t physicalStart, size_t bytes);
 
@@ -3870,5 +3575,5 @@ extern "C" void CreateMainThread()
 
 extern "C" uint64_t get_size(MMRegion* region)
 {
-    return offsetof(MMRegion, core.used);
+    return sizeof(Thread);
 }

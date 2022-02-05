@@ -239,8 +239,6 @@ const GDT = packed struct
         assert(@sizeOf(GDT) == @sizeOf(u64) * 14);
         assert(@sizeOf(Descriptor) == 10);
         assert(@offsetOf(GDT.WithDescriptor, "descriptor") == @sizeOf(GDT));
-        // This is false
-        //assert(@sizeOf(Complete) == @sizeOf(GDT) + @sizeOf(Descriptor));
     }
 };
 
@@ -333,6 +331,7 @@ export fn install_interrupt_handlers() callconv(.C) void
             else => false,
         };
         var handler_address = @ptrToInt(InterruptHandlerMaker(interrupt_number, has_error_code_pushed).routine);
+        assert(handler_address != 0);
 
         _idt_data[interrupt_number].foo1 = @truncate(u16, handler_address);
         _idt_data[interrupt_number].foo2 = 0x48;
@@ -685,6 +684,24 @@ comptime
         \\.global Get_KThreadTerminateAddress
         \\Get_KThreadTerminateAddress:
         \\mov rax, OFFSET _KThreadTerminate
+        \\ret
+
+        \\.extern ThreadKill:
+        \\.global GetThreadKillAddress
+        \\GetThreadKillAddress:
+        \\mov rax, OFFSET ThreadKill
+        \\ret
+        
+        \\.extern CloseReferenceTask
+        \\.global GetCloseReferenceTaskAddress
+        \\GetCloseReferenceTaskAddress:
+        \\mov rax, OFFSET CloseReferenceTask
+        \\ret
+        
+        \\.extern TimeoutTimerHit
+        \\.global GetTimeoutTimerHitAddress
+        \\GetTimeoutTimerHitAddress:
+        \\mov rax, OFFSET TimeoutTimerHit
         \\ret
 
         \\.global ProcessorReadCR3
@@ -1084,7 +1101,7 @@ const Scheduler = extern struct
         {
             if (!local.scheduler_ready) return;
 
-            if (local.processor_ID != 0)
+            if (local.processor_ID == 0)
             {
                 self.time_ms = ArchGetTimeMs();
                 globalData.scheduler_time_ms.write_volatile(self.time_ms);
@@ -1096,10 +1113,11 @@ const Scheduler = extern struct
                 while (maybe_timer_item) |timer_item|
                 {
                     const timer = timer_item.value.?;
-                    const next = timer_item.next;
 
                     if (timer.trigger_time_ms <= self.time_ms)
                     {
+                        const next = timer_item.next;
+
                         self.active_timers.remove(timer_item);
                         _ = timer.event.set(false);
 
@@ -1107,12 +1125,12 @@ const Scheduler = extern struct
                         {
                             timer.async_task.register(callback);
                         }
+                        maybe_timer_item = next;
                     }
                     else
                     {
                         break;
                     }
-                    maybe_timer_item = next;
                 }
 
                 self.active_timers_spinlock.release();
@@ -1130,7 +1148,7 @@ const Scheduler = extern struct
 
             if (!local.current_thread.?.executing.read_volatile()) KernelPanic("current thread marked as not executing");
 
-            const old_addres_space = if (local.current_thread.?.temporary_address_space) |tas| @ptrCast(*AddressSpace, tas) else local.current_thread.?.process.?.address_space;
+            const old_address_space = if (local.current_thread.?.temporary_address_space) |tas| @ptrCast(*AddressSpace, tas) else local.current_thread.?.process.?.address_space;
 
             local.current_thread.?.interrupt_context = context;
             local.current_thread.?.executing.write_volatile(false);
@@ -1141,7 +1159,7 @@ const Scheduler = extern struct
             if (kill_thread)
             {
                 local.current_thread.?.state.write_volatile(.terminated);
-                local.current_thread.?.kill_async_task.register(ThreadKill);
+                local.current_thread.?.kill_async_task.register(GetThreadKillAddress());
             }
             else if (local.current_thread.?.state.read_volatile() == .waiting_mutex)
             {
@@ -1149,7 +1167,8 @@ const Scheduler = extern struct
                 if (!keep_thread_alive and mutex.owner != null)
                 {
                     mutex.owner.?.blocked_thread_priorities[@intCast(u64, local.current_thread.?.priority)] += 1;
-                    SchedulerMaybeUpdateActiveList(mutex.owner.?);
+                    const thread = @ptrCast(*Thread, @alignCast(@alignOf(Thread), mutex.owner.?));
+                    scheduler.maybe_update_active_list(thread);
                     mutex.blocked_threads.insert_at_end(&local.current_thread.?.item);
                 }
                 else
@@ -1231,45 +1250,211 @@ const Scheduler = extern struct
             const new_context = new_thread.interrupt_context;
             const address_space = if (new_thread.temporary_address_space) |tas| @ptrCast(*AddressSpace, tas) else new_thread.process.?.address_space;
             MMSpaceOpenReference(address_space);
-            ArchSwitchContext(new_context, &address_space.arch, new_thread.kernel_stack, new_thread, old_addres_space);
+            ArchSwitchContext(new_context, &address_space.arch, new_thread.kernel_stack, new_thread, old_address_space);
             KernelPanic("do context switch unexpectedly returned");
         }
     }
+
+    fn get_thread_effective_priority(self: *@This(), thread: *Thread) i8
+    {
+        self.dispatch_spinlock.assert_locked();
+
+        for (thread.blocked_thread_priorities[0..@intCast(u64, thread.priority)]) |priority, i|
+        {
+            if (priority != 0) return @intCast(i8, i);
+        }
+
+        return thread.priority;
+    }
+
+    fn pick_thread(self: *@This(), local: *LocalStorage) ?*Thread
+    {
+        self.dispatch_spinlock.assert_locked();
+
+        if ((local.async_task_list.next_or_first != null or local.in_async_task) and local.async_task_thread.?.state.read_volatile() == .active) return local.async_task_thread;
+
+        for (self.active_threads) |*active_thread_item|
+        {
+            const thread_item = active_thread_item.first orelse continue;
+            thread_item.remove_from_list();
+            return thread_item.value;
+        }
+
+        return local.idle_thread;
+    }
+
+    fn create_processor_threads(self: *@This(), local: *LocalStorage) void
+    {
+        SchedulerCreateProcessorThreadsWrapper(local);
+        local.current_thread = local.idle_thread;
+        local.processor_ID = @intCast(u32, @atomicRmw(u64, &self.next_processor_id, .Add, 1, .SeqCst));
+
+        if (local.processor_ID >= max_processors) KernelPanic("maximum processor count exceeded");
+    }
+
+    fn notify_object(self: *@This(), blocked_threads: *LinkedList(Thread), unblock_all: bool, previous_mutex_owner: ?*Thread) void
+    {
+        self.dispatch_spinlock.assert_locked();
+
+        var unblocked_item = blocked_threads.first;
+        if (unblocked_item == null) return;
+        while (true)
+        {
+            if (@ptrToInt(unblocked_item) < 0xf000000000000000)
+            {
+                KernelPanic("here");
+            }
+            const next_unblocked_item = unblocked_item.?.next;
+            const unblocked_thread = unblocked_item.?.value.?;
+            SchedulerUnblockThread(unblocked_thread, previous_mutex_owner);
+            unblocked_item = next_unblocked_item;
+            if (!(unblock_all and unblocked_item != null)) break;
+        }
+    }
+
+    fn maybe_update_active_list(self: *@This(), thread: *Thread) void
+    {
+        if (thread.type == .async_task) return;
+        if (thread.type != .normal) KernelPanic("Trying to update the active list of a non-normal thread");
+
+        self.dispatch_spinlock.assert_locked();
+
+        if (thread.state.read_volatile() != .active or thread.executing.read_volatile()) return;
+        if (thread.item.list == null) KernelPanic("Despite thread being active and not executing, it is not in an activeThreads list");
+
+        const effective_priority = @intCast(u64, self.get_thread_effective_priority(thread));
+
+        if (&self.active_threads[effective_priority] == thread.item.list) return;
+
+        thread.item.remove_from_list();
+
+        self.active_threads[effective_priority].insert_at_start(&thread.item);
+    }
+
+    fn add_active_thread(self: *@This(), thread: *Thread, start: bool) void
+    {
+        if (thread.type == .async_task) return;
+
+        self.dispatch_spinlock.assert_locked();
+
+        if (thread.state.read_volatile() != .active) KernelPanic("thread not active")
+        else if (thread.executing.read_volatile()) KernelPanic("thread executing")
+        else if (thread.type != .normal) KernelPanic("thread not normal")
+        else if (thread.item.list != null) KernelPanic("thread is already in queue");
+
+        if (thread.paused.read_volatile() and thread.terminatable_state.read_volatile() == .terminatable) self.paused_threads.insert_at_start(&thread.item)
+        else
+        {
+            const effective_priority = @intCast(u64, self.get_thread_effective_priority(thread));
+            if (start) self.active_threads[effective_priority].insert_at_start(&thread.item)
+            else self.active_threads[effective_priority].insert_at_end(&thread.item);
+        }
+    }
+
+    fn unblock_thread(self: *@This(), unblocked_thread: *Thread, maybe_previous_mutex_owner: ?*Thread) void
+    {
+        _ = self;
+        _ = unblocked_thread;
+        _ = maybe_previous_mutex_owner;
+        TODO();
+        //self.dispatch_spinlock.assert_locked();
+
+        //const unblocked_thread_state = unblocked_thread.state.read_volatile();
+
+        //switch (unblocked_thread_state)
+        //{
+            //.waiting_mutex =>
+            //{
+                //if (unblocked_thread.item.list) |list|
+                //{
+                    //const previous_mutex_owner: *Thread = blk:
+                    //{
+                        //if (maybe_previous_mutex_owner == null)
+                        //{
+                            //const mutex = @fieldParentPtr(Mutex, "blocked_threads", list);
+                            //if (&mutex.blocked_threads != list) KernelPanic("Unblocked thread was not in a mutex blocked threads list");
+                            //assert(mutex.owner != null);
+                            //break :blk @ptrCast(*Thread, @alignCast(@alignOf(Thread), mutex.owner.?));
+                        //}
+                        //else break :blk maybe_previous_mutex_owner.?;
+                    //};
+
+                    //if (previous_mutex_owner.blocked_thread_priorities[@intCast(u64, unblocked_thread.priority)] == 0) KernelPanic("blockedthreadpriorities was 0");
+
+                    //previous_mutex_owner.blocked_thread_priorities[@intCast(u64, unblocked_thread.priority)] -= 1;
+                    //self.maybe_update_active_list(previous_mutex_owner);
+                    //unblocked_thread.item.remove_from_list();
+                //}
+            //},
+            //.waiting_event =>
+            //{
+                //const event_count = unblocked_thread.blocking.event.count;
+                //if (unblocked_thread.blocking.event.items) |event_items|
+                //{
+                    //assert(event_count != 0);
+                    //for (event_items[0..event_count]) |*event_item|
+                    //{
+                        //if (event_item.list) |_| @ptrCast(*LinkedList(Thread).Item, event_item).remove_from_list();
+                    //}
+                //}
+                //else
+                //{
+                    //assert(event_count == 0);
+                //}
+            //},
+            //.waiting_writer_lock =>
+            //{
+                //if (unblocked_thread.item.list) |list|
+                //{
+                    //const lock = @fieldParentPtr(WriterLock, "blocked_threads", list);
+                    //if (&lock.blocked_threads != list) KernelPanic("Unblocked thread was not in a writer lock blockedThreads list");
+
+                    //if ((unblocked_thread.blocking.writer.type == WriterLock.shared and lock.state.read_volatile() >= 0) or (unblocked_thread.blocking.writer.type == WriterLock.exclusive and lock.state.read_volatile() == 0))
+                    //{
+                        //unblocked_thread.item.remove_from_list();
+                    //}
+                //}
+            //},
+            //else => KernelPanic("Blocked thread in invalid state"),
+        //}
+
+        //unblocked_thread.state.write_volatile(.active);
+
+        //if (unblocked_thread.executing.read_volatile()) self.add_active_thread(unblocked_thread, true);
+    }
 };
 
-extern fn ArchSwitchContext(context: *InterruptContext, arch_address_space: *ArchAddressSpace, thread_kernel_stack: u64, new_thread: *Thread, old_address_space: *AddressSpace) callconv(.C) void;
-
-extern fn SchedulerCreateProcessorThreads(local: *LocalStorage) callconv(.C) void;
-//export fn SchedulerCreateProcessorThreads(local: *LocalStorage) callconv(.C) void
-//{
-    //local.async_task_thread = ThreadSpawn("AsyncTasks", @ptrToInt(AsyncTaskThread), 0, Thread.Flags.from_flag(.async_task), null, 0) ;
-    //local.current_thread = ThreadSpawn("Idle", 0, 0, Thread.Flags.from_flag(.idle), null, 0);
-    //local.idle_thread = local.current_thread;
-    //local.processor_ID = @intCast(u32, @atomicRmw(u64, &scheduler.next_processor_id, .Add, 1, .SeqCst));
-
-    //if (local.processor_ID >= max_processors) KernelPanic("maximum processor count exceeded");
-//}
-export fn SchedulerNotifyObject(blocked_threads: *LinkedList(Thread), unblock_all: bool, previous_mutex_owner: ?*Thread) callconv(.C) void
+extern fn GetThreadKillAddress() callconv(.C) AsyncTask.Callback;
+export fn SchedulerYield(context: *InterruptContext) callconv(.C) void
 {
-    scheduler.dispatch_spinlock.assert_locked();
-
-    var unblocked_item = blocked_threads.first;
-    if (unblocked_item == null) return;
-    while (true)
-    {
-        if (@ptrToInt(unblocked_item) < 0xf000000000000000)
-        {
-            KernelPanic("here");
-        }
-        const next_unblocked_item = unblocked_item.?.next;
-        const unblocked_thread = unblocked_item.?.value.?;
-        SchedulerUnblockThread(unblocked_thread, previous_mutex_owner);
-        unblocked_item = next_unblocked_item;
-        if (!(unblock_all and unblocked_item != null)) break;
-    }
+    scheduler.yield(context);
 }
 
-extern fn SchedulerPickThread(local: *LocalStorage) callconv(.C) ?*Thread;
+export fn SchedulerAddActiveThread(thread: *Thread, start: bool) callconv(.C) void
+{
+    scheduler.add_active_thread(thread, start);
+}
+
+//extern fn SchedulerUnblockThread(thread: *Thread, previous_mutex_owner: ?*Thread) callconv(.C) void;
+export fn SchedulerUnblockThread(thread: *Thread, previous_mutex_owner: ?*Thread) callconv(.C) void
+{
+    scheduler.unblock_thread(thread, previous_mutex_owner);
+}
+extern fn SchedulerCreateProcessorThreadsWrapper(local: *LocalStorage) callconv(.C) void;
+
+export fn SchedulerGetThreadEffectivePriority(thread: *Thread) callconv(.C) i8
+{
+    return scheduler.get_thread_effective_priority(thread);
+}
+
+export fn SchedulerMaybeUpdateActiveList(thread: *Thread) callconv(.C) void
+{
+    scheduler.maybe_update_active_list(thread);
+}
+export fn SchedulerPickThread(local: *LocalStorage) callconv(.C) ?*Thread
+{
+    return scheduler.pick_thread(local);
+}
 
 const GlobalData = extern struct
 {
@@ -1288,10 +1473,7 @@ const GlobalData = extern struct
 export var mmGlobalDataRegion: *SharedRegion = undefined;
 export var globalData: *GlobalData = undefined;
 
-extern fn SchedulerAddActiveThread(thread: *Thread, start: bool) callconv(.C) void;
-extern fn SchedulerMaybeUpdateActiveList(thread: *align(1) volatile Thread) callconv(.C) void;
-extern fn SchedulerUnblockThread(thread: *Thread, previous_mutex_owner: ?*Thread) callconv(.C) void;
-extern fn SchedulerGetThreadEffectivePriority(thread: *Thread) callconv(.C) i8;
+extern fn ArchSwitchContext(context: *InterruptContext, arch_address_space: *ArchAddressSpace, thread_kernel_stack: u64, new_thread: *Thread, old_address_space: *AddressSpace) callconv(.C) void;
 
 const LocalStorage = extern struct
 {
@@ -1307,25 +1489,6 @@ const LocalStorage = extern struct
     spinlock_count: u64,
     cpu: ?*CPU,
     async_task_list: SimpleList,
-    //
-    //pub fn get() callconv(.Inline) ?*@This()
-    //{
-        //return asm volatile(
-                //\\mov %%gs:0x0, %[out]
-                //: [out] "=r" (-> ?*@This())
-        //);
-    //}
-
-    //fn set(storage: *@This()) callconv(.Inline) void
-    //{
-        //asm volatile(
-            //\\mov %[in], %%gs:0x0
-            //:
-            //: [in] "r" (storage)
-        //);
-    //}
-    //extern fn set(storage: *LocalStorage) callconv(.C) void;
-    //comptime asm
 };
 
 // @TODO: do right
@@ -1557,6 +1720,7 @@ pub fn LinkedList(comptime T: type) type
 
             item.previous = null;
             item.next = null;
+            item.list = null;
             self.count -= 1;
             self.validate();
         }
@@ -1736,18 +1900,6 @@ pub const Timer = extern struct
     }
 };
 
-//extern fn TimeoutTimerHit(task: *AsyncTask) callconv(.C) void;
-
-export fn KTimerSet(timer: *Timer, trigger_in_ms: u64, callback: ?AsyncTask.Callback, argument: u64) callconv(.C) void
-{
-    timer.set_extended(trigger_in_ms, callback, argument);
-}
-
-export fn KTimerRemove(timer: *Timer) callconv(.C) void
-{
-    timer.remove();
-}
-
 pub const Mutex = extern struct
 {
     owner: ?* align(1) volatile Thread,
@@ -1871,7 +2023,7 @@ pub const Mutex = extern struct
         const preempt = self.blocked_threads.count != 0;
         if (scheduler.started.read_volatile())
         {
-            SchedulerNotifyObject(&self.blocked_threads, true, maybe_current_thread);
+            scheduler.notify_object(&self.blocked_threads, true, maybe_current_thread);
         }
 
         scheduler.dispatch_spinlock.release();
@@ -3328,7 +3480,7 @@ pub const Event = extern struct
             if (scheduler.started.read_volatile())
             {
                 if (self.blocked_threads.count != 0) unblocked_threads.write_volatile(true);
-                SchedulerNotifyObject(&self.blocked_threads, !self.auto_reset.read_volatile(), null);
+                scheduler.notify_object(&self.blocked_threads, !self.auto_reset.read_volatile(), null);
             }
         }
 
@@ -3630,7 +3782,7 @@ pub const WriterLock = extern struct
 
         if (self.state.read_volatile() == 0)
         {
-            SchedulerNotifyObject(&self.blocked_threads, true, null);
+            scheduler.notify_object(&self.blocked_threads, true, null);
         }
 
         scheduler.dispatch_spinlock.release();
@@ -3660,7 +3812,7 @@ pub const WriterLock = extern struct
         scheduler.dispatch_spinlock.acquire();
         self.assert_exclusive();
         self.state.write_volatile(1);
-        SchedulerNotifyObject(&self.blocked_threads, true, null);
+        scheduler.notify_object(&self.blocked_threads, true, null);
         scheduler.dispatch_spinlock.release();
     }
 
@@ -6062,19 +6214,6 @@ export fn ThreadKill(task: *AsyncTask) callconv(.C) void
     CloseHandleToObject(@ptrToInt(thread), KernelObjectType.thread, 0);
 }
 
-export fn KRegisterAsyncTask(task: *AsyncTask, callback: AsyncTask.Callback) callconv(.C) void
-{
-    scheduler.async_task_spinlock.acquire();
-
-    if (task.callback == null)
-    {
-        task.callback = callback;
-        GetLocalStorage().?.async_task_list.insert(&task.item, false);
-    }
-
-    scheduler.async_task_spinlock.release();
-}
-
 export fn thread_exit(thread: *Thread) callconv(.C) void
 {
     scheduler.dispatch_spinlock.acquire();
@@ -6101,7 +6240,7 @@ export fn thread_exit(thread: *Thread) callconv(.C) void
                 if (thread.state.read_volatile() != .active) KernelPanic("terminatable thread non-active");
 
                 thread.item.remove_from_list();
-                KRegisterAsyncTask(&thread.kill_async_task, ThreadKill);
+                thread.kill_async_task.register(GetThreadKillAddress());
                 yield = true;
             },
             .user_block_request =>
@@ -6821,16 +6960,17 @@ export fn MMFaultRange(address: u64, byte_count: u64, flags: HandlePageFaultFlag
 
 // @TODO: MMInitialise
 
+extern fn GetCloseReferenceTaskAddress() callconv(.C) AsyncTask.Callback;
 export fn MMSpaceCloseReference(space: *AddressSpace) callconv(.C) void
 {
     if (space == &_kernelMMSpace) return;
     if (space.reference_count.read_volatile() < 1) KernelPanic("space has invalid reference count");
     if (space.reference_count.atomic_fetch_sub(1) > 1) return;
 
-    KRegisterAsyncTask(&space.remove_async_task, CloseReferenceTask);
+    space.remove_async_task.register(GetCloseReferenceTaskAddress());
 }
 
-fn CloseReferenceTask(task: *AsyncTask) callconv(.C) void
+export fn CloseReferenceTask(task: *AsyncTask) callconv(.C) void
 {
     const space = @fieldParentPtr(AddressSpace, "remove_async_task", task);
     MMArchFinalizeVAS(space);
@@ -7615,7 +7755,7 @@ const NewProcessorStorage = extern struct
         storage.gdt = MMMapPhysical(&_kernelMMSpace, gdt_physical_address, page_size, Region.Flags.empty());
         storage.local.cpu = cpu;
         cpu.local_storage = storage.local;
-        SchedulerCreateProcessorThreads(storage.local);
+        scheduler.create_processor_threads(storage.local);
         cpu.kernel_processor_ID = @intCast(u8, storage.local.processor_ID);
         return storage;
     }
@@ -9310,7 +9450,7 @@ const AHCI = struct
                 if (timeout.hit()) KernelPanic("AHCI timeout hit");
             }
 
-            if (!self.pci.enable_single_interrupt(handler, @ptrToInt(self), "AHCI")) KernelPanic("Unable to initialize AHCI");
+            if (!self.pci.enable_single_interrupt(GetAHCIHandlerAddress(), @ptrToInt(self), "AHCI")) KernelPanic("Unable to initialize AHCI");
 
             GHC.write(self, GHC.read(self) | (1 << 31) | (1 << 1));
             self.capabilities = CAP.read(self);
@@ -9593,7 +9733,7 @@ const AHCI = struct
             _ = MMFree(&_kernelMMSpace, identify_data, 0, false);
             MMPhysicalFree(identify_data_physical, false, 1);
 
-            KTimerSet(&self.timeout_timer, general_timeout, TimeoutTimerHit, @ptrToInt(self));
+            self.timeout_timer.set_extended(general_timeout, GetTimeoutTimerHitAddress(), @ptrToInt(self));
 
             for (self.ports) |*port, _port_i|
             {
@@ -9614,6 +9754,7 @@ const AHCI = struct
                     drive.block_device.drive_type = if (port.atapi) DriveType.cdrom else if (port.ssd) DriveType.ssd else DriveType.hdd;
                     
                     drive.block_device.access = @ptrToInt(access_callback);
+                    assert(drive.block_device.access != 0);
                     drive.block_device.register_filesystem();
                 }
             }
@@ -9831,11 +9972,24 @@ const AHCI = struct
 
     var driver: *Driver = undefined;
 
-    fn handler(_: u64, context: u64) callconv(.C) bool
+    export fn AHCIHandler(_: u64, context: u64) callconv(.C) bool
     {
         return @intToPtr(*AHCI.Driver, context).handle_IRQ();
     }
 };
+
+extern fn GetAHCIHandlerAddress() callconv(.C) KIRQHandler;
+comptime
+{
+    asm(
+        \\.intel_syntax noprefix
+        \\.extern AHCIHandler
+        \\.global GetAHCIHandlerAddress
+        \\GetAHCIHandlerAddress:
+        \\mov rax, OFFSET AHCIHandler
+        \\ret
+    );
+}
 
 const DriveType = enum(u8)
 {
@@ -10084,7 +10238,7 @@ fn FSBlockDeviceAccess(_request: BlockDevice.AccessRequest) Error
         buffer.total_byte_count = r.count;
         //r.count = r.count;
         const callback = @intToPtr(BlockDevice.AccessRequest.Callback, device.access);
-        _ =callback(r);
+        _ = callback(r);
         //_ = device.access(r);
         r.offset += r.count;
         buffer.virtual_address += r.count;
@@ -10418,6 +10572,8 @@ export fn process_start_with_something(process: *Process) bool
     }
 }
 
+extern fn GetTimeoutTimerHitAddress() callconv(.C) AsyncTask.Callback;
+
 export fn TimeoutTimerHit(task: *AsyncTask) callconv(.C) void
 {
     const driver = @fieldParentPtr(AHCI.Driver, "timeout_timer", @fieldParentPtr(Timer, "async_task", task));
@@ -10442,7 +10598,7 @@ export fn TimeoutTimerHit(task: *AsyncTask) callconv(.C) void
         port.command_spinlock.release();
     }
 
-    driver.timeout_timer.set_extended(AHCI.general_timeout, TimeoutTimerHit, @ptrToInt(driver));
+    driver.timeout_timer.set_extended(AHCI.general_timeout, GetTimeoutTimerHitAddress(), @ptrToInt(driver));
 }
 
 extern fn CreateLoadExecutableThread(process: *Process) callconv(.C) ?*Thread;
@@ -10603,5 +10759,5 @@ export fn CloseHandleToObject(object: u64, object_type: KernelObjectType, flags:
 
 export fn get_size_zig() callconv(.C) u64
 {
-    return @sizeOf(Scheduler);
+    return @sizeOf(Thread);
 }
