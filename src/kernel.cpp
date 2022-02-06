@@ -3593,266 +3593,266 @@ void KernelPanic(const char *format, ...) {
 }
 
 
-void InterruptHandler(InterruptContext *context) {
-	if (scheduler.panic && context->interruptNumber != 2) {
-		return;
-	}
+//void InterruptHandler(InterruptContext *context) {
+    //if (scheduler.panic && context->interruptNumber != 2) {
+        //return;
+    //}
 
-	if (ProcessorAreInterruptsEnabled()) {
-		KernelPanic("InterruptHandler - Interrupts were enabled at the start of an interrupt handler.\n");
-	}
+    //if (ProcessorAreInterruptsEnabled()) {
+        //KernelPanic("InterruptHandler - Interrupts were enabled at the start of an interrupt handler.\n");
+    //}
 
-	CPULocalStorage *local = GetLocalStorage();
-	uintptr_t interrupt = context->interruptNumber;
+    //CPULocalStorage *local = GetLocalStorage();
+    //uintptr_t interrupt = context->interruptNumber;
 
-    if (local && local->currentThread)
-    {
-        local->currentThread->lastInterruptTimeStamp = ProcessorReadTimeStamp();
-    }
+    //if (local && local->currentThread)
+    //{
+        //local->currentThread->lastInterruptTimeStamp = ProcessorReadTimeStamp();
+    //}
 
-	if (local && local->spinlockCount && context->cr8 != 0xE) {
-		KernelPanic("InterruptHandler - Local spinlockCount is %d but interrupts were enabled (%x/%x).\n", local->spinlockCount, local, context);
-	}
+    //if (local && local->spinlockCount && context->cr8 != 0xE) {
+        //KernelPanic("InterruptHandler - Local spinlockCount is %d but interrupts were enabled (%x/%x).\n", local->spinlockCount, local, context);
+    //}
 
-	if (interrupt < 0x20) {
-		// If we received a non-maskable interrupt, halt execution.
-		if (interrupt == 2) {
-			local->panicContext = context;
-			ProcessorHalt();
-		}
+    //if (interrupt < 0x20) {
+        //// If we received a non-maskable interrupt, halt execution.
+        //if (interrupt == 2) {
+            //local->panicContext = context;
+            //ProcessorHalt();
+        //}
 
-		bool supervisor = (context->cs & 3) == 0;
-        Thread* currentThread = GetCurrentThread();
+        //bool supervisor = (context->cs & 3) == 0;
+        //Thread* currentThread = GetCurrentThread();
 
-		if (!supervisor) {
-			// EsPrint("User interrupt: %x/%x/%x\n", interrupt, context->cr2, context->errorCode);
+        //if (!supervisor) {
+            //// EsPrint("User interrupt: %x/%x/%x\n", interrupt, context->cr2, context->errorCode);
 
-			if (context->cs != 0x5B && context->cs != 0x6B) {
-				KernelPanic("InterruptHandler - Unexpected value of CS 0x%X\n", context->cs);
-			}
+            //if (context->cs != 0x5B && context->cs != 0x6B) {
+                //KernelPanic("InterruptHandler - Unexpected value of CS 0x%X\n", context->cs);
+            //}
 
-			if (currentThread->isKernelThread) {
-				KernelPanic("InterruptHandler - Kernel thread executing user code. (1)\n");
-			}
+            //if (currentThread->isKernelThread) {
+                //KernelPanic("InterruptHandler - Kernel thread executing user code. (1)\n");
+            //}
 
-			// User-code exceptions are *basically* the same thing as system calls.
-			ThreadTerminatableState previousTerminatableState = currentThread->terminatableState;
-			currentThread->terminatableState = THREAD_IN_SYSCALL;
+            //// User-code exceptions are *basically* the same thing as system calls.
+            //ThreadTerminatableState previousTerminatableState = currentThread->terminatableState;
+            //currentThread->terminatableState = THREAD_IN_SYSCALL;
 
-			if (local && local->spinlockCount) {
-				KernelPanic("InterruptHandler - User exception occurred with spinlock acquired.\n");
-			}
+            //if (local && local->spinlockCount) {
+                //KernelPanic("InterruptHandler - User exception occurred with spinlock acquired.\n");
+            //}
 
-			// Re-enable interrupts during exception handling.
-			ProcessorEnableInterrupts();
-            local = nullptr; // The CPU we're executing on could change
+            //// Re-enable interrupts during exception handling.
+            //ProcessorEnableInterrupts();
+            //local = nullptr; // The CPU we're executing on could change
 
-			if (interrupt == 14) {
-				bool success = MMArchHandlePageFault(context->cr2, (context->errorCode & 2) ? MM_HANDLE_PAGE_FAULT_WRITE : 0);
+            //if (interrupt == 14) {
+                //bool success = MMArchHandlePageFault(context->cr2, (context->errorCode & 2) ? MM_HANDLE_PAGE_FAULT_WRITE : 0);
 
-				if (success) {
-					goto resolved;
-				}
-			}
+                //if (success) {
+                    //goto resolved;
+                //}
+            //}
 
-			if (interrupt == 0x13) {
-				//EsPrint("ProcessorReadMXCSR() = %x\n", ProcessorReadMXCSR());
-			}
+            //if (interrupt == 0x13) {
+                ////EsPrint("ProcessorReadMXCSR() = %x\n", ProcessorReadMXCSR());
+            //}
 
-			// TODO Usermode exceptions and debugging.
-            // @Log
-			//KernelLog(LOG_ERROR, "Arch", "unhandled userland exception", 
-					//"InterruptHandler - Exception (%z) in userland process (%z).\nRIP = %x\nRSP = %x\nX86_64 error codes: [err] %x, [cr2] %x\n", 
-					//exceptionInformation[interrupt], 
-					//currentThread->process->cExecutableName,
-					//context->rip, context->rsp, context->errorCode, context->cr2);
+            //// TODO Usermode exceptions and debugging.
+            //// @Log
+            ////KernelLog(LOG_ERROR, "Arch", "unhandled userland exception", 
+                    ////"InterruptHandler - Exception (%z) in userland process (%z).\nRIP = %x\nRSP = %x\nX86_64 error codes: [err] %x, [cr2] %x\n", 
+                    ////exceptionInformation[interrupt], 
+                    ////currentThread->process->cExecutableName,
+                    ////context->rip, context->rsp, context->errorCode, context->cr2);
 
-			//EsPrint("Attempting to make a stack trace...\n");
+            ////EsPrint("Attempting to make a stack trace...\n");
 
-			{
-				uint64_t rbp = context->rbp;
-				int traceDepth = 0;
+            //{
+                //uint64_t rbp = context->rbp;
+                //int traceDepth = 0;
 
-				while (rbp && traceDepth < 32) {
-					uint64_t value;
-					if (!MMArchIsBufferInUserRange(rbp, 16)) break;
-					if (!MMArchSafeCopy((uintptr_t) &value, rbp + 8, sizeof(uint64_t))) break;
-					//EsPrint("\t%d: %x\n", ++traceDepth, value);
-					if (!value) break;
-					if (!MMArchSafeCopy((uintptr_t) &rbp, rbp, sizeof(uint64_t))) break;
-				}
-			}
+                //while (rbp && traceDepth < 32) {
+                    //uint64_t value;
+                    //if (!MMArchIsBufferInUserRange(rbp, 16)) break;
+                    //if (!MMArchSafeCopy((uintptr_t) &value, rbp + 8, sizeof(uint64_t))) break;
+                    ////EsPrint("\t%d: %x\n", ++traceDepth, value);
+                    //if (!value) break;
+                    //if (!MMArchSafeCopy((uintptr_t) &rbp, rbp, sizeof(uint64_t))) break;
+                //}
+            //}
 
-			//EsPrint("Stack trace complete.\n");
+            ////EsPrint("Stack trace complete.\n");
 
-			EsCrashReason crashReason;
-			EsMemoryZero(&crashReason, sizeof(EsCrashReason));
-			crashReason.errorCode = ES_FATAL_ERROR_PROCESSOR_EXCEPTION;
-			crashReason.duringSystemCall = (EsSyscallType) -1;
-			ProcessCrash(currentThread->process, &crashReason);
+            //EsCrashReason crashReason;
+            //EsMemoryZero(&crashReason, sizeof(EsCrashReason));
+            //crashReason.errorCode = ES_FATAL_ERROR_PROCESSOR_EXCEPTION;
+            //crashReason.duringSystemCall = (EsSyscallType) -1;
+            //ProcessCrash(currentThread->process, &crashReason);
 
-			resolved:;
+            //resolved:;
 
-			if (currentThread->terminatableState != THREAD_IN_SYSCALL) {
-				KernelPanic("InterruptHandler - Thread changed terminatable status during interrupt.\n");
-			}
+            //if (currentThread->terminatableState != THREAD_IN_SYSCALL) {
+                //KernelPanic("InterruptHandler - Thread changed terminatable status during interrupt.\n");
+            //}
 
-			currentThread->terminatableState = previousTerminatableState;
+            //currentThread->terminatableState = previousTerminatableState;
 
-			if (currentThread->terminating || currentThread->paused) {
-				ProcessorFakeTimerInterrupt();
-			}
+            //if (currentThread->terminating || currentThread->paused) {
+                //ProcessorFakeTimerInterrupt();
+            //}
 
-			// Disable interrupts when we're done.
-			ProcessorDisableInterrupts();
+            //// Disable interrupts when we're done.
+            //ProcessorDisableInterrupts();
 
-			// EsPrint("User interrupt complete.\n", interrupt, context->cr2);
-		} else {
-			if (context->cs != 0x48) {
-				KernelPanic("InterruptHandler - Unexpected value of CS 0x%X\n", context->cs);
-			}
+            //// EsPrint("User interrupt complete.\n", interrupt, context->cr2);
+        //} else {
+            //if (context->cs != 0x48) {
+                //KernelPanic("InterruptHandler - Unexpected value of CS 0x%X\n", context->cs);
+            //}
 
-			if (interrupt == 14) {
-				// EsPrint("PF: %x\n", context->cr2);
+            //if (interrupt == 14) {
+                //// EsPrint("PF: %x\n", context->cr2);
 
-				if ((context->errorCode & (1 << 3))) {
-					goto fault;
-				}
+                //if ((context->errorCode & (1 << 3))) {
+                    //goto fault;
+                //}
 
-				if (local && local->spinlockCount && ((context->cr2 >= 0xFFFF900000000000 && context->cr2 < 0xFFFFF00000000000) 
-							|| context->cr2 < 0x8000000000000000)) {
-					KernelPanic("HandlePageFault - Page fault occurred with spinlocks active at %x (S = %x, B = %x, LG = %x, CR2 = %x, local = %x).\n", 
-							context->rip, context->rsp, context->rbp, local->currentThread->lastKnownExecutionAddress, context->cr2, local);
-				}
+                //if (local && local->spinlockCount && ((context->cr2 >= 0xFFFF900000000000 && context->cr2 < 0xFFFFF00000000000) 
+                            //|| context->cr2 < 0x8000000000000000)) {
+                    //KernelPanic("HandlePageFault - Page fault occurred with spinlocks active at %x (S = %x, B = %x, LG = %x, CR2 = %x, local = %x).\n", 
+                            //context->rip, context->rsp, context->rbp, local->currentThread->lastKnownExecutionAddress, context->cr2, local);
+                //}
 
-				if ((context->flags & 0x200) && context->cr8 != 0xE) {
-					ProcessorEnableInterrupts();
-                    local = nullptr; // The CPU we're executing on could change
-				}
-				
-				if (!MMArchHandlePageFault(context->cr2, MM_HANDLE_PAGE_FAULT_FOR_SUPERVISOR
-							| ((context->errorCode & 2) ? MM_HANDLE_PAGE_FAULT_WRITE : 0))) {
-					if (currentThread->inSafeCopy && context->cr2 < 0x8000000000000000) {
-						context->rip = context->r8; // See definition of MMArchSafeCopy.
-					} else {
-						goto fault;
-					}
-				}
+                //if ((context->flags & 0x200) && context->cr8 != 0xE) {
+                    //ProcessorEnableInterrupts();
+                    //local = nullptr; // The CPU we're executing on could change
+                //}
+                
+                //if (!MMArchHandlePageFault(context->cr2, MM_HANDLE_PAGE_FAULT_FOR_SUPERVISOR
+                            //| ((context->errorCode & 2) ? MM_HANDLE_PAGE_FAULT_WRITE : 0))) {
+                    //if (currentThread->inSafeCopy && context->cr2 < 0x8000000000000000) {
+                        //context->rip = context->r8; // See definition of MMArchSafeCopy.
+                    //} else {
+                        //goto fault;
+                    //}
+                //}
 
-				ProcessorDisableInterrupts();
-			} else {
-				fault:
-				KernelPanic("Unresolvable processor exception encountered in supervisor mode.\n%z\nRIP = %x\nX86_64 error codes: [err] %x, [cr2] %x\n"
-						"Stack: [rsp] %x, [rbp] %x\nRegisters: [rax] %x, [rbx] %x, [rsi] %x, [rdi] %x.\nThread ID = %d\n", 
-						exceptionInformation[interrupt], context->rip, context->errorCode, context->cr2, 
-						context->rsp, context->rbp, context->rax, context->rbx, context->rsi, context->rdi, 
-						currentThread ? currentThread->id : -1);
-			}
-		}
-	} else if (interrupt == 0xFF) {
-		// Spurious interrupt (APIC), ignore.
-	} else if (interrupt >= 0x20 && interrupt < 0x30) {
-		// Spurious interrupt (PIC), ignore.
-	} else if (interrupt >= 0xF0 && interrupt < 0xFE) {
-		// IPI.
-		// Warning: This code executes at a special IRQL! Do not acquire spinlocks!!
+                //ProcessorDisableInterrupts();
+            //} else {
+                //fault:
+                //KernelPanic("Unresolvable processor exception encountered in supervisor mode.\n%z\nRIP = %x\nX86_64 error codes: [err] %x, [cr2] %x\n"
+                        //"Stack: [rsp] %x, [rbp] %x\nRegisters: [rax] %x, [rbx] %x, [rsi] %x, [rdi] %x.\nThread ID = %d\n", 
+                        //exceptionInformation[interrupt], context->rip, context->errorCode, context->cr2, 
+                        //context->rsp, context->rbp, context->rax, context->rbx, context->rsi, context->rdi, 
+                        //currentThread ? currentThread->id : -1);
+            //}
+        //}
+    //} else if (interrupt == 0xFF) {
+        //// Spurious interrupt (APIC), ignore.
+    //} else if (interrupt >= 0x20 && interrupt < 0x30) {
+        //// Spurious interrupt (PIC), ignore.
+    //} else if (interrupt >= 0xF0 && interrupt < 0xFE) {
+        //// IPI.
+        //// Warning: This code executes at a special IRQL! Do not acquire spinlocks!!
 
-		if (interrupt == CALL_FUNCTION_ON_ALL_PROCESSORS_IPI) {
-			if (!callFunctionOnAllProcessorsRemaining) KernelPanic("InterruptHandler - callFunctionOnAllProcessorsRemaining is 0 (a).\n");
-			CallFunctionOnAllProcessorCallbackWrapper();
-			if (!callFunctionOnAllProcessorsRemaining) KernelPanic("InterruptHandler - callFunctionOnAllProcessorsRemaining is 0 (b).\n");
-			__sync_fetch_and_sub(&callFunctionOnAllProcessorsRemaining, 1);
-		}
+        //if (interrupt == CALL_FUNCTION_ON_ALL_PROCESSORS_IPI) {
+            //if (!callFunctionOnAllProcessorsRemaining) KernelPanic("InterruptHandler - callFunctionOnAllProcessorsRemaining is 0 (a).\n");
+            //CallFunctionOnAllProcessorCallbackWrapper();
+            //if (!callFunctionOnAllProcessorsRemaining) KernelPanic("InterruptHandler - callFunctionOnAllProcessorsRemaining is 0 (b).\n");
+            //__sync_fetch_and_sub(&callFunctionOnAllProcessorsRemaining, 1);
+        //}
 
-		LapicEndOfInterrupt();
-	} else if (interrupt >= INTERRUPT_VECTOR_MSI_START && interrupt < INTERRUPT_VECTOR_MSI_START + INTERRUPT_VECTOR_MSI_COUNT && local) {
-		KSpinlockAcquire(&irqHandlersLock);
-		MSIHandler handler = msiHandlers[interrupt - INTERRUPT_VECTOR_MSI_START];
-		KSpinlockRelease(&irqHandlersLock);
-		local->irqSwitchThread = false;
+        //LapicEndOfInterrupt();
+    //} else if (interrupt >= INTERRUPT_VECTOR_MSI_START && interrupt < INTERRUPT_VECTOR_MSI_START + INTERRUPT_VECTOR_MSI_COUNT && local) {
+        //KSpinlockAcquire(&irqHandlersLock);
+        //MSIHandler handler = msiHandlers[interrupt - INTERRUPT_VECTOR_MSI_START];
+        //KSpinlockRelease(&irqHandlersLock);
+        //local->irqSwitchThread = false;
 
-		if (!handler.callback) {
-			// @Log
-		} else {
-			handler.callback(interrupt - INTERRUPT_VECTOR_MSI_START, handler.context);
-		}
+        //if (!handler.callback) {
+            //// @Log
+        //} else {
+            //handler.callback(interrupt - INTERRUPT_VECTOR_MSI_START, handler.context);
+        //}
 
-		if (local->irqSwitchThread && scheduler.started && local->schedulerReady) {
-			SchedulerYield(context); // LapicEndOfInterrupt is called in PostContextSwitch.
-			KernelPanic("InterruptHandler - Returned from Scheduler::Yield.\n");
-		}
+        //if (local->irqSwitchThread && scheduler.started && local->schedulerReady) {
+            //SchedulerYield(context); // LapicEndOfInterrupt is called in PostContextSwitch.
+            //KernelPanic("InterruptHandler - Returned from Scheduler::Yield.\n");
+        //}
 
-		LapicEndOfInterrupt();
-	} else if (local) {
-		// IRQ.
+        //LapicEndOfInterrupt();
+    //} else if (local) {
+        //// IRQ.
 
-		local->irqSwitchThread = false;
+        //local->irqSwitchThread = false;
 
-		if (interrupt == TIMER_INTERRUPT) {
-			local->irqSwitchThread = true;
-		} else if (interrupt == YIELD_IPI) {
-			local->irqSwitchThread = true;
-			GetCurrentThread()->receivedYieldIPI = true;
-		} else if (interrupt >= IRQ_BASE && interrupt < IRQ_BASE + 0x20) {
-            KernelPanic("PCI involved, not implemented\n");
-			//GetLocalStorage()->inIRQ = true;
+        //if (interrupt == TIMER_INTERRUPT) {
+            //local->irqSwitchThread = true;
+        //} else if (interrupt == YIELD_IPI) {
+            //local->irqSwitchThread = true;
+            //GetCurrentThread()->receivedYieldIPI = true;
+        //} else if (interrupt >= IRQ_BASE && interrupt < IRQ_BASE + 0x20) {
+            //KernelPanic("PCI involved, not implemented\n");
+            ////GetLocalStorage()->inIRQ = true;
 
-			//uintptr_t line = interrupt - IRQ_BASE;
-			//KernelLog(LOG_VERBOSE, "Arch", "IRQ start", "IRQ start %d.\n", line);
-			//KSpinlockAcquire(&irqHandlersLock);
+            ////uintptr_t line = interrupt - IRQ_BASE;
+            ////KernelLog(LOG_VERBOSE, "Arch", "IRQ start", "IRQ start %d.\n", line);
+            ////KSpinlockAcquire(&irqHandlersLock);
 
-			//for (uintptr_t i = 0; i < sizeof(irqHandlers) / sizeof(irqHandlers[0]); i++) {
-				//IRQHandler handler = irqHandlers[i];
-				//if (!handler.callback) continue;
+            ////for (uintptr_t i = 0; i < sizeof(irqHandlers) / sizeof(irqHandlers[0]); i++) {
+                ////IRQHandler handler = irqHandlers[i];
+                ////if (!handler.callback) continue;
 
-				//if (handler.line == -1) {
-					//// Before we get the actual IRQ line information from ACPI (which might take it a while),
-					//// only test that the IRQ is in the correct range for PCI interrupts.
-					//// This is a bit slower because we have to dispatch the interrupt to more drivers,
-					//// but it shouldn't break anything because they're all supposed to handle overloading anyway.
-					//// This is mess. Hopefully all modern computers will use MSIs for anything important.
+                ////if (handler.line == -1) {
+                    ////// Before we get the actual IRQ line information from ACPI (which might take it a while),
+                    ////// only test that the IRQ is in the correct range for PCI interrupts.
+                    ////// This is a bit slower because we have to dispatch the interrupt to more drivers,
+                    ////// but it shouldn't break anything because they're all supposed to handle overloading anyway.
+                    ////// This is mess. Hopefully all modern computers will use MSIs for anything important.
 
-					//if (line != 9 && line != 10 && line != 11) {
-						//continue;
-					//} else {
-						//uint8_t mappedLine = pciIRQLines[handler.pciDevice->slot][handler.pciDevice->interruptPin - 1];
+                    ////if (line != 9 && line != 10 && line != 11) {
+                        ////continue;
+                    ////} else {
+                        ////uint8_t mappedLine = pciIRQLines[handler.pciDevice->slot][handler.pciDevice->interruptPin - 1];
 
-						//if (mappedLine && line != mappedLine) {
-							//continue;
-						//}
-					//}
-				//} else {
-					//if ((uintptr_t) handler.line != line) {
-						//continue;
-					//}
-				//}
+                        ////if (mappedLine && line != mappedLine) {
+                            ////continue;
+                        ////}
+                    ////}
+                ////} else {
+                    ////if ((uintptr_t) handler.line != line) {
+                        ////continue;
+                    ////}
+                ////}
 
-				//KSpinlockRelease(&irqHandlersLock);
-				//handler.callback(interrupt - IRQ_BASE, handler.context);
-				//KSpinlockAcquire(&irqHandlersLock);
-			//}
+                ////KSpinlockRelease(&irqHandlersLock);
+                ////handler.callback(interrupt - IRQ_BASE, handler.context);
+                ////KSpinlockAcquire(&irqHandlersLock);
+            ////}
 
-			//KSpinlockRelease(&irqHandlersLock);
-			//KernelLog(LOG_VERBOSE, "Arch", "IRQ end", "IRQ end %d.\n", line);
+            ////KSpinlockRelease(&irqHandlersLock);
+            ////KernelLog(LOG_VERBOSE, "Arch", "IRQ end", "IRQ end %d.\n", line);
 
-			//GetLocalStorage()->inIRQ = false;
-		}
+            ////GetLocalStorage()->inIRQ = false;
+        //}
 
-		if (local->irqSwitchThread && scheduler.started && local->schedulerReady) {
-			SchedulerYield(context); // LapicEndOfInterrupt is called in PostContextSwitch.
-			KernelPanic("InterruptHandler - Returned from Scheduler::Yield.\n");
-		}
+        //if (local->irqSwitchThread && scheduler.started && local->schedulerReady) {
+            //SchedulerYield(context); // LapicEndOfInterrupt is called in PostContextSwitch.
+            //KernelPanic("InterruptHandler - Returned from Scheduler::Yield.\n");
+        //}
 
-		LapicEndOfInterrupt();
-	}
+        //LapicEndOfInterrupt();
+    //}
 
-	// Sanity check.
-	ContextSanityCheck(context);
+    //// Sanity check.
+    //ContextSanityCheck(context);
 
-	if (ProcessorAreInterruptsEnabled()) {
-		KernelPanic("InterruptHandler - Interrupts were enabled while returning from an interrupt handler.\n");
-	}
-}
+    //if (ProcessorAreInterruptsEnabled()) {
+        //KernelPanic("InterruptHandler - Interrupts were enabled while returning from an interrupt handler.\n");
+    //}
+//}
 
 extern "C" void ProcessLoadDesktopExecutable();
 extern "C" Thread* CreateLoadExecutableThread(Process* process)

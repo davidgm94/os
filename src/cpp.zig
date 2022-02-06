@@ -91,6 +91,7 @@ export var _kernelProcess: Process = undefined;
 export var kernelProcess: *Process = undefined;
 export var desktopProcess: *Process = undefined;
 
+extern fn ProcessorHalt() callconv(.C) noreturn;
 extern fn ProcessorAreInterruptsEnabled() callconv(.C) bool;
 extern fn ProcessorEnableInterrupts() callconv(.C) void;
 extern fn ProcessorDisableInterrupts() callconv(.C) void;
@@ -1946,7 +1947,7 @@ pub const FatalError = enum(u32)
     invalid_handle,
     invalid_memory_region,
     out_of_range,
-    process_exception,
+    processor_exception,
     recursive_batch,
     unknown_syscall,
 };
@@ -8965,6 +8966,8 @@ const PCI = struct
 
         fn enable_single_interrupt(self: *@This(), handler: KIRQHandler, context: u64, owner_name: []const u8) bool
         {
+            assert(@ptrToInt(handler) != 0);
+
             if (self.enable_MSI(handler, context, owner_name)) return true;
             if (self.interrupt_pin == 0) return false;
             if (self.interrupt_pin > 4) return false;
@@ -8980,6 +8983,8 @@ const PCI = struct
 
         fn enable_MSI(self: *@This(), handler: KIRQHandler, context: u64, owner_name: []const u8) bool
         {
+            assert(@ptrToInt(handler) != 0);
+
             const status = @truncate(u16, self.read_config_32(0x04) >> 16);
             if (~status & (1 << 4) != 0) return false;
 
@@ -9310,6 +9315,7 @@ const AHCI = struct
                 if (timeout.hit()) KernelPanic("AHCI timeout hit");
             }
 
+            assert(@ptrToInt(handler) != 0);
             if (!self.pci.enable_single_interrupt(handler, @ptrToInt(self), "AHCI")) KernelPanic("Unable to initialize AHCI");
 
             GHC.write(self, GHC.read(self) | (1 << 31) | (1 << 1));
@@ -10601,6 +10607,189 @@ export fn CloseHandleToObject(object: u64, object_type: KernelObjectType, flags:
     }
 }
 
+export fn InterruptHandler(context: *InterruptContext) callconv(.C) void
+{
+    if (scheduler.panic.read_volatile() and context.interrupt_number != 2) return;
+    if (ProcessorAreInterruptsEnabled()) KernelPanic("interrupts were enabled at the start of the interrupt handler");
+
+    const interrupt = context.interrupt_number;
+    var maybe_local = GetLocalStorage();
+    if (maybe_local) |local|
+    {
+        if (local.current_thread) |current_thread| current_thread.last_interrupt_timestamp = ProcessorReadTimeStamp();
+        if (local.spinlock_count != 0 and context.cr8 != 0xe) KernelPanic("Spinlock count is not zero but interrupts were enabled");
+    }
+
+    if (interrupt < 0x20)
+    {
+        if (interrupt == 2)
+        {
+            maybe_local.?.panic_context = context;
+            ProcessorHalt();
+        }
+
+        const supervisor = context.cs & 3 == 0;
+
+        if (!supervisor)
+        {
+            if (context.cs != 0x5b and context.cs != 0x6b) KernelPanic("Unexpected value of CS");
+            const current_thread = GetCurrentThread().?;
+            if (current_thread.is_kernel_thread) KernelPanic("Kernel thread executing user code");
+            const previous_terminatable_state = current_thread.terminatable_state.read_volatile();
+            current_thread.terminatable_state.write_volatile(.in_syscall);
+
+            if (maybe_local) |local| if (local.spinlock_count != 0) KernelPanic("user exception occurred with spinlock acquired");
+
+            ProcessorEnableInterrupts();
+            maybe_local = null;
+
+            if ((interrupt == 14 and !MMArchHandlePageFault(context.cr2, if (context.error_code & 2 != 0) HandlePageFaultFlags.from_flag(.write) else HandlePageFaultFlags.empty())) or interrupt != 14)
+            {
+                {
+                    var rbp = context.rbp;
+                    var trace_depth: u32 = 0;
+
+                    while (rbp != 0 and trace_depth < 32)
+                    {
+                        if (!MMArchIsBufferInUserRange(rbp, 16)) break;
+                        var value: u64 = 0;
+                        if (!MMArchSafeCopy(@ptrToInt(&value), rbp + 8, @sizeOf(u64))) break;
+                        if (value == 0) break;
+                        if (!MMArchSafeCopy(@ptrToInt(&rbp), rbp, @sizeOf(u64))) break;
+                    }
+                }
+
+                var crash_reason = zeroes(CrashReason);
+                crash_reason.error_code = FatalError.processor_exception;
+                crash_reason.during_system_call = -1;
+                ProcessCrash(current_thread.process.?, &crash_reason);
+            }
+
+            if (current_thread.terminatable_state.read_volatile() != .in_syscall) KernelPanic("thread changed terminatable state during interrupt");
+
+            current_thread.terminatable_state.write_volatile(previous_terminatable_state);
+            if (current_thread.terminating.read_volatile() or current_thread.paused.read_volatile()) ProcessorFakeTimerInterrupt();
+
+            ProcessorDisableInterrupts();
+        }
+        else
+        {
+            if (context.cs != 0x48) KernelPanic("unexpected value of CS");
+
+            if (interrupt == 14)
+            {
+                if (context.error_code & (1 << 3) != 0) KernelPanic("unresolvable page fault");
+
+                if (maybe_local) |local| if (local.spinlock_count != 0 and (context.cr2 >= 0xFFFF900000000000 and context.cr2 < 0xFFFFF00000000000)) KernelPanic("page fault occurred with spinlocks active");
+
+                if (context.flags & 0x200 != 0 and context.cr8 != 0xe)
+                {
+                    ProcessorEnableInterrupts();
+                    maybe_local = null;
+                }
+
+                const result = MMArchHandlePageFault(context.cr2, (if (context.error_code & 2 != 0) HandlePageFaultFlags.from_flag(.write) else HandlePageFaultFlags.empty()).or_flag(.for_supervisor));
+                var safe_copy = false;
+                if (!result)
+                {
+                    if (GetCurrentThread().?.in_safe_copy and context.cr2 < 0x8000000000000000)
+                    {
+                        safe_copy = true;
+                        context.rip = context.r8;
+                    }
+                }
+
+                if (result or safe_copy)
+                {
+                    ProcessorDisableInterrupts();
+                }
+                else
+                {
+                    KernelPanic("unhandled page fault");
+                }
+            }
+            else
+            {
+                KernelPanic("Unresolvable exception");
+            }
+        }
+    }
+    else if (interrupt == 0xff)
+    {
+    }
+    else if (interrupt >= 0x20 and interrupt < 0x30)
+    {
+    }
+    else if (interrupt >= 0xf0 and interrupt < 0xfe)
+    {
+        TODO();
+    }
+    else if (maybe_local) |local|
+    {
+        if ((interrupt >= interrupt_vector_msi_start and interrupt < interrupt_vector_msi_start + interrupt_vector_msi_count) and maybe_local != null)
+        {
+            irqHandlersLock.acquire();
+            const msi_i = interrupt - interrupt_vector_msi_start;
+            const handler = msiHandlers[msi_i];
+            irqHandlersLock.release();
+            local.IRQ_switch_thread = false;
+
+            if (handler.callback) |callback|
+            {
+                _ = callback(msi_i, handler.context);
+
+                if (local.IRQ_switch_thread and scheduler.started.read_volatile() and local.scheduler_ready)
+                {
+                    //TODO();
+                    SchedulerYield(context);
+                    KernelPanic("returned from scheduler yield");
+                }
+                else
+                {
+                    LapicEndOfInterrupt();
+                }
+            }
+            else
+            {
+                KernelPanic("MSI handler didn't have a callback assigned");
+            }
+        }
+        else
+        {
+            local.IRQ_switch_thread = false;
+
+            if (interrupt == timer_interrupt)
+            {
+                local.IRQ_switch_thread = true;
+            }
+            else if (interrupt == yield_ipi)
+            {
+                local.IRQ_switch_thread = true;
+                GetCurrentThread().?.received_yield_IPI.write_volatile(true);
+            }
+            else if (interrupt >= irq_base and interrupt < irq_base + 0x20)
+            {
+                TODO();
+            }
+
+            if (local.IRQ_switch_thread and scheduler.started.read_volatile() and local.scheduler_ready)
+            {
+                SchedulerYield(context);
+                KernelPanic("returned from scheduler yield");
+            }
+            else
+            {
+                LapicEndOfInterrupt();
+            }
+        }
+    }
+
+    ContextSanityCheck(context);
+
+    if (ProcessorAreInterruptsEnabled()) KernelPanic("interrupts were enabled while returning from an interrupt handler");
+}
+
+extern fn SchedulerYield(context: *InterruptContext) callconv(.C) void;
 export fn get_size_zig() callconv(.C) u64
 {
     return @sizeOf(Scheduler);
