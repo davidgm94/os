@@ -1331,74 +1331,77 @@ const Scheduler = extern struct
 
     fn unblock_thread(self: *@This(), unblocked_thread: *Thread, maybe_previous_mutex_owner: ?*Thread) void
     {
+        TODO();
         _ = self;
         _ = unblocked_thread;
-        _ = maybe_previous_mutex_owner;
-        TODO();
         //self.dispatch_spinlock.assert_locked();
 
         //const unblocked_thread_state = unblocked_thread.state.read_volatile();
+        _ = maybe_previous_mutex_owner;
 
         //switch (unblocked_thread_state)
         //{
             //.waiting_mutex =>
             //{
-                //if (unblocked_thread.item.list) |list|
-                //{
-                    //const previous_mutex_owner: *Thread = blk:
-                    //{
-                        //if (maybe_previous_mutex_owner == null)
-                        //{
-                            //const mutex = @fieldParentPtr(Mutex, "blocked_threads", list);
-                            //if (&mutex.blocked_threads != list) KernelPanic("Unblocked thread was not in a mutex blocked threads list");
-                            //assert(mutex.owner != null);
-                            //break :blk @ptrCast(*Thread, @alignCast(@alignOf(Thread), mutex.owner.?));
-                        //}
-                        //else break :blk maybe_previous_mutex_owner.?;
-                    //};
+                ////if (unblocked_thread.item.list) |list|
+                ////{
+                    ////const previous_mutex_owner: *Thread = blk:
+                    ////{
+                        ////if (maybe_previous_mutex_owner == null)
+                        ////{
+                            ////const mutex = @fieldParentPtr(Mutex, "blocked_threads", list);
+                            ////if (&mutex.blocked_threads != list) KernelPanic("Unblocked thread was not in a mutex blocked threads list");
+                            ////assert(mutex.owner != null);
+                            ////break :blk @ptrCast(*Thread, @alignCast(@alignOf(Thread), mutex.owner.?));
+                        ////}
+                        ////else break :blk maybe_previous_mutex_owner.?;
+                    ////};
 
-                    //if (previous_mutex_owner.blocked_thread_priorities[@intCast(u64, unblocked_thread.priority)] == 0) KernelPanic("blockedthreadpriorities was 0");
+                    ////if (previous_mutex_owner.blocked_thread_priorities[@intCast(u64, unblocked_thread.priority)] == 0) KernelPanic("blockedthreadpriorities was 0");
 
-                    //previous_mutex_owner.blocked_thread_priorities[@intCast(u64, unblocked_thread.priority)] -= 1;
-                    //self.maybe_update_active_list(previous_mutex_owner);
-                    //unblocked_thread.item.remove_from_list();
-                //}
+                    ////previous_mutex_owner.blocked_thread_priorities[@intCast(u64, unblocked_thread.priority)] -= 1;
+                    ////self.maybe_update_active_list(previous_mutex_owner);
+                    ////unblocked_thread.item.remove_from_list();
+                ////}
+                //TODO();
             //},
             //.waiting_event =>
             //{
-                //const event_count = unblocked_thread.blocking.event.count;
-                //if (unblocked_thread.blocking.event.items) |event_items|
-                //{
-                    //assert(event_count != 0);
-                    //for (event_items[0..event_count]) |*event_item|
-                    //{
-                        //if (event_item.list) |_| @ptrCast(*LinkedList(Thread).Item, event_item).remove_from_list();
-                    //}
-                //}
-                //else
-                //{
-                    //assert(event_count == 0);
-                //}
+                //TODO();
+                ////const event_count = unblocked_thread.blocking.event.count;
+                ////if (unblocked_thread.blocking.event.items) |event_items|
+                ////{
+                    ////assert(event_count != 0);
+                    ////for (event_items[0..event_count]) |*event_item|
+                    ////{
+                        ////if (event_item.list) |_| @ptrCast(*LinkedList(Thread).Item, event_item).remove_from_list();
+                    ////}
+                ////}
+                ////else
+                ////{
+                    ////assert(event_count == 0);
+                ////}
             //},
             //.waiting_writer_lock =>
             //{
-                //if (unblocked_thread.item.list) |list|
-                //{
-                    //const lock = @fieldParentPtr(WriterLock, "blocked_threads", list);
-                    //if (&lock.blocked_threads != list) KernelPanic("Unblocked thread was not in a writer lock blockedThreads list");
+                //TODO();
+                ////if (unblocked_thread.item.list) |list|
+                ////{
+                    ////const lock = @fieldParentPtr(WriterLock, "blocked_threads", list);
+                    ////if (&lock.blocked_threads != list) KernelPanic("Unblocked thread was not in a writer lock blockedThreads list");
 
-                    //if ((unblocked_thread.blocking.writer.type == WriterLock.shared and lock.state.read_volatile() >= 0) or (unblocked_thread.blocking.writer.type == WriterLock.exclusive and lock.state.read_volatile() == 0))
-                    //{
-                        //unblocked_thread.item.remove_from_list();
-                    //}
-                //}
+                    ////if ((unblocked_thread.blocking.writer.type == WriterLock.shared and lock.state.read_volatile() >= 0) or (unblocked_thread.blocking.writer.type == WriterLock.exclusive and lock.state.read_volatile() == 0))
+                    ////{
+                        ////unblocked_thread.item.remove_from_list();
+                    ////}
+                ////}
             //},
             //else => KernelPanic("Blocked thread in invalid state"),
         //}
 
-        //unblocked_thread.state.write_volatile(.active);
+        unblocked_thread.state.write_volatile(.active);
 
-        //if (unblocked_thread.executing.read_volatile()) self.add_active_thread(unblocked_thread, true);
+        if (unblocked_thread.executing.read_volatile()) self.add_active_thread(unblocked_thread, true);
     }
 };
 
@@ -10698,136 +10701,136 @@ export fn CloseHandleToObject(object: u64, object_type: KernelObjectType, flags:
     }
 }
 
-export fn InterruptHandler(context: *InterruptContext) callconv(.C) void
-{
-    if (scheduler.panic.read_volatile() and context.interrupt_number != 2) return;
+//export fn InterruptHandler(context: *InterruptContext) callconv(.C) void
+//{
+    //if (scheduler.panic.read_volatile() and context.interrupt_number != 2) return;
 
-    if (ProcessorAreInterruptsEnabled()) KernelPanic("Interrupts were enabled at the start of an interrupt handler");
+    //if (ProcessorAreInterruptsEnabled()) KernelPanic("Interrupts were enabled at the start of an interrupt handler");
 
-    const interrupt = context.interrupt_number;
-    var maybe_local = GetLocalStorage();
+    //const interrupt = context.interrupt_number;
+    //var maybe_local = GetLocalStorage();
 
-    if (maybe_local) |local|
-    {
-        if (local.current_thread) |current_thread| current_thread.last_interrupt_timestamp = ProcessorReadTimeStamp();
-        if (local.spinlock_count != 0 and context.cr8 != 0xe) KernelPanic("Local spinlock count is not zero but interrrupts were enabled");
-    }
+    //if (maybe_local) |local|
+    //{
+        //if (local.current_thread) |current_thread| current_thread.last_interrupt_timestamp = ProcessorReadTimeStamp();
+        //if (local.spinlock_count != 0 and context.cr8 != 0xe) KernelPanic("Local spinlock count is not zero but interrrupts were enabled");
+    //}
 
-    if (interrupt < 0x20)
-    {
-        if (interrupt == 2)
-        {
-            const local = maybe_local.?;
-            local.panic_context = context;
-            ProcessorHalt();
-        }
+    //if (interrupt < 0x20)
+    //{
+        //if (interrupt == 2)
+        //{
+            //const local = maybe_local.?;
+            //local.panic_context = context;
+            //ProcessorHalt();
+        //}
 
-        const supervisor = context.cs & 3 == 0;
-        const current_thread = GetCurrentThread();
-        if (!supervisor)
-        {
-            TODO();
-        }
-        else
-        {
-            if (context.cs != 0x48) KernelPanic("interrupt handler, unexpected value of CS");
+        //const supervisor = context.cs & 3 == 0;
+        //const current_thread = GetCurrentThread();
+        //if (!supervisor)
+        //{
+            //TODO();
+        //}
+        //else
+        //{
+            //if (context.cs != 0x48) KernelPanic("interrupt handler, unexpected value of CS");
 
-            if (interrupt == 14)
-            {
-                if (context.error_code & (1 << 3) != 0)
-                {
-                    KernelPanic("Page fault with unexpected error code");
-                }
+            //if (interrupt == 14)
+            //{
+                //if (context.error_code & (1 << 3) != 0)
+                //{
+                    //KernelPanic("Page fault with unexpected error code");
+                //}
 
-                if (maybe_local) |local|
-                {
-                    if (local.spinlock_count != 0 and ((context.cr2 >= 0xFFFF900000000000 and context.cr2 < 0xFFFFF00000000000) or context.cr2 < 0x8000000000000000))
-                    {
-                        KernelPanic("HandlePageFault - Page fault occurred with spinlocks active");
-                    }
-                }
+                //if (maybe_local) |local|
+                //{
+                    //if (local.spinlock_count != 0 and ((context.cr2 >= 0xFFFF900000000000 and context.cr2 < 0xFFFFF00000000000) or context.cr2 < 0x8000000000000000))
+                    //{
+                        //KernelPanic("HandlePageFault - Page fault occurred with spinlocks active");
+                    //}
+                //}
 
-                if (context.flags & 0x200 != 0 and context.cr8 != 0xe)
-                {
-                    ProcessorEnableInterrupts();
-                    maybe_local = null;
-                }
+                //if (context.flags & 0x200 != 0 and context.cr8 != 0xe)
+                //{
+                    //ProcessorEnableInterrupts();
+                    //maybe_local = null;
+                //}
 
-                if (!MMArchHandlePageFault(context.cr2, (if (context.error_code & 2 != 0) HandlePageFaultFlags.from_flag(.write) else HandlePageFaultFlags.empty()).or_flag(.for_supervisor)))
-                {
-                    if (current_thread.?.in_safe_copy and context.cr2 < 0x8000000000000000) context.rip = context.r8
-                    else KernelPanic("Couldn't handle page fault");
-                }
+                //if (!MMArchHandlePageFault(context.cr2, (if (context.error_code & 2 != 0) HandlePageFaultFlags.from_flag(.write) else HandlePageFaultFlags.empty()).or_flag(.for_supervisor)))
+                //{
+                    //if (current_thread.?.in_safe_copy and context.cr2 < 0x8000000000000000) context.rip = context.r8
+                    //else KernelPanic("Couldn't handle page fault");
+                //}
 
-                ProcessorDisableInterrupts();
-            }
-            else
-            {
-                KernelPanic("Unexpected interrupt number");
-            }
-        }
-    }
-    else if (interrupt == 0xff)
-    {
-        // spurious interrupt (APIC), ignore
-    }
-    else if (interrupt >= 0x20 and interrupt < 0x30)
-    {
-        // spurious interrupt (PIC), ignore
-    }
-    else if (interrupt >= 0xf0 and interrupt < 0xfe)
-    {
-        TODO();
-    }
-    else if (interrupt >= interrupt_vector_msi_start and interrupt < interrupt_vector_msi_start + interrupt_vector_msi_count and maybe_local != null)
-    {
-        irqHandlersLock.acquire();
-        const handler = msiHandlers[interrupt - interrupt_vector_msi_start];
-        irqHandlersLock.release();
-        maybe_local.?.IRQ_switch_thread = false;
+                //ProcessorDisableInterrupts();
+            //}
+            //else
+            //{
+                //KernelPanic("Unexpected interrupt number");
+            //}
+        //}
+    //}
+    //else if (interrupt == 0xff)
+    //{
+        //// spurious interrupt (APIC), ignore
+    //}
+    //else if (interrupt >= 0x20 and interrupt < 0x30)
+    //{
+        //// spurious interrupt (PIC), ignore
+    //}
+    //else if (interrupt >= 0xf0 and interrupt < 0xfe)
+    //{
+        //TODO();
+    //}
+    //else if (interrupt >= interrupt_vector_msi_start and interrupt < interrupt_vector_msi_start + interrupt_vector_msi_count and maybe_local != null)
+    //{
+        //irqHandlersLock.acquire();
+        //const handler = msiHandlers[interrupt - interrupt_vector_msi_start];
+        //irqHandlersLock.release();
+        //maybe_local.?.IRQ_switch_thread = false;
 
-        if (@intToPtr(?KIRQHandler, handler.callback)) |callback|
-        {
-            _ = callback(interrupt - interrupt_vector_msi_start, handler.context);
-        }
-        else
-        {
-            // @TODO: Should this be a @Log ?
-            KernelPanic("No callback found");
-        }
+        //if (@intToPtr(?KIRQHandler, handler.callback)) |callback|
+        //{
+            //_ = callback(interrupt - interrupt_vector_msi_start, handler.context);
+        //}
+        //else
+        //{
+            //// @TODO: Should this be a @Log ?
+            //KernelPanic("No callback found");
+        //}
 
-        if (maybe_local.?.IRQ_switch_thread and scheduler.started.read_volatile() and maybe_local.?.scheduler_ready)
-        {
-            scheduler.yield(context);
-            KernelPanic("Returned from yielding");
-        }
+        //if (maybe_local.?.IRQ_switch_thread and scheduler.started.read_volatile() and maybe_local.?.scheduler_ready)
+        //{
+            //scheduler.yield(context);
+            //KernelPanic("Returned from yielding");
+        //}
 
-        LapicEndOfInterrupt();
-    }
-    else if (maybe_local) |local|
-    {
-        local.IRQ_switch_thread = false;
+        //LapicEndOfInterrupt();
+    //}
+    //else if (maybe_local) |local|
+    //{
+        //local.IRQ_switch_thread = false;
 
-        if (interrupt == timer_interrupt) local.IRQ_switch_thread = true
-        else if (interrupt == yield_ipi) local.IRQ_switch_thread = true
-        else if (interrupt >= irq_base and interrupt < irq_base + 0x20)
-        {
-            TODO();
-        }
+        //if (interrupt == timer_interrupt) local.IRQ_switch_thread = true
+        //else if (interrupt == yield_ipi) local.IRQ_switch_thread = true
+        //else if (interrupt >= irq_base and interrupt < irq_base + 0x20)
+        //{
+            //TODO();
+        //}
 
-        if (local.IRQ_switch_thread and scheduler.started.read_volatile() and local.scheduler_ready)
-        {
-            scheduler.yield(context);
-            KernelPanic("returned from yield"); 
-        }
+        //if (local.IRQ_switch_thread and scheduler.started.read_volatile() and local.scheduler_ready)
+        //{
+            //scheduler.yield(context);
+            //KernelPanic("returned from yield"); 
+        //}
 
-        LapicEndOfInterrupt();
-    }
+        //LapicEndOfInterrupt();
+    //}
 
-    ContextSanityCheck(context);
+    //ContextSanityCheck(context);
 
-    if (ProcessorAreInterruptsEnabled()) KernelPanic("Interrupts were enabled while returning from an interrupt handler");
-}
+    //if (ProcessorAreInterruptsEnabled()) KernelPanic("Interrupts were enabled while returning from an interrupt handler");
+//}
 
 export fn get_size_zig() callconv(.C) u64
 {
