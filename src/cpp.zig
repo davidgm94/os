@@ -3828,7 +3828,14 @@ pub fn Array(comptime T: type, comptime heap_type: HeapType) type
 
         fn get_slice(self: @This()) []T
         {
-            return self.ptr.?[0..self.length()];
+            if (self.ptr) |ptr|
+            {
+                return ptr[0..self.length()];
+            }
+            else
+            {
+                KernelPanic("Array ptr is null");
+            }
         }
 
         fn free(self: *@This()) void
@@ -3853,6 +3860,18 @@ pub fn Array(comptime T: type, comptime heap_type: HeapType) type
         fn delete_many(self: *@This(), position: u64, count: u64) void
         {
             _ArrayDelete(@ptrCast(?*u64, self.ptr), position, @sizeOf(T), count);
+        }
+
+        fn first(self: *@This()) *T
+        {
+            return &self.ptr.?[0];
+        }
+
+        fn last(self: *@This()) *T
+        {
+            const len = self.length();
+            assert(len != 0);
+            return &self.ptr.?[len - 1];
         }
     };
 }
@@ -4644,9 +4663,139 @@ pub const Range = extern struct
                 const old_contiguous = self.contiguous;
                 self.contiguous = 0;
 
-                if (!self.set(0, old_contiguous, null, true)) return false;
+                if (!RangeSetSet(self, 0, old_contiguous, null, true)) return false;
             }
 
+            return true;
+        }
+
+        pub fn clear(self: *@This(), from: u64, to: u64, maybe_delta: ?*i64, modify: bool) bool
+        {
+            if (to <= from) KernelPanic("invalid range");
+
+            if (self.ranges.length() == 0)
+            {
+                if (from < self.contiguous and self.contiguous != 0)
+                {
+                    if (to < self.contiguous)
+                    {
+                        if (modify)
+                        {
+                            if (!RangeSetNormalize(self)) return false;
+                        }
+                        else
+                        {
+                            if (maybe_delta) |delta| delta.* = @intCast(i64, from) - @intCast(i64, to);
+                            return true;
+                        }
+                    }
+                    else
+                    {
+                        if (maybe_delta) |delta| delta.* = @intCast(i64, from) - @intCast(i64, self.contiguous);
+                        if (modify) self.contiguous = from;
+                        return true;
+                    }
+                }
+                else
+                {
+                    if (maybe_delta) |delta| delta.* = 0;
+                    return true;
+                }
+            }
+
+            if (self.ranges.length() == 0)
+            {
+                self.ranges.free();
+                if (maybe_delta) |delta| delta.* = 0;
+                return true;
+            }
+
+            if (to <= self.ranges.first().from or from >= self.ranges.last().to)
+            {
+                if (maybe_delta) |delta| delta.* = 0;
+                return true;
+            }
+
+            if (from <= self.ranges.first().from and to >= self.ranges.last().to)
+            {
+                if (maybe_delta) |delta|
+                {
+                    var total: i64 = 0;
+
+                    for (self.ranges.get_slice()) |range|
+                    {
+                        total += @intCast(i64, range.to) - @intCast(i64, range.from);
+                    }
+
+                    delta.* = -total;
+                }
+
+                if (modify) self.ranges.free();
+
+                return true;
+            }
+
+            var overlap_start = self.ranges.length();
+            var overlap_count: u64 = 0;
+
+            for (self.ranges.get_slice()) |*range, i|
+            {
+                if (range.to > from and range.from < to)
+                {
+                    overlap_start = i;
+                    overlap_count = 1;
+                    break;
+                }
+            }
+
+            for (self.ranges.get_slice()[overlap_start + 1..]) |*range|
+            {
+                if (range.to >= from and range.from < to) overlap_count += 1
+                else break;
+            }
+
+            var _delta: i64 = 0;
+
+            if (overlap_count == 1)
+            {
+                TODO();
+                //const range = &self.ranges.ptr.?[overlap_start];
+
+                //if (range.from < from and range.to > to)
+                //{
+                    //var new_range = Range { .from = to, .to = range.to };
+                    //_delta -= @intCast(i64, to) - @intCast(i64, from);
+
+                    //if (modify)
+                    //{
+                        //if (!self.ranges.insert(new_range, overlap_start + 1)) return false;
+                        //self.ranges.ptr.?[overlap_start].to = from;
+                    //}
+                //}
+                //else if (range.from < from)
+                //{
+                    //_delta -= @intCast(i64, range.to) - @intCast(i64, from);
+                    //if (modify) range.to = from;
+                //}
+                //else if (range.to > to)
+                //{
+                    //_delta -= @intCast(i64, to) - @intCast(i64, range.from);
+                    //if (modify) range.from = to;
+                //}
+                //else
+                //{
+                    //_delta -= @intCast(i64, range.to) - @intCast(i64, range.from);
+                    //if (modify) self.ranges.delete(overlap_start);
+                //}
+            }
+            else if (overlap_count > 1)
+            {
+                TODO();
+            }
+
+            if (maybe_delta) |delta| delta.* = _delta;
+
+            self.validate();
             return true;
         }
     };
@@ -4656,20 +4805,25 @@ export fn RangeSetFind(range_set: *Range.Set, offset: u64, touching: bool) callc
 {
     return range_set.find(offset, touching);
 }
+
 export fn RangeSetContains(range_set: *Range.Set, offset: u64) callconv(.C) bool
 {
     return range_set.contains(offset);
 }
-extern fn RangeSetClear(range_set: *Range.Set, from: u64, to: u64, delta: ?*i64, modify: bool) callconv(.C) bool;
+
+export fn RangeSetNormalize(range_set: *Range.Set) callconv(.C) bool
+{
+    return range_set.normalize();
+}
+
+export fn RangeSetClear(range_set: *Range.Set, from: u64, to: u64, delta: ?*i64, modify: bool) callconv(.C) bool
+{
+    return range_set.clear(from, to, delta, modify);
+}
 extern fn RangeSetSet(range_set: *Range.Set, from: u64, to: u64, delta: ?*i64, modify: bool) callconv(.C) bool;
-extern fn RangeSetNormalize(range_set: *Range.Set) callconv(.C) bool;
 //export fn RangeSetSet(range_set: *Range.Set, from: u64, to: u64, delta: ?*i64, modify: bool) callconv(.C) bool
 //{
     //return range_set.set(from, to, delta, modify);
-//}
-//export fn RangeSetNormalize(range_set: *Range.Set) callconv(.C) bool
-//{
-    //return range_set.normalize();
 //}
 
 export fn EsMemoryFill(from: u64, to: u64, byte: u8) callconv(.C) void

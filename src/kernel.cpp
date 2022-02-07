@@ -502,7 +502,10 @@ extern "C"
 {
     Range* RangeSetFind(RangeSet* rangeSet, uintptr_t offset, bool touching);
     bool RangeSetContains(RangeSet* rangeSet, uintptr_t offset);
+    bool RangeSetNormalize(RangeSet* rangeSet);
+    bool RangeSetClear(RangeSet* rangeSet, uintptr_t from, uintptr_t to, intptr_t* delta, bool modify);
 }
+
 struct RangeSet {
 	Array<Range, K_CORE> ranges;
 	uintptr_t contiguous;
@@ -527,21 +530,6 @@ struct RangeSet {
             previousTo = range->to;
         }
 #endif
-    }
-
-    bool Normalize() {
-        // @Log
-
-        if (contiguous) {
-            uintptr_t oldContiguous = contiguous;
-            contiguous = 0;
-
-            if (!Set(0, oldContiguous, nullptr, true)) {
-                return false;
-            }
-        }
-
-        return true;
     }
 
     bool Set(uintptr_t from, uintptr_t to, intptr_t *delta, bool modify) {
@@ -574,7 +562,7 @@ struct RangeSet {
                 return true;
             }
 
-            if (!Normalize()) {
+            if (!RangeSetNormalize(this)) {
                 return false;
             }
         }
@@ -642,169 +630,13 @@ struct RangeSet {
         return true;
 
     }
-
-    bool Clear(uintptr_t from, uintptr_t to, intptr_t *delta, bool modify) {
-#if 0
-        for (uintptr_t i = from; i < to; i++) {
-            check[i] = false;
-        }
-#endif
-
-        if (to <= from) {
-            KernelPanic("RangeSet::Clear - Invalid range %x to %x.\n", from, to);
-        }
-
-        if (!ranges.Length()) {
-            if (from < contiguous && contiguous) {
-                if (to < contiguous) {
-                    if (modify) {
-                        if (!Normalize()) return false;
-                    } else {
-                        if (delta) *delta = from - to;
-                        return true;
-                    }
-                } else {
-                    if (delta) *delta = from - contiguous;
-                    if (modify) contiguous = from;
-                    return true;
-                }
-            } else {
-                if (delta) *delta = 0;
-                return true;
-            }
-        }
-
-        if (!ranges.Length()) {
-            ranges.Free();
-            if (delta) *delta = 0;
-            return true;
-        }
-
-        if (to <= ranges.First().from || from >= ranges.Last().to) {
-            if (delta) *delta = 0;
-            return true;
-        }
-
-        if (from <= ranges.First().from && to >= ranges.Last().to) {
-            if (delta) {
-                intptr_t total = 0;
-
-                for (uintptr_t i = 0; i < ranges.Length(); i++) {
-                    total += ranges[i].to - ranges[i].from;
-                }
-
-                *delta = -total;
-            }
-
-            if (modify) {
-                ranges.Free();
-            }
-
-            return true;
-        }
-
-        // Find the first and last overlapping regions.
-
-        uintptr_t overlapStart = ranges.Length();
-        size_t overlapCount = 0;
-
-        for (uintptr_t i = 0; i < ranges.Length(); i++) {
-            Range *range = &ranges[i];
-
-            if (range->to > from && range->from < to) {
-                overlapStart = i;
-                overlapCount = 1;
-                break;
-            }
-        }
-
-        for (uintptr_t i = overlapStart + 1; i < ranges.Length(); i++) {
-            Range *range = &ranges[i];
-
-            if (range->to >= from && range->from < to) {
-                overlapCount++;
-            } else {
-                break;
-            }
-        }
-
-        // Remove the overlapping sections.
-
-        intptr_t _delta = 0;
-
-        if (overlapCount == 1) {
-            Range *range = &ranges[overlapStart];
-
-            if (range->from < from && range->to > to) {
-                Range newRange = { to, range->to };
-                _delta -= to - from;
-
-                if (modify) {
-                    if (!ranges.Insert(newRange, overlapStart + 1)) {
-                        return false;
-                    }
-
-                    ranges[overlapStart].to = from;
-                }
-            } else if (range->from < from) {
-                _delta -= range->to - from;
-                if (modify) range->to = from;
-            } else if (range->to > to) {
-                _delta -= to - range->from;
-                if (modify) range->from = to;
-            } else {
-                _delta -= range->to - range->from;
-                if (modify) ranges.Delete(overlapStart);
-            }
-        } else if (overlapCount > 1) {
-            Range *left = &ranges[overlapStart];
-            Range *right = &ranges[overlapStart + overlapCount - 1];
-
-            if (left->from < from) {
-                _delta -= left->to - from;
-                if (modify) left->to = from;
-                overlapStart++, overlapCount--;
-            }
-
-            if (right->to > to) {
-                _delta -= to - right->from;
-                if (modify) right->from = to;
-                overlapCount--;
-            }
-
-            if (delta) {
-                for (uintptr_t i = overlapStart; i < overlapStart + overlapCount; i++) {
-                    _delta -= ranges[i].to - ranges[i].from;
-                }
-            }
-
-            if (modify) {
-                ranges.DeleteMany(overlapStart, overlapCount);
-            }
-        }
-
-        if (delta) {
-            *delta = _delta;
-        }
-
-        Validate();
-        return true;
-    }
 };
 
 extern "C"
 {
-    bool RangeSetClear(RangeSet* rangeSet, uintptr_t from, uintptr_t to, intptr_t* delta, bool modify)
-    {
-        return rangeSet->Clear(from, to, delta, modify);
-    }
     bool RangeSetSet(RangeSet* rangeSet, uintptr_t from, uintptr_t to, intptr_t* delta, bool modify)
     {
         return rangeSet->Set(from, to, delta, modify);
-    }
-    bool RangeSetNormalize(RangeSet* rangeSet)
-    {
-        return rangeSet->Normalize();
     }
 }
 
