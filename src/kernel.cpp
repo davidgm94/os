@@ -80,45 +80,24 @@ struct Process;
 struct EsCrashReason;
 struct InterruptContext;
 struct MMRegion;
+struct CPULocalStorage;
+struct MMArchVAS;
 
 extern "C"
 {
     void TODO() __attribute__((noreturn));
     void KernelPanic(const char *format, ...) __attribute__((noreturn));
-
     void ProcessorHalt() __attribute__((noreturn));
     Thread* GetCurrentThread();
-    void ProcessorInvalidatePage(uintptr_t virtualAddress);
     void ArchNextTimer(size_t ms); // Schedule the next TIMER_INTERRUPT.
     uint64_t ArchGetTimeMs(); // Called by the scheduler on the boot processor every context switch.
-    void ArchSwitchContext(struct InterruptContext *context, struct MMArchVAS *virtualAddressSpace, uintptr_t threadKernelStack, struct Thread *newThread, struct MMSpace *oldAddressSpace);
+    void ArchSwitchContext(InterruptContext *context, MMArchVAS *virtualAddressSpace, uintptr_t threadKernelStack, Thread *newThread, MMSpace *oldAddressSpace);
     void ProcessorDisableInterrupts();
-    void ProcessorHalt();
-    struct CPULocalStorage *GetLocalStorage();
-    struct Thread *GetCurrentThread();
-    void EsMemoryFill(void *from, void *to, uint8_t byte);
-    void EsMemoryCopy(void *_destination, const void *_source, size_t bytes);
-    void EsAssertionFailure(const char *file, int line);
-    size_t EsCStringLength(const char *string);
-    int EsStringCompareRaw(const char *s1, ptrdiff_t length1, const char *s2, ptrdiff_t length2);
-    void *MMStandardAllocate(MMSpace *space, size_t bytes, uint32_t flags, void *baseAddress = nullptr, bool commitAll = true);
-    bool MMFree(MMSpace *space, void *address, size_t expectedSize = 0, bool userOnly = false);
-    void EsMemoryZero(void* dst, uintptr_t byte_count);
+    CPULocalStorage *GetLocalStorage();
 }
 
 typedef uint64_t EsGeneric;
 
-#define MM_REGION_FIXED              (0x01) // A region where all the physical pages are allocated up-front, and cannot be removed from the working set.
-#define MM_REGION_NOT_CACHEABLE      (0x02) // Do not cache the pages in the region.
-#define MM_REGION_NO_COMMIT_TRACKING (0x04) // Page committing is manually tracked.
-#define MM_REGION_READ_ONLY	     (0x08) // Generate page faults when written to.
-#define MM_REGION_COPY_ON_WRITE	     (0x10) // Copy on write.
-#define MM_REGION_WRITE_COMBINING    (0x20) // Write combining caching is enabled. Incompatible with MM_REGION_NOT_CACHEABLE.
-#define MM_REGION_EXECUTABLE         (0x40) 
-#define MM_REGION_USER               (0x80) // The application created it, and is therefore allowed to modify it.
-// Limited by region type flags.
-
-#define K_PAGE_BITS (12)
 #define K_PAGE_SIZE (0x1000)
 
 #define MM_CORE_REGIONS_START (0xFFFF8001F0000000)
@@ -376,18 +355,8 @@ struct KWriterLock { // One writer or many readers.
 
 struct KMutex { // Mutual exclusion. Thread-owned.
 	struct Thread *volatile owner;
-#ifdef DEBUG_BUILD
-	uintptr_t acquireAddress, releaseAddress, id; 
-#endif
 	LinkedList<struct Thread> blockedThreads;
 };
-
-extern "C"
-{
-    bool KMutexAcquire(KMutex *mutex);
-    void KMutexRelease(KMutex *mutex);
-    void KMutexAssertLocked(KMutex *mutex);
-}
 
 #define PHYSICAL_MEMORY_MANIPULATION_REGION_PAGES (16)
 #define POOL_CACHE_COUNT                          (16)
@@ -409,10 +378,6 @@ struct CPULocalStorage {
 struct KSpinlock { // Mutual exclusion. CPU-owned. Disables interrupts. The only synchronisation primitive that can be acquired with interrupts disabled.
 	volatile uint8_t state, ownerCPU;
 	volatile bool interruptsEnabled;
-#ifdef DEBUG_BUILD
-	struct Thread *volatile owner;
-	volatile uintptr_t acquireAddress, releaseAddress;
-#endif
 };
 
 extern "C"
@@ -475,7 +440,6 @@ enum ProcessType {
 	PROCESS_DESKTOP,
 };
 
-
 struct _ArrayHeader {
 	size_t length, allocated;
 };
@@ -531,7 +495,6 @@ struct Array
 struct Range {
 	uintptr_t from, to;
 };
-
 
 struct RangeSet;
 // Range C API
