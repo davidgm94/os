@@ -5203,18 +5203,118 @@ pub const Bitset = extern struct
         self.group_usage = @intToPtr([*]u16, @ptrToInt(self.single_usage) + ((self.single_usage_count >> 4) * @sizeOf(u16)));
     }
 
-    //pub fn put(self: *@This(), index: u64) void
-    //{
-        //self.single_usage[index >> 5] |= @as(u32, 1) << @truncate(u5, index);
-        //self.group_usage[index / group_size] += 1;
-    //}
+    pub fn put(self: *@This(), index: u64) void
+    {
+        self.single_usage[index >> 5] |= @as(u32, 1) << @truncate(u5, index);
+        self.group_usage[index / group_size] += 1;
+    }
 
-    //pub fn take(self: *@This(), index: u64) void
-    //{
-        //const group = index / group_size;
-        //self.group_usage[group] -= 1;
-        //self.single_usage[index >> 5] &= ~(@as(u32, 1) << @truncate(u5, index));
-    //}
+    pub fn take(self: *@This(), index: u64) void
+    {
+        const group = index / group_size;
+        self.group_usage[group] -= 1;
+        self.single_usage[index >> 5] &= ~(@as(u32, 1) << @truncate(u5, index));
+    }
+
+    pub fn get(self: *@This(), count: u64, alignment: u64, asked_below: u64) u64
+    {
+        var return_value: u64 = std.math.maxInt(u64);
+
+        const below = blk:
+        {
+            if (asked_below != 0)
+            {
+                if (asked_below < count) return return_value;
+                break :blk asked_below - count;
+            }
+            else break :blk asked_below;
+        };
+
+        if (count == 1 and alignment == 1)
+        {
+            for (self.group_usage[0..self.group_usage_count]) |*group_usage, group_i|
+            {
+                if (group_usage.* != 0)
+                {
+                    var single_i: u64 = 0;
+                    while (single_i < group_size) : (single_i += 1)
+                    {
+                        const index = group_i * group_size + single_i;
+                        if (below != 0 and index >= below) return return_value;
+                        const index_mask = (@as(u32, 1) << @intCast(u5, index));
+                        if (self.single_usage[index >> 5] & index_mask  != 0)
+                        {
+                            self.single_usage[index >> 5] &= ~index_mask;
+                            self.group_usage[group_i] -= 1;
+                            return index;
+                        }
+                    }
+                }
+            }
+        }
+        else if (count == 16 and alignment == 16)
+        {
+            TODO();
+        }
+        else if (count == 32 and alignment == 32)
+        {
+            TODO();
+        }
+        else
+        {
+            var found: u64 = 0;
+            var start: u64 = 0;
+
+            for (self.group_usage[0..self.group_usage_count]) |*group_usage, group_i|
+            {
+                if (group_usage.* == 0)
+                {
+                    found = 0;
+                    continue;
+                }
+
+                var single_i: u64 = 0;
+                while (single_i < group_size) : (single_i += 1)
+                {
+                    const index = group_i * group_size + single_i;
+                    const index_mask = (@as(u32, 1) << @truncate(u5, index));
+
+                    if (self.single_usage[index >> 5] & index_mask  != 0)
+                    {
+                        if (found == 0)
+                        {
+                            if (index >= below and below != 0) return return_value;
+                            if (index % alignment == 0) continue;
+
+                            start = index;
+                        }
+
+                        found += 1;
+                    }
+                    else
+                    {
+                        found = 0;
+                    }
+
+                    if (found == count)
+                    {
+                        return_value = start;
+
+                        var i: u64 = 0;
+                        while (i < count) : (i += 1)
+                        {
+                            const index_b = start + i;
+                            self.single_usage[index >> 5] &= ~((@as(u32, 1) << @truncate(u5, index_b)));
+                        }
+
+                        return return_value;
+                    }
+                }
+            }
+        }
+
+        return return_value;
+    }
 
     const group_size = 0x1000;
 };
@@ -5223,6 +5323,22 @@ export fn BitsetInitialise(self: *Bitset, count: u64, map_all: bool) callconv(.C
 {
     self.init(count, map_all);
 }
+
+export fn BitsetPut(self: *Bitset, index: u64) callconv(.C) void
+{
+    self.put(index);
+}
+
+export fn BitsetTake(self: *Bitset, index: u64) callconv(.C) void
+{
+    self.take(index);
+}
+
+extern fn BitsetGet(self: *Bitset, count: u64, alignment: u64, below: u64) callconv(.C) u64;
+//export fn BitsetGet(self: *Bitset, count: u64, alignment: u64, below: u64) callconv(.C) u64
+//{
+    //return self.get(count, alignment, below);
+//}
 
 pub const PageFrame = extern struct
 {
@@ -6736,10 +6852,6 @@ export fn MMPhysicalAllocate(flags: Physical.Flags, count: u64, alignment: u64, 
     MMDecommit(@intCast(u64, commit_now), true);
     return 0;
 }
-
-extern fn BitsetGet(bitset: *Bitset, count: u64, alignment: u64, below: u64) callconv(.C) u64;
-extern fn BitsetTake(bitset: *Bitset, index: u64) callconv(.C) void;
-extern fn BitsetPut(bitset: *Bitset, index: u64) callconv(.C) void;
 
 export fn MMMapPhysical(space: *AddressSpace, asked_offset: u64, asked_byte_count: u64, caching: Region.Flags) callconv(.C) u64
 {
@@ -10974,6 +11086,7 @@ export fn EsHeapFree(address: u64, expected_size: u64, heap: *Heap) callconv(.C)
     heap.free(address, expected_size);
 }
 
+// @TODO: investigate why we should cast to u32
 export fn HeapCalculateIndex(size: u64) callconv(.C) u64
 {
     assert(size != 0 or size != std.math.maxInt(u32));

@@ -11,26 +11,10 @@
 #include <stddef.h>
 #include <stdarg.h>
 
-#include <mmintrin.h>
-#include <xmmintrin.h>
-#include <emmintrin.h>
-
-#define ES_PTR64_MS32(x) ((uint32_t) ((uintptr_t) (x) >> 32))
-#define ES_PTR64_LS32(x) ((uint32_t) ((uintptr_t) (x) & 0xFFFFFFFF))
-
-#define K_NOT_IMPLEMENTED() KernelPanic("Not implemented. Function: %s. File: %s. Line: %d\n", __func__, __FILE__, __LINE__)
-
 typedef uint64_t uint64_t_unaligned __attribute__((aligned(1)));
-typedef uint32_t uint32_t_unaligned __attribute__((aligned(1)));
-
-typedef int64_t EsListViewIndex;
 typedef uintptr_t EsHandle;
 typedef uint64_t EsObjectID;
 typedef uint64_t EsFileOffset;
-typedef intptr_t EsError;
-typedef uint8_t EsNodeType;
-typedef int64_t EsFileOffsetDifference;
-typedef uint64_t _EsLongConstant;
 
 enum KernelObjectType : uint32_t {
 	COULD_NOT_RESOLVE_HANDLE	= 0x00000000,
@@ -52,35 +36,6 @@ enum KernelObjectType : uint32_t {
 	KERNEL_OBJECT_DEVICE		= 0x00008000, // A device.
 };
 
-#define ES_MEMORY_MAP_OBJECT_ALL (0) // Set size to this to map the entire object.
-#define ES_MEMORY_MAP_OBJECT_READ_WRITE    (1 << 0)
-#define ES_MEMORY_MAP_OBJECT_READ_ONLY     (1 << 1)
-#define ES_MEMORY_MAP_OBJECT_COPY_ON_WRITE (1 << 2) // Files only.
-
-#define ES_SHARED_MEMORY_READ_WRITE (1 << 0)
-
-#define ES_SUBSYSTEM_ID_NATIVE (0)
-#define ES_SUBSYSTEM_ID_POSIX (1)
-
-#define ES_PERMISSION_NETWORKING				(1 << 0)
-#define ES_PERMISSION_PROCESS_CREATE			(1 << 1)
-#define ES_PERMISSION_PROCESS_OPEN			(1 << 2)
-#define ES_PERMISSION_SCREEN_MODIFY			(1 << 3)	
-#define ES_PERMISSION_SHUTDOWN				(1 << 4)
-#define ES_PERMISSION_TAKE_SYSTEM_SNAPSHOT		(1 << 5)
-#define ES_PERMISSION_GET_VOLUME_INFORMATION		(1 << 6)
-#define ES_PERMISSION_WINDOW_MANAGER			(1 << 7)
-#define ES_PERMISSION_POSIX_SUBSYSTEM			(1 << 8)
-#define ES_PERMISSION_ALL				((_EsLongConstant) (-1))
-#define ES_PERMISSION_INHERIT				((_EsLongConstant) (1) << 63)
-
-#define EsLiteral(x) (char *) x, EsCStringLength((char *) x)
-#define EsAssert(x) do { if (!(x)) { EsAssertionFailure(__FILE__, __LINE__); } } while (0)
-#define EsCRTassert EsAssert
-
-#define ES_MEMORY_MOVE_BACKWARDS -
-
-
 struct EsHeap;
 extern EsHeap heapCore;
 extern EsHeap heapFixed;
@@ -93,20 +48,6 @@ extern MMSpace _kernelMMSpace;
 extern MMSpace _coreMMSpace;
 #define kernelMMSpace (&_kernelMMSpace)
 #define coreMMSpace (&_coreMMSpace)
-
-
-
-#define ES_MEMORY_OPEN_FAIL_IF_FOUND     (0x1000)
-#define ES_MEMORY_OPEN_FAIL_IF_NOT_FOUND (0x2000)
-
-#define ES_THREAD_EVENT_MUTEX_ACQUIRE (1)
-#define ES_THREAD_EVENT_MUTEX_RELEASE (2)
-
-enum KLogLevel {
-	LOG_VERBOSE,
-	LOG_INFO,
-	LOG_ERROR,
-};
 
 struct ConstantBuffer {
 	volatile size_t handles;
@@ -304,32 +245,6 @@ void LinkedList<T>::InsertEnd(LinkedItem<T> *item) {
 }
 
 template <class T>
-void LinkedList<T>::InsertBefore(LinkedItem<T> *item, LinkedItem<T> *before) {
-#ifdef DEBUG_BUILD
-	if (modCheck) EsPanic("LinkedList::InsertBefore - Concurrent modification\n");
-	modCheck = true; EsDefer({modCheck = false;});
-#endif
-
-	if (item->list == this) EsPanic("LinkedList::InsertBefore - Inserting a item that is already in this list\n");
-	if (item->list) EsPanic("LinkedList::InsertBefore - Inserting a item that is already in a list\n");
-
-	if (before != firstItem) {
-		item->previousItem = before->previousItem;
-		item->previousItem->nextItem = item;
-	} else {
-		firstItem = item;
-		item->previousItem = nullptr;
-	}
-
-	item->nextItem = before;
-	before->previousItem = item;
-
-	count++;
-	item->list = this;
-	Validate(3);
-}
-
-template <class T>
 void LinkedList<T>::Remove(LinkedItem<T> *item) {
 #ifdef DEBUG_BUILD
 	if (modCheck) EsPanic("LinkedList::Remove - Concurrent modification\n");
@@ -418,14 +333,6 @@ void LinkedList<T>::Validate(int from) {
 #endif
 }
 
-
-#define AVLPanic KernelPanic
-enum TreeSearchMode {
-	TREE_SEARCH_EXACT,
-	TREE_SEARCH_SMALLEST_ABOVE_OR_EQUAL,
-	TREE_SEARCH_LARGEST_BELOW_OR_EQUAL,
-};
-
 template <class T> struct AVLTree;
 struct AVLKey {
 	union {
@@ -437,22 +344,6 @@ struct AVLKey {
 		};
 	};
 };
-inline AVLKey MakeShortKey(uintptr_t shortKey) {
-	AVLKey key = {};
-	key.shortKey = shortKey;
-	return key;
-}
-
-inline AVLKey MakeLongKey(const void *longKey, size_t longKeyBytes) {
-	AVLKey key = {};
-	key.longKey = (void *) longKey;
-	key.longKeyBytes = longKeyBytes;
-	return key;
-}
-
-inline AVLKey MakeCStringKey(const char *cString) {
-	return MakeLongKey(cString, EsCStringLength(cString) + 1);
-}
 
 template <class T>
 struct AVLItem {
@@ -471,338 +362,6 @@ struct AVLTree {
 	bool modCheck;
 	bool longKeys;
 };
-
-template <class T>
-void TreeRelink(AVLItem<T> *item, AVLItem<T> *newLocation) {
-	item->parent->children[item->parent->children[1] == item] = newLocation;
-	if (item->children[0]) item->children[0]->parent = newLocation;
-	if (item->children[1]) item->children[1]->parent = newLocation;
-}
-
-template <class T>
-void TreeSwapItems(AVLItem<T> *a, AVLItem<T> *b) {
-	// Set the parent of each item to point to the opposite one.
-	a->parent->children[a->parent->children[1] == a] = b;
-	b->parent->children[b->parent->children[1] == b] = a;
-
-	// Swap the data between items.
-	AVLItem<T> ta = *a, tb = *b;
-	a->parent = tb.parent;
-	b->parent = ta.parent;
-	a->height = tb.height;
-	b->height = ta.height;
-	a->children[0] = tb.children[0];
-	a->children[1] = tb.children[1];
-	b->children[0] = ta.children[0];
-	b->children[1] = ta.children[1];
-
-	// Make all the children point to the correct item.
-	if (a->children[0]) a->children[0]->parent = a; 
-	if (a->children[1]) a->children[1]->parent = a; 
-	if (b->children[0]) b->children[0]->parent = b;
-	if (b->children[1]) b->children[1]->parent = b;
-}
-
-template <class T>
-inline int TreeCompare(AVLTree<T> *tree, AVLKey *key1, AVLKey *key2) {
-	if (tree->longKeys) {
-		if (!key1->longKey && !key2->longKey) return 0;
-		if (!key2->longKey) return  1;
-		if (!key1->longKey) return -1;
-		return EsStringCompareRaw((const char *) key1->longKey, key1->longKeyBytes, (const char *) key2->longKey, key2->longKeyBytes);
-	} else {
-		if (key1->shortKey < key2->shortKey) return -1;
-		if (key1->shortKey > key2->shortKey) return  1;
-		return 0;
-	}
-}
-
-template <class T>
-int TreeValidate(AVLItem<T> *root, bool before, AVLTree<T> *tree, AVLItem<T> *parent = nullptr, int depth = 0) {
-#ifdef TREE_VALIDATE
-	if (!root) return 0;
-	if (root->parent != parent) AVLPanic("TreeValidate - Invalid binary tree 1 (%d).\n", before);
-	if (root->tree != tree) AVLPanic("TreeValidate - Invalid binary tree 4 (%d).\n", before);
-
-	AVLItem<T> *left  = root->children[0];
-	AVLItem<T> *right = root->children[1];
-
-	if (left  && TreeCompare(tree, &left->key,  &root->key) > 0) AVLPanic("TreeValidate - Invalid binary tree 2 (%d).\n", before);
-	if (right && TreeCompare(tree, &right->key, &root->key) < 0) AVLPanic("TreeValidate - Invalid binary tree 3 (%d).\n", before);
-
-	int leftHeight = TreeValidate(left, before, tree, root, depth + 1);
-	int rightHeight = TreeValidate(right, before, tree, root, depth + 1);
-	int height = (leftHeight > rightHeight ? leftHeight : rightHeight) + 1;
-	if (height != root->height) AVLPanic("TreeValidate - Invalid AVL tree 1 (%d).\n", before);
-
-#if 0
-	static int maxSeenDepth = 0;
-	if (maxSeenDepth < depth) {
-		maxSeenDepth = depth;
-	}
-#endif
-
-	return height;
-#else
-	(void) root;
-	(void) before;
-	(void) tree;
-	(void) parent;
-	(void) depth;
-	return 0;
-#endif
-}
-
-template <class T>
-AVLItem<T> *TreeRotateLeft(AVLItem<T> *x) {
-	AVLItem<T> *y = x->children[1], *t = y->children[0];
-	y->children[0] = x, x->children[1] = t;
-	if (x) x->parent = y; 
-	if (t) t->parent = x;
-
-	int leftHeight, rightHeight, balance;
-
-	leftHeight  = x->children[0] ? x->children[0]->height : 0;
-	rightHeight = x->children[1] ? x->children[1]->height : 0;
-	balance     = leftHeight - rightHeight;
-	x->height   = (balance > 0 ? leftHeight : rightHeight) + 1;
-
-	leftHeight  = y->children[0] ? y->children[0]->height : 0;
-	rightHeight = y->children[1] ? y->children[1]->height : 0;
-	balance    = leftHeight - rightHeight;
-	y->height   = (balance > 0 ? leftHeight : rightHeight) + 1;
-
-	return y;
-}
-
-template <class T>
-AVLItem<T> *TreeRotateRight(AVLItem<T> *y) {
-	AVLItem<T> *x = y->children[0], *t = x->children[1];
-	x->children[1] = y, y->children[0] = t;
-	if (y) y->parent = x;
-	if (t) t->parent = y;
-
-	int leftHeight, rightHeight, balance;
-
-	leftHeight  = y->children[0] ? y->children[0]->height : 0;
-	rightHeight = y->children[1] ? y->children[1]->height : 0;
-	balance     = leftHeight - rightHeight;
-	y->height   = (balance > 0 ? leftHeight : rightHeight) + 1;
-
-	leftHeight  = x->children[0] ? x->children[0]->height : 0;
-	rightHeight = x->children[1] ? x->children[1]->height : 0;
-	balance     = leftHeight - rightHeight;
-	x->height   = (balance > 0 ? leftHeight : rightHeight) + 1;
-
-	return x;
-}
-
-enum AVLDuplicateKeyPolicy {
-	AVL_DUPLICATE_KEYS_PANIC,
-	AVL_DUPLICATE_KEYS_ALLOW,
-	AVL_DUPLICATE_KEYS_FAIL,
-};
-
-template <class T>
-bool TreeInsert(AVLTree<T> *tree, AVLItem<T> *item, T *thisItem, AVLKey key, AVLDuplicateKeyPolicy duplicateKeyPolicy = AVL_DUPLICATE_KEYS_PANIC) {
-	if (tree->modCheck) AVLPanic("TreeInsert - Concurrent modification\n");
-	tree->modCheck = true; EsDefer({tree->modCheck = false;});
-
-	TreeValidate(tree->root, true, tree);
-
-#ifdef TREE_VALIDATE
-	if (item->tree) {
-		AVLPanic("TreeInsert - Item %x already in tree %x (adding to %x).\n", item, item->tree, tree);
-	}
-
-	item->tree = tree;
-#endif
-
-	item->key = key;
-	item->children[0] = item->children[1] = nullptr;
-	item->thisItem = thisItem;
-	item->height = 1;
-
-	AVLItem<T> **link = &tree->root, *parent = nullptr;
-
-	while (true) {
-		AVLItem<T> *node = *link;
-
-		if (!node) {
-			*link = item;
-			item->parent = parent;
-			break;
-		}
-
-		if (TreeCompare(tree, &item->key, &node->key) == 0) {
-			if (duplicateKeyPolicy == AVL_DUPLICATE_KEYS_PANIC) {
-				AVLPanic("TreeInsertRecursive - Duplicate keys: %x and %x both have key %x.\n", item, node, node->key);
-			} else if (duplicateKeyPolicy == AVL_DUPLICATE_KEYS_FAIL) {
-				return false;
-			}
-		}
-
-		link = node->children + (TreeCompare(tree, &item->key, &node->key) > 0);
-		parent = node;
-	}
-
-	AVLItem<T> fakeRoot = {};
-	tree->root->parent = &fakeRoot;
-#ifdef TREE_VALIDATE
-	fakeRoot.tree = tree;
-#endif
-	fakeRoot.key = {};
-	fakeRoot.children[0] = tree->root;
-
-	item = item->parent;
-
-	while (item != &fakeRoot) {
-		int leftHeight  = item->children[0] ? item->children[0]->height : 0;
-		int rightHeight = item->children[1] ? item->children[1]->height : 0;
-		int balance = leftHeight - rightHeight;
-
-		item->height = (balance > 0 ? leftHeight : rightHeight) + 1;
-		AVLItem<T> *newRoot = nullptr;
-		AVLItem<T> *oldParent = item->parent;
-
-		if (balance > 1 && TreeCompare(tree, &key, &item->children[0]->key) <= 0) {
-			oldParent->children[oldParent->children[1] == item] = newRoot = TreeRotateRight(item);
-		} else if (balance > 1 && TreeCompare(tree, &key, &item->children[0]->key) > 0 && item->children[0]->children[1]) {
-			item->children[0] = TreeRotateLeft(item->children[0]);
-			item->children[0]->parent = item;
-			oldParent->children[oldParent->children[1] == item] = newRoot = TreeRotateRight(item);
-		} else if (balance < -1 && TreeCompare(tree, &key, &item->children[1]->key) > 0) {
-			oldParent->children[oldParent->children[1] == item] = newRoot = TreeRotateLeft(item);
-		} else if (balance < -1 && TreeCompare(tree, &key, &item->children[1]->key) <= 0 && item->children[1]->children[0]) {
-			item->children[1] = TreeRotateRight(item->children[1]);
-			item->children[1]->parent = item;
-			oldParent->children[oldParent->children[1] == item] = newRoot = TreeRotateLeft(item);
-		}
-
-		if (newRoot) newRoot->parent = oldParent;
-		item = oldParent;
-	}
-
-	tree->root = fakeRoot.children[0];
-	tree->root->parent = nullptr;
-
-	TreeValidate(tree->root, false, tree);
-	return true;
-}
-
-template <class T>
-AVLItem<T> *TreeFindRecursive(AVLTree<T> *tree, AVLItem<T> *root, AVLKey *key, TreeSearchMode mode) {
-	if (!root) return nullptr;
-	if (TreeCompare(tree, &root->key, key) == 0) return root;
-
-	if (mode == TREE_SEARCH_EXACT) {
-		return TreeFindRecursive(tree, root->children[TreeCompare(tree, &root->key, key) < 0], key, mode);
-	} else if (mode == TREE_SEARCH_SMALLEST_ABOVE_OR_EQUAL) {
-		if (TreeCompare(tree, &root->key, key) > 0) { 
-			AVLItem<T> *item = TreeFindRecursive(tree, root->children[0], key, mode); 
-			if (item) return item; else return root;
-		} else { 
-			return TreeFindRecursive(tree, root->children[1], key, mode); 
-		}
-	} else if (mode == TREE_SEARCH_LARGEST_BELOW_OR_EQUAL) {
-		if (TreeCompare(tree, &root->key, key) < 0) { 
-			AVLItem<T> *item = TreeFindRecursive(tree, root->children[1], key, mode); 
-			if (item) return item; else return root;
-		} else { 
-			return TreeFindRecursive(tree, root->children[0], key, mode); 
-		}
-	} else {
-		AVLPanic("TreeFindRecursive - Invalid search mode.\n");
-		return nullptr;
-	}
-}
-
-template <class T>
-AVLItem<T> *TreeFind(AVLTree<T> *tree, AVLKey key, TreeSearchMode mode) {
-	if (tree->modCheck) AVLPanic("TreeFind - Concurrent access\n");
-
-	TreeValidate(tree->root, true, tree);
-	return TreeFindRecursive(tree, tree->root, &key, mode);
-}
-
-template <class T>
-int TreeGetBalance(AVLItem<T> *item) {
-	if (!item) return 0;
-
-	int leftHeight  = item->children[0] ? item->children[0]->height : 0;
-	int rightHeight = item->children[1] ? item->children[1]->height : 0;
-	return leftHeight - rightHeight;
-}
-
-template <class T>
-void TreeRemove(AVLTree<T> *tree, AVLItem<T> *item) {
-	if (tree->modCheck) AVLPanic("TreeRemove - Concurrent modification\n");
-	tree->modCheck = true; EsDefer({tree->modCheck = false;});
-
-	TreeValidate(tree->root, true, tree);
-
-#ifdef TREE_VALIDATE
-	if (item->tree != tree) AVLPanic("TreeRemove - Item %x not in tree %x (in %x).\n", item, tree, item->tree);
-#endif
-
-	AVLItem<T> fakeRoot = {};
-	tree->root->parent = &fakeRoot;
-#ifdef TREE_VALIDATE
-	fakeRoot.tree = tree;
-#endif
-	fakeRoot.key = {}; 
-	fakeRoot.children[0] = tree->root;
-
-	if (item->children[0] && item->children[1]) {
-		// Swap the item we're removing with the smallest item on its right side.
-		AVLKey smallest = {};
-		TreeSwapItems(TreeFindRecursive(tree, item->children[1], &smallest, TREE_SEARCH_SMALLEST_ABOVE_OR_EQUAL), item);
-	}
-
-	AVLItem<T> **link = item->parent->children + (item->parent->children[1] == item);
-	*link = item->children[0] ? item->children[0] : item->children[1];
-	if (*link) (*link)->parent = item->parent;
-#ifdef TREE_VALIDATE
-	item->tree = nullptr;
-#endif
-	if (*link) item = *link; else item = item->parent;
-
-	while (item != &fakeRoot) {
-		int leftHeight  = item->children[0] ? item->children[0]->height : 0;
-		int rightHeight = item->children[1] ? item->children[1]->height : 0;
-		int balance = leftHeight - rightHeight;
-
-		item->height = (balance > 0 ? leftHeight : rightHeight) + 1;
-		AVLItem<T> *newRoot = nullptr;
-		AVLItem<T> *oldParent = item->parent;
-
-		if (balance > 1 && TreeGetBalance(item->children[0]) >= 0) {
-			oldParent->children[oldParent->children[1] == item] = newRoot = TreeRotateRight(item);
-		} else if (balance > 1 && TreeGetBalance(item->children[0]) < 0) {
-			item->children[0] = TreeRotateLeft(item->children[0]);
-			item->children[0]->parent = item;
-			oldParent->children[oldParent->children[1] == item] = newRoot = TreeRotateRight(item);
-		} else if (balance < -1 && TreeGetBalance(item->children[1]) <= 0) {
-			oldParent->children[oldParent->children[1] == item] = newRoot = TreeRotateLeft(item);
-		} else if (balance < -1 && TreeGetBalance(item->children[1]) > 0) {
-			item->children[1] = TreeRotateRight(item->children[1]);
-			item->children[1]->parent = item;
-			oldParent->children[oldParent->children[1] == item] = newRoot = TreeRotateLeft(item);
-		}
-
-		if (newRoot) newRoot->parent = oldParent;
-		item = oldParent;
-	}
-
-	tree->root = fakeRoot.children[0];
-
-	if (tree->root) {
-		if (tree->root->parent != &fakeRoot) AVLPanic("TreeRemove - Incorrect root parent.\n");
-		tree->root->parent = nullptr;
-	}
-
-	TreeValidate(tree->root, false, tree);
-}
 
 struct KWriterLock { // One writer or many readers.
 	LinkedList<Thread> blockedThreads;
@@ -825,16 +384,9 @@ struct KMutex { // Mutual exclusion. Thread-owned.
 
 extern "C"
 {
-#ifdef DEBUG_BUILD
-bool _KMutexAcquire(KMutex *mutex, const char *cMutexString, const char *cFile, int line);
-void _KMutexRelease(KMutex *mutex, const char *cMutexString, const char *cFile, int line);
-#define KMutexAcquire(mutex) _KMutexAcquire(mutex, #mutex, __FILE__, __LINE__)
-#define KMutexRelease(mutex) _KMutexRelease(mutex, #mutex, __FILE__, __LINE__)
-#else
-bool KMutexAcquire(KMutex *mutex);
-void KMutexRelease(KMutex *mutex);
-#endif
-void KMutexAssertLocked(KMutex *mutex);
+    bool KMutexAcquire(KMutex *mutex);
+    void KMutexRelease(KMutex *mutex);
+    void KMutexAssertLocked(KMutex *mutex);
 }
 
 #define PHYSICAL_MEMORY_MANIPULATION_REGION_PAGES (16)
@@ -915,29 +467,6 @@ struct EsHeap {
 	void *blocks[16];
 
 	bool cannotValidate;
-};
-
-enum EsSyscallType
-{
-    ES_SYSCALL_PROCESS_EXIT,
-    ES_SYSCALL_BATCH,
-    ES_SYSCALL_COUNT,
-};
-
-enum EsDeviceType {
-	ES_DEVICE_OTHER,
-	ES_DEVICE_CONTROLLER,
-	ES_DEVICE_FILE_SYSTEM,
-	ES_DEVICE_GRAPHICS_TARGET,
-	ES_DEVICE_BLOCK,
-	ES_DEVICE_AUDIO,
-	ES_DEVICE_KEYBOARD,
-	ES_DEVICE_MOUSE,
-	ES_DEVICE_GAME_CONTROLLER,
-	ES_DEVICE_NETWORK_CARD,
-	ES_DEVICE_USB,
-	ES_DEVICE_PCI_FUNCTION,
-	ES_DEVICE_CLOCK,
 };
 
 enum ProcessType {
@@ -1661,8 +1190,6 @@ struct Handle {
 	KernelObjectType type;
 };
 
-extern uint64_t totalHandleCount;
-
 struct HandleTableL2 {
 #define HANDLE_TABLE_L2_ENTRIES (256)
 	Handle t[HANDLE_TABLE_L2_ENTRIES];
@@ -1741,7 +1268,6 @@ extern Process* desktopProcess;
 #define SPAWN_THREAD_ASYNC_TASK   (1 << 3)
 #define SPAWN_THREAD_IDLE         (1 << 4)
 
-
 struct KTimer {
 	KEvent event;
 	KAsyncTask asyncTask;
@@ -1750,19 +1276,12 @@ struct KTimer {
 	KAsyncTaskCallback callback;
 	EsGeneric argument;
 };
-
-extern "C"
-{
-    void KTimerSet(KTimer *timer, uint64_t triggerInMs, KAsyncTaskCallback callback = nullptr, EsGeneric argument = 0);
-    void KTimerRemove(KTimer *timer); // Timers with callbacks cannot be removed (it'd race with async task delivery).
-}
 extern "C"
 {
     void SchedulerYield(InterruptContext *context);
     void SchedulerCreateProcessorThreads(CPULocalStorage *local);
     void SchedulerAddActiveThread(Thread *thread, bool start); // Add an active thread into the queue.
     void SchedulerMaybeUpdateActiveList(Thread *thread); // After changing the priority of a thread, call this to move it to the correct active thread queue if needed.
-    void SchedulerNotifyObject(LinkedList<Thread> *blockedThreads, bool unblockAll, Thread *previousMutexOwner = nullptr);
     void SchedulerUnblockThread(Thread *unblockedThread, Thread *previousMutexOwner = nullptr);
     Thread * SchedulerPickThread(CPULocalStorage *local); // Pick the next thread to execute.
     int8_t SchedulerGetThreadEffectivePriority(Thread *thread);
@@ -1918,9 +1437,6 @@ extern "C"
     {
         scheduler.MaybeUpdateActiveList(thread);
     }
-    //{
-        //scheduler.NotifyObject(blockedThreads, unblockAll, previousMutexOwner);
-    //}
     void SchedulerUnblockThread(Thread *unblockedThread, Thread *previousMutexOwner)
     {
         scheduler.UnblockThread(unblockedThread, previousMutexOwner);
@@ -2055,59 +1571,12 @@ struct MMSharedRegion {
 	void *data;
 };
 
-
 extern "C" Thread* ThreadSpawn(const char *cName, uintptr_t startAddress, uintptr_t argument1 = 0, uint32_t flags = ES_FLAGS_DEFAULT, Process *process = nullptr, uintptr_t argument2 = 0);
-
 extern "C" bool KThreadCreate(const char *cName, void (*startAddress)(uintptr_t), uintptr_t argument = 0);
 
-struct InterruptContext;
-struct CPULocalStorage;
-
-#define ES_WAIT_NO_TIMEOUT            (-1)
-#define ES_MAX_WAIT_COUNT             (8)
-
-struct MMPageFrame {
-	volatile enum : uint8_t {
-		// Frames that can't be used.
-		UNUSABLE,	// Not connected to RAM.
-		BAD,		// Connected to RAM with errors. TODO
-
-		// Frames that aren't referenced.
-		ZEROED,		// Cleared with zeros.
-		FREE,		// Contains whatever data is had when it was freed.
-
-		// Frames that are referenced by an invalid [shared] page mapping.
-		// In shared regions, each invalid page mapping points to the shared page mapping.
-		// This means only one variable must be updated to reuse the frame.
-		STANDBY,	// Data has been written to page file or backing file. 
-
-		// Frames that are referenced by one or more valid page mappings.
-		ACTIVE,
-	} state;
-
-	volatile uint8_t flags;
-
-	// The reference to this frame in a CCCachedSection.
-	volatile uintptr_t *cacheReference;
-
-	union {
-		struct {
-			// For STANDBY, MODIFIED, UPDATED, ZEROED and FREE.
-			// The frame's position in a list.
-			volatile uintptr_t next, *previous;
-		} list;
-
-		struct {
-			// For ACTIVE.
-			// For file pages, this tracks how many valid page table entries point to this frame.
-			volatile uintptr_t references;
-		} active;
-	};
-};
 
 struct Bitset {
 	void Initialise(size_t count, bool mapAll = false);
-	void PutAll();
 	uintptr_t Get(size_t count = 1, uintptr_t align = 1, uintptr_t below = 0);
 	void Put(uintptr_t index);
 	void Take(uintptr_t index);
@@ -2126,35 +1595,15 @@ struct Bitset {
 };
 
 extern "C" void BitsetInitialise(Bitset* self, size_t count, bool mapAll);
+extern "C" void BitsetTake(Bitset* self, uintptr_t index);
+extern "C" void BitsetPut(Bitset* self, uintptr_t index);
+
+//extern "C" uintptr_t BitsetGet(Bitset* self, size_t count, uintptr_t align, uintptr_t below);
 extern "C" uintptr_t BitsetGet(Bitset* self, size_t count, uintptr_t align, uintptr_t below)
 {
     return self->Get(count, align, below);
 }
 
-extern "C" void BitsetTake(Bitset* self, uintptr_t index)
-{
-    self->Take(index);
-}
-
-extern "C" void BitsetPut(Bitset* self, uintptr_t index)
-{
-    self->Put(index);
-}
-
-void Bitset::Initialise(size_t count, bool mapAll) {
-	singleCount = (count + 31) & ~31;
-	groupCount = singleCount / BITSET_GROUP_SIZE + 1;
-
-	singleUsage = (uint32_t *) MMStandardAllocate(kernelMMSpace, (singleCount >> 3) + (groupCount * 2), mapAll ? MM_REGION_FIXED : 0);
-	groupUsage = (uint16_t *) singleUsage + (singleCount >> 4);
-}
-
-void Bitset::PutAll() {
-	for (uintptr_t i = 0; i < singleCount; i += 32) {
-		groupUsage[i / BITSET_GROUP_SIZE] += 32;
-		singleUsage[i / 32] |= 0xFFFFFFFF;
-	}
-}
 
 uintptr_t Bitset::Get(size_t count, uintptr_t align, uintptr_t below) {
 #ifdef DEBUG_BUILD
@@ -2263,61 +1712,8 @@ uintptr_t Bitset::Get(size_t count, uintptr_t align, uintptr_t below) {
 	return returnValue;
 }
 
-bool Bitset::Read(uintptr_t index) {
-	// We don't want to set modCheck, 
-	// since we allow other bits to be modified while this bit is being read,
-	// and we allow multiple readers of this bit.
-	return singleUsage[index >> 5] & (1 << (index & 31));
-}
-
-void Bitset::Take(uintptr_t index) {
-#ifdef DEBUG_BUILD
-	if (modCheck) KernelPanic("Bitset::Take - Concurrent modification.\n");
-	modCheck = true; EsDefer({modCheck = false;});
-#endif
-
-	uintptr_t group = index / BITSET_GROUP_SIZE;
-
-#ifdef DEBUG_BUILD
-	if (!(singleUsage[index >> 5] & (1 << (index & 31)))) {
-		KernelPanic("Bitset::Take - Attempting to take a entry that hasalready been taken.\n");
-	}
-#endif
-
-	groupUsage[group]--;
-	singleUsage[index >> 5] &= ~(1 << (index & 31));
-}
-
-void Bitset::Put(uintptr_t index) {
-#ifdef DEBUG_BUILD
-	if (modCheck) KernelPanic("Bitset::Put - Concurrent modification.\n");
-	modCheck = true; EsDefer({modCheck = false;});
-
-	if (index > singleCount) {
-		KernelPanic("Bitset::Put - Index greater than single code.\n");
-	}
-
-	if (singleUsage[index >> 5] & (1 << (index & 31))) {
-		KernelPanic("Bitset::Put - Duplicate entry.\n");
-	}
-#endif
-
-	{
-		singleUsage[index >> 5] |= 1 << (index & 31);
-		groupUsage[index / BITSET_GROUP_SIZE]++;
-	}
-}
- 
-struct MMObjectCache {
-	KSpinlock lock; // Used instead of a mutex to keep accesses to the list lightweight.
-	SimpleList items;
-	size_t count;
-	bool (*trim)(MMObjectCache *cache); // Return true if an object was trimmed.
-	KWriterLock trimLock; // Open in shared access to trim the cache.
-	LinkedItem<MMObjectCache> item;
-	size_t averageObjectBytes;
-};
-
+struct MMObjectCache;
+struct MMPageFrame;
 struct PMM {
 	MMPageFrame *pageFrames;
 	bool pageFrameDatabaseInitialised;
@@ -2370,29 +1766,12 @@ struct PMM {
 #define MM_OBJECT_CACHE_PAGES_MAXIMUM()           ((pmm.commitLimit - MM_NON_CACHE_MEMORY_PAGES()) / 2)
 
 extern PMM pmm;
-
-extern MMRegion *mmCoreRegions;
-extern size_t mmCoreRegionCount, mmCoreRegionArrayCommit;
-
-extern MMSharedRegion* mmGlobalDataRegion;
 extern GlobalData *globalData; // Shared with all processes.
 
 typedef bool (*KIRQHandler)(uintptr_t interruptIndex /* tag for MSI */, void *context);
 
-extern "C" MMRegion *MMFindRegion(MMSpace *space, uintptr_t address);
-extern "C" void MMDecommit(uint64_t bytes, bool fixed);
-extern "C" bool MMDecommitRange(MMSpace *space, MMRegion *region, uintptr_t pageOffset, size_t pageCount);
-extern "C" uintptr_t MMArchTranslateAddress(uintptr_t virtualAddress, bool writeAccess =false);
-extern "C" bool MMHandlePageFault(MMSpace *space, uintptr_t address, unsigned faultFlags);
-extern "C" void MMUpdateAvailablePageCount(bool increase);
-extern "C" bool MMSharedResizeRegion(MMSharedRegion *region, size_t sizeBytes);
-extern "C" void MMSharedDestroyRegion(MMSharedRegion *region);
-extern "C" MMSharedRegion *MMSharedCreateRegion(size_t sizeBytes, bool fixed = false, uintptr_t below = 0);
-extern "C" void ThreadRemove(Thread* thread);
-extern "C" void MMUnreserve(MMSpace *space, MMRegion *remove, bool unmapPages, bool guardRegion = false);
 extern "C" void ThreadKill(KAsyncTask *task);
 extern "C" void KRegisterAsyncTask(KAsyncTask *task, KAsyncTaskCallback callback);
-extern "C" void thread_exit(Thread *thread);
 extern "C" void MMSpaceOpenReference(MMSpace *space);
 extern "C" void MMZeroPageThread();
 extern "C" void MMBalanceThread();
@@ -2436,69 +1815,6 @@ struct IRQHandler {
 	const char *cOwnerName;
 };
 
-const char *const exceptionInformation[] = {
-	"0x00: Divide Error (Fault)",
-	"0x01: Debug Exception (Fault/Trap)",
-	"0x02: Non-Maskable External Interrupt (Interrupt)",
-	"0x03: Breakpoint (Trap)",
-	"0x04: Overflow (Trap)",
-	"0x05: BOUND Range Exceeded (Fault)",
-	"0x06: Invalid Opcode (Fault)",
-	"0x07: x87 Coprocessor Unavailable (Fault)",
-	"0x08: Double Fault (Abort)",
-	"0x09: x87 Coprocessor Segment Overrun (Fault)",
-	"0x0A: Invalid TSS (Fault)",
-	"0x0B: Segment Not Present (Fault)",
-	"0x0C: Stack Protection (Fault)",
-	"0x0D: General Protection (Fault)",
-	"0x0E: Page Fault (Fault)",
-	"0x0F: Reserved/Unknown",
-	"0x10: x87 FPU Floating-Point Error (Fault)",
-	"0x11: Alignment Check (Fault)",
-	"0x12: Machine Check (Abort)",
-	"0x13: SIMD Floating-Point Exception (Fault)",
-	"0x14: Virtualization Exception (Fault)",
-	"0x15: Reserved/Unknown",
-	"0x16: Reserved/Unknown",
-	"0x17: Reserved/Unknown",
-	"0x18: Reserved/Unknown",
-	"0x19: Reserved/Unknown",
-	"0x1A: Reserved/Unknown",
-	"0x1B: Reserved/Unknown",
-	"0x1C: Reserved/Unknown",
-	"0x1D: Reserved/Unknown",
-	"0x1E: Reserved/Unknown",
-	"0x1F: Reserved/Unknown",
-};
-
-#define TIMER_INTERRUPT (0x40)
-#define YIELD_IPI (0x41)
-#define IRQ_BASE (0x50)
-#define CALL_FUNCTION_ON_ALL_PROCESSORS_IPI (0xF0)
-#define KERNEL_PANIC_IPI (0) // NMIs ignore the interrupt vector.
-
-#define INTERRUPT_VECTOR_MSI_START (0x70)
-#define INTERRUPT_VECTOR_MSI_COUNT (0x40)
-
-extern volatile uintptr_t callFunctionOnAllProcessorsRemaining;
-extern "C" void CallFunctionOnAllProcessorCallbackWrapper(); // @INFO: this is to avoid ABI issues
-//
-// Spinlock since some drivers need to access it in IRQs (e.g. ACPICA).
-extern KSpinlock pciConfigSpinlock; 
-extern KSpinlock ipiLock;
-
-extern "C" uint32_t LapicReadRegister(uint32_t reg);
-extern "C" void LapicWriteRegister(uint32_t reg, uint32_t value);
-extern "C" void LapicNextTimer(size_t ms);
-extern "C" void LapicEndOfInterrupt();
-extern "C" size_t ProcessorSendIPI(uintptr_t interrupt, bool nmi = false, int processorID = -1);
-
-extern uint8_t pciIRQLines[0x100 /* slots */][4 /* pins */];
-
-extern MSIHandler msiHandlers[INTERRUPT_VECTOR_MSI_COUNT];
-extern IRQHandler irqHandlers[0x40];
-extern KSpinlock irqHandlersLock; // Also for msiHandlers.
-
 
 int8_t Scheduler::GetThreadEffectivePriority(Thread *thread) {
 	KSpinlockAssertLocked(&dispatchSpinlock);
@@ -2515,8 +1831,6 @@ int8_t Scheduler::GetThreadEffectivePriority(Thread *thread) {
 
 	return thread->priority;
 }
-
-extern uint64_t timeStampTicksPerMs;
 
 Thread *Scheduler::PickThread(CPULocalStorage *local) {
 	KSpinlockAssertLocked(&dispatchSpinlock);
@@ -2750,8 +2064,8 @@ void Scheduler::CreateProcessorThreads(CPULocalStorage *local) {
 	}
 }
 
-extern "C" void MMCheckUnusable(uintptr_t physicalStart, size_t bytes);
-
+#define KERNEL_PANIC_IPI (0) // NMIs ignore the interrupt vector.
+extern "C" size_t ProcessorSendIPI(uintptr_t interrupt, bool nmi = false, int processorID = -1);
 void KernelPanic(const char *format, ...) {
 	ProcessorDisableInterrupts();
 	ProcessorSendIPI(KERNEL_PANIC_IPI, true);
