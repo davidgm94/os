@@ -4798,6 +4798,36 @@ pub const Range = extern struct
             self.validate();
             return true;
         }
+
+        pub fn set(self: *@This(), from: u64, to: u64, maybe_delta: ?*i64, modify: bool) bool
+        {
+            if (to <= from) KernelPanic("invalid range");
+
+            if (self.ranges.length() == 0)
+            {
+                if (maybe_delta) |delta|
+                {
+                    if (from >= self.contiguous) delta.* = @intCast(i64, to) - @intCast(i64, from)
+                    else if (to >= self.contiguous) delta.* = @intCast(i64, to) - @intCast(self.contiguous)
+                    else delta.* = 0;
+                }
+
+                if (!modify) return true;
+
+                if (from <= self.contiguous)
+                {
+                    if (to > self.contiguous) self.contiguous = to;
+                    return true;
+                }
+
+                if (!self.normalize()) return false;
+            }
+
+            TODO();
+            //const new_range = Range
+            //const left = self.find(from, true);
+            //const right = self.find(to, true);
+        }
     };
 };
 
