@@ -117,87 +117,6 @@ struct ConstantBuffer {
 
 #define K_MAX_PROCESSORS (256)
 
-#define _ES_NODE_FROM_WRITE_EXCLUSIVE	(0x020000)
-#define _ES_NODE_DIRECTORY_WRITE		(0x040000)
-#define _ES_NODE_NO_WRITE_BASE		(0x080000)
-
-#define ES_ERROR_BUFFER_TOO_SMALL		(-2)
-#define ES_ERROR_UNKNOWN 			(-7)
-#define ES_ERROR_NO_MESSAGES_AVAILABLE		(-9)
-#define ES_ERROR_MESSAGE_QUEUE_FULL		(-10)
-#define ES_ERROR_PATH_NOT_WITHIN_MOUNTED_VOLUME	(-14)
-#define ES_ERROR_PATH_NOT_TRAVERSABLE		(-15)
-#define ES_ERROR_FILE_ALREADY_EXISTS		(-19)
-#define ES_ERROR_FILE_DOES_NOT_EXIST		(-20)
-#define ES_ERROR_DRIVE_ERROR_FILE_DAMAGED	(-21) 
-#define ES_ERROR_ACCESS_NOT_WITHIN_FILE_BOUNDS	(-22) 
-#define ES_ERROR_PERMISSION_NOT_GRANTED		(-23)
-#define ES_ERROR_FILE_IN_EXCLUSIVE_USE		(-24)
-#define ES_ERROR_FILE_CANNOT_GET_EXCLUSIVE_USE	(-25)
-#define ES_ERROR_INCORRECT_NODE_TYPE		(-26)
-#define ES_ERROR_EVENT_NOT_SET			(-27)
-#define ES_ERROR_FILE_HAS_WRITERS		(-28)
-#define ES_ERROR_TIMEOUT_REACHED			(-29)
-#define ES_ERROR_FILE_ON_READ_ONLY_VOLUME	(-32)
-#define ES_ERROR_INVALID_DIMENSIONS		(-34)
-#define ES_ERROR_DRIVE_CONTROLLER_REPORTED	(-35)
-#define ES_ERROR_COULD_NOT_ISSUE_PACKET		(-36)
-#define ES_ERROR_HANDLE_TABLE_FULL		(-37)
-#define ES_ERROR_COULD_NOT_RESIZE_FILE		(-38)
-#define ES_ERROR_DIRECTORY_NOT_EMPTY		(-39)
-#define ES_ERROR_NODE_DELETED			(-41)
-#define ES_ERROR_VOLUME_MISMATCH			(-43)
-#define ES_ERROR_TARGET_WITHIN_SOURCE		(-44)
-#define ES_ERROR_TARGET_INVALID_TYPE		(-45)
-#define ES_ERROR_MALFORMED_NODE_PATH		(-47)
-#define ES_ERROR_TARGET_IS_SOURCE		(-49)
-#define ES_ERROR_INVALID_NAME			(-50)
-#define ES_ERROR_CORRUPT_DATA			(-51)
-#define ES_ERROR_INSUFFICIENT_RESOURCES		(-52)
-#define ES_ERROR_UNSUPPORTED_FEATURE		(-53)
-#define ES_ERROR_FILE_TOO_FRAGMENTED		(-54)
-#define ES_ERROR_DRIVE_FULL			(-55)
-#define ES_ERROR_COULD_NOT_RESOLVE_SYMBOL	(-56)
-#define ES_ERROR_ALREADY_EMBEDDED		(-57)
-#define ES_ERROR_UNSUPPORTED_CONVERSION		(-60)
-#define ES_ERROR_SOURCE_EMPTY			(-61)
-#define ES_ERROR_UNSUPPORTED_EXECUTABLE		(-62)
-#define ES_ERROR_NO_ADDRESS_FOR_DOMAIN_NAME	(-63)
-#define ES_ERROR_NO_CONNECTED_NETWORK_INTERFACES	(-64)
-#define ES_ERROR_BAD_DOMAIN_NAME			(-65)
-#define ES_ERROR_LOST_IP_ADDRESS			(-66)
-#define ES_ERROR_CONNECTION_RESET		(-67)
-#define ES_ERROR_CONNECTION_REFUSED		(-68)
-#define ES_ERROR_ILLEGAL_PATH			(-69)
-#define ES_ERROR_NODE_NOT_LOADED			(-71)
-#define ES_ERROR_DIRECTORY_ENTRY_BEING_REMOVED   (-72)
-#define ES_ERROR_CANCELLED			(-73)
-#define ES_ERROR_BLOCK_ACCESS_INVALID		(-74)
-#define ES_ERROR_DEVICE_REMOVED			(-75)
-#define ES_ERROR_TOO_MANY_FILES_WITH_NAME	(-76)
-
-
-#define K_USER_BUFFER // Used to mark pointers that (might) point to non-kernel memory.
-
-// When we reach a critical number of pages, FIXED allocations start failing,
-// and page faults are blocked, unless you are on a page generating thread (the modified page writer or the balancer).
-#define MM_CRITICAL_AVAILABLE_PAGES_THRESHOLD     (1048576 / K_PAGE_SIZE)             
-
-// The number of pages at which balancing starts.
-#define MM_LOW_AVAILABLE_PAGES_THRESHOLD          (16777216 / K_PAGE_SIZE)            
-
-// The number of pages past MM_LOW_AVAILABLE_PAGES_THRESHOLD to aim for when balancing.
-#define MM_PAGES_TO_FIND_BALANCE                  (4194304 / K_PAGE_SIZE)             
-
-// The number of pages in the zero list before signaling the page zeroing thread.
-#define MM_ZERO_PAGE_THRESHOLD                    (16)                                
-
-// The amount of commit reserved specifically for page generating threads.
-#define MM_CRITICAL_REMAINING_COMMIT_THRESHOLD    (1048576 / K_PAGE_SIZE)             
-
-// The number of objects that are trimmed from a MMObjectCache at a time.
-#define MM_OBJECT_CACHE_TRIM_GROUP_COUNT          (1024)
-
 // The current target maximum size for the object caches. (This uses the approximate sizes of objects.)
 // We want to keep a reasonable amount of commit available at all times,
 // since when the kernel is allocating memory it might not be able to wait for the caches to be trimmed without deadlock.
@@ -213,158 +132,37 @@ struct ConstantBuffer {
 #define ES_WAIT_NO_TIMEOUT            (-1)
 #define ES_MAX_WAIT_COUNT             (8)
 
-#define ES_NODE_FILE			(0)
-#define ES_NODE_DIRECTORY		(0x10)
-#define ES_NODE_INVALID			(0x20)
-
 #define ES_FLAGS_DEFAULT (0)
-
-#define ES_NODE_FAIL_IF_FOUND		(0x001000)
-#define ES_NODE_FAIL_IF_NOT_FOUND	(0x002000)
-#define ES_NODE_PREVENT_RESIZE		(0x004000)
-#define ES_NODE_CREATE_DIRECTORIES	(0x008000)  // Create the directories leading to the file, if they don't already exist.
-
-#define NODE_MAX_ACCESSORS (16777216)
-
-// KNode flags:
-#define NODE_HAS_EXCLUSIVE_WRITER (1 << 0)
-#define NODE_ENUMERATED_ALL_DIRECTORY_ENTRIES (1 << 1)
-#define NODE_CREATED_ON_FILE_SYSTEM (1 << 2)
-#define NODE_DELETED (1 << 3)
-#define NODE_MODIFIED (1 << 4)
-#define NODE_IN_CACHE_LIST (1 << 5) // Node has no handles and no directory entries, so it can be freed.
-
-// Modes for opening a node handle.
-#define FS_NODE_OPEN_HANDLE_STANDARD            (0)
-#define FS_NODE_OPEN_HANDLE_FIRST               (1)
-#define FS_NODE_OPEN_HANDLE_DIRECTORY_TEMPORARY (2)
 
 struct Thread;
 struct Process;
 struct EsCrashReason;
 struct InterruptContext;
+struct MMRegion;
 
 extern "C"
 {
     void TODO() __attribute__((noreturn));
     void KernelPanic(const char *format, ...) __attribute__((noreturn));
 
-    void *EsHeapAllocate(size_t size, bool zeroMemory, EsHeap *kernelHeap);
-    void *EsHeapReallocate(void *oldAddress, size_t newAllocationSize, bool zeroNewSpace, EsHeap *_heap);
-    void EsHeapFree(void *address, size_t expectedSize, EsHeap *kernelHeap);
-    void MMPhysicalActivatePages(uintptr_t pages, uintptr_t count);
-    bool MMCommit(uint64_t bytes, bool fixed);
-    void PMCopy(uintptr_t page, void *_source, size_t pageCount);
-    uintptr_t ProcessorGetRSP();
-    uintptr_t ProcessorGetRBP();
-    void ProcessorDebugOutputByte(uint8_t byte);
-    void processorGDTR();
-    bool PostContextSwitch(InterruptContext *context, MMSpace *oldAddressSpace);
-    void InterruptHandler(InterruptContext *context);
-    uintptr_t Syscall(uintptr_t argument0, uintptr_t argument1, uintptr_t argument2, uintptr_t returnAddress, uintptr_t argument3, uintptr_t argument4, uintptr_t *userStackPointer);
-    void PCProcessMemoryMap();
     void ProcessorHalt() __attribute__((noreturn));
-    void ProcessorInstallTSS(uint32_t *gdt, uint32_t *tss);
-    bool ProcessorAreInterruptsEnabled();
     Thread* GetCurrentThread();
-    void ProcessorEnableInterrupts();
-    uint64_t ProcessorReadCR3();
     void ProcessorInvalidatePage(uintptr_t virtualAddress);
-    void ProcessorOut8(uint16_t port, uint8_t value);
-    uint8_t ProcessorIn8(uint16_t port);
-    void ProcessorOut16(uint16_t port, uint16_t value);
-    uint16_t ProcessorIn16(uint16_t port);
-    void ProcessorOut32(uint16_t port, uint32_t value);
-    uint32_t ProcessorIn32(uint16_t port);
-    uint64_t ProcessorReadMXCSR();
-    void ProcessCrash(Process *process, EsCrashReason *crashReason);
-    void MMInitialise();
     void ArchNextTimer(size_t ms); // Schedule the next TIMER_INTERRUPT.
     uint64_t ArchGetTimeMs(); // Called by the scheduler on the boot processor every context switch.
-    void ArchSwitchContext(struct InterruptContext *context, struct MMArchVAS *virtualAddressSpace, uintptr_t threadKernelStack, 
-            struct Thread *newThread, struct MMSpace *oldAddressSpace);
-    EsError ArchApplyRelocation(uintptr_t type, uint8_t *buffer, uintptr_t offset, uintptr_t result);
-
-    bool MMArchMapPage(MMSpace *space, uintptr_t physicalAddress, uintptr_t virtualAddress, unsigned flags); // Returns false if the page was already mapped.
-    void MMArchUnmapPages(MMSpace *space, uintptr_t virtualAddressStart, uintptr_t pageCount, unsigned flags, size_t unmapMaximum = 0, uintptr_t *resumePosition = nullptr);
-    bool MMArchMakePageWritable(MMSpace *space, uintptr_t virtualAddress);
-    bool MMArchHandlePageFault(uintptr_t address, uint32_t flags);
-    bool MMArchIsBufferInUserRange(uintptr_t baseAddress, size_t byteCount);
-    bool MMArchSafeCopy(uintptr_t destinationAddress, uintptr_t sourceAddress, size_t byteCount); // Returns false if a page fault occured during the copy.
-    bool MMArchCommitPageTables(MMSpace *space, struct MMRegion *region);
-    void MMArchInitialise();
-    void MMArchFreeVAS(MMSpace *space);
-    uintptr_t MMArchEarlyAllocatePage();
-    uint64_t MMArchPopulatePageFrameDatabase();
-    uintptr_t MMArchGetPhysicalMemoryHighest();
-
+    void ArchSwitchContext(struct InterruptContext *context, struct MMArchVAS *virtualAddressSpace, uintptr_t threadKernelStack, struct Thread *newThread, struct MMSpace *oldAddressSpace);
     void ProcessorDisableInterrupts();
-    void ProcessorEnableInterrupts();
-    bool ProcessorAreInterruptsEnabled();
     void ProcessorHalt();
-    void ProcessorSendYieldIPI(Thread *thread);
-    void ProcessorFakeTimerInterrupt();
-    void ProcessorInvalidatePage(uintptr_t virtualAddress);
-    void ProcessorInvalidateAllPages();
-    void ProcessorFlushCodeCache();
-    void ProcessorFlushCache();
-    void ProcessorSetLocalStorage(struct CPULocalStorage *cls);
-    void ProcessorSetThreadStorage(uintptr_t tls);
-    void ProcessorSetAddressSpace(struct MMArchVAS *virtualAddressSpace); // Need to call MMSpaceOpenReference/MMSpaceCloseReference if using this.
-    uint64_t ProcessorReadTimeStamp();
-
     struct CPULocalStorage *GetLocalStorage();
     struct Thread *GetCurrentThread();
-    void MMSpaceCloseReference(MMSpace* space);
-    void KThreadTerminate();
-    void ThreadSetTemporaryAddressSpace(MMSpace *space);
-    void ProcessKill(Process* process);
-
-    // From module.h: 
-    // uintptr_t MMArchTranslateAddress(MMSpace *space, uintptr_t virtualAddress, bool writeAccess); 
-    // uint32_t KPCIReadConfig(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset, int size);
-    // void KPCIWriteConfig(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset, uint32_t value, int size);
-    // bool KRegisterIRQ(intptr_t interruptIndex, KIRQHandler handler, void *context, const char *cOwnerName, struct KPCIDevice *pciDevice);
-    // KMSIInformation KRegisterMSI(KIRQHandler handler, void *context, const char *cOwnerName);
-    // void KUnregisterMSI(uintptr_t tag);
-    // size_t KGetCPUCount();
-    // struct CPULocalStorage *KGetCPULocal(uintptr_t index);
-    // ProcessorOut/ProcessorIn functions.
-
-    // The architecture layer must also define:
-    // - MM_CORE_REGIONS_START and MM_CORE_REGIONS_COUNT.
-    // - MM_KERNEL_SPACE_START and MM_KERNEL_SPACE_SIZE.
-    // - MM_MODULES_START and MM_MODULES_SIZE.
-    // - ArchCheckBundleHeader and ArchCheckELFHeader.
-    // - K_ARCH_STACK_GROWS_DOWN or K_ARCH_STACK_GROWS_UP.
-    // - K_ARCH_NAME.
     void EsMemoryFill(void *from, void *to, uint8_t byte);
-    uint8_t EsMemorySumBytes(uint8_t *source, size_t bytes);
-    int EsMemoryCompare(const void *a, const void *b, size_t bytes);
-    void EsMemoryZero(void *destination, size_t bytes);
     void EsMemoryCopy(void *_destination, const void *_source, size_t bytes);
-    void *EsCRTmemcpy(void *dest, const void *src, size_t n);
-    size_t EsCRTstrlen(const char *s);
-    char *EsCRTstrcpy(char *dest, const char *src);
-    void EsMemoryCopyReverse(void *_destination, void *_source, size_t bytes);
-    void EsMemoryMove(void *_start, void *_end, intptr_t amount, bool zeroEmptySpace);
     void EsAssertionFailure(const char *file, int line);
     size_t EsCStringLength(const char *string);
     int EsStringCompareRaw(const char *s1, ptrdiff_t length1, const char *s2, ptrdiff_t length2);
     void *MMStandardAllocate(MMSpace *space, size_t bytes, uint32_t flags, void *baseAddress = nullptr, bool commitAll = true);
-    void CloseHandleToObject(void *object, KernelObjectType type, uint32_t flags = 0);
     bool MMFree(MMSpace *space, void *address, size_t expectedSize = 0, bool userOnly = false);
-    bool OpenHandleToObject(void *object, KernelObjectType type, uint32_t flags);
-uintptr_t /* Returns physical address of first page, or 0 if none were available. */ MMPhysicalAllocate(unsigned flags, 
-		uintptr_t count = 1 /* Number of contiguous pages to allocate. */, 
-		uintptr_t align = 1 /* Alignment, in pages. */, 
-		uintptr_t below = 0 /* Upper limit of physical address, in pages. E.g. for 32-bit pages only, pass (0x100000000 >> K_PAGE_BITS). */);
-    void MMPhysicalFree(uintptr_t page /* Physical address. */, 
-		bool mutexAlreadyAcquired = false /* Internal use. Pass false. */, 
-		size_t count = 1 /* Number of consecutive pages to free. */);
-
-    bool MMPhysicalAllocateAndMap(size_t sizeBytes, size_t alignmentBytes, size_t maximumBits, bool zeroed, uint64_t caching, uint8_t **virtualAddress, uintptr_t *physicalAddress);
-    void MMPhysicalFreeAndUnmap(void *virtualAddress, uintptr_t physicalAddress);
+    void EsMemoryZero(void* dst, uintptr_t byte_count);
 }
 
 typedef uint64_t EsGeneric;
@@ -407,21 +205,6 @@ template <typename F> _EsDefer4<F> _EsDeferFunction(F f) { return _EsDefer4<F>(f
 #define EsDefer(code) _EsDefer5(code)
 
 #define EsPanic KernelPanic
-
-template <class T>
-T RoundDown(T value, T divisor) {
-	value /= divisor;
-	value *= divisor;
-	return value;
-}
-
-template <class T>
-T RoundUp(T value, T divisor) {
-	value += divisor - 1;
-	value /= divisor;
-	value *= divisor;
-	return value;
-}
 
 template <class T>
 struct LinkedList;
@@ -1101,25 +884,7 @@ struct KEvent { // Waiting and notifying. Can wait on multiple at once. Can be s
 	volatile size_t handles;
 };
 
-extern "C"
-{
-    bool KEventSet(KEvent *event, bool maybeAlreadySet = false);
-    void KEventReset(KEvent *event); 
-    bool KEventWait(KEvent *event, uint64_t timeoutMs = ES_WAIT_NO_TIMEOUT); // See KEventWaitMultiple to wait for multiple events. Returns false if the wait timed out.
-}
-
-#ifdef DEBUG_BUILD
-#define MAYBE_VALIDATE_HEAP() HeapValidate(&heap)
-#else
-#define MAYBE_VALIDATE_HEAP() 
-#endif
-
-#ifndef KERNEL
-// #define MEMORY_LEAK_DETECTOR
-#endif
-
-#define LARGE_ALLOCATION_THRESHOLD (32768)
-#define USED_HEAP_REGION_MAGIC (0xABCD)
+extern "C" bool KEventSet(KEvent *event, bool maybeAlreadySet = false);
 
 struct HeapRegion {
 	union {
@@ -1140,19 +905,7 @@ struct HeapRegion {
 
 	// Free regions only:
 	HeapRegion **regionListReference;
-#define USED_HEAP_REGION_HEADER_SIZE (sizeof(HeapRegion) - sizeof(HeapRegion **))
-#define FREE_HEAP_REGION_HEADER_SIZE (sizeof(HeapRegion))
 };
-
-extern "C" uintptr_t HeapCalculateIndex(uintptr_t size) {
-	int x = __builtin_clz(size);
-	uintptr_t msb = sizeof(unsigned int) * 8 - x - 1;
-	return msb - 4;
-}
-
-#define MemoryLeakDetectorAdd(...)
-#define MemoryLeakDetectorRemove(...)
-#define MemoryLeakDetectorCheckpoint(...)
 
 struct EsHeap {
 	KMutex mutex;
@@ -1162,462 +915,7 @@ struct EsHeap {
 	void *blocks[16];
 
 	bool cannotValidate;
-
-#ifdef MEMORY_LEAK_DETECTOR
-	MemoryLeakDetectorEntry leakDetectorEntries[4096];
-#endif
 };
-
-// TODO Better heap panic messages.
-#define HEAP_PANIC(n, x, y) EsPanic("Heap panic (%d/%x/%x).\n", n, x, y)
-
-#define HEAP_ACQUIRE_MUTEX(a) KMutexAcquire(&(a))
-#define HEAP_RELEASE_MUTEX(a) KMutexRelease(&(a))
-#define HEAP_ALLOCATE_CALL(x) MMStandardAllocate(_heap == &heapCore ? coreMMSpace : kernelMMSpace, x, MM_REGION_FIXED)
-#define HEAP_FREE_CALL(x) MMFree(_heap == &heapCore ? coreMMSpace : kernelMMSpace, x)
-
-#define HEAP_REGION_HEADER(region) ((HeapRegion *) ((uint8_t *) region - USED_HEAP_REGION_HEADER_SIZE))
-#define HEAP_REGION_DATA(region) ((uint8_t *) region + USED_HEAP_REGION_HEADER_SIZE)
-#define HEAP_REGION_NEXT(region) ((HeapRegion *) ((uint8_t *) region + region->next))
-#define HEAP_REGION_PREVIOUS(region) (region->previous ? ((HeapRegion *) ((uint8_t *) region - region->previous)) : nullptr)
-
-
-static void HeapRemoveFreeRegion(HeapRegion *region) {
-	if (!region->regionListReference || region->used) {
-		HEAP_PANIC(50, region, 0);
-	}
-
-	*region->regionListReference = region->regionListNext;
-
-	if (region->regionListNext) {
-		region->regionListNext->regionListReference = region->regionListReference;
-	}
-
-	region->regionListReference = nullptr;
-}
-
-static void HeapAddFreeRegion(HeapRegion *region, HeapRegion **heapRegions) {
-	if (region->used || region->size < 32) {
-		HEAP_PANIC(1, region, heapRegions);
-	}
-
-	int index = HeapCalculateIndex(region->size);
-	region->regionListNext = heapRegions[index];
-	if (region->regionListNext) region->regionListNext->regionListReference = &region->regionListNext;
-	heapRegions[index] = region;
-	region->regionListReference = heapRegions + index;
-}
-
-static void HeapValidate(EsHeap *heap) {
-	if (heap->cannotValidate) return;
-
-	for (uintptr_t i = 0; i < heap->blockCount; i++) {
-		HeapRegion *start = (HeapRegion *) heap->blocks[i];
-		if (!start) continue;
-
-		HeapRegion *end = (HeapRegion *) ((uint8_t *) heap->blocks[i] + 65536);
-		HeapRegion *previous = nullptr;
-		HeapRegion *region = start;
-
-		while (region < end) {
-			if (previous && previous != HEAP_REGION_PREVIOUS(region)) {
-				HEAP_PANIC(21, previous, region);
-			}
-
-			if (!previous && region->previous) {
-				HEAP_PANIC(23, previous, region);
-			}
-
-			if (region->size & 31) {
-				HEAP_PANIC(51, region, start);
-			}
-
-			if ((char *) region - (char *) start != region->offset) {
-				HEAP_PANIC(22, region, start);
-			}
-
-			if (region->used != USED_HEAP_REGION_MAGIC && region->used != 0x0000) {
-				HEAP_PANIC(24, region, region->used);
-			}
-
-			if (region->used == 0x0000 && !region->regionListReference) {
-				HEAP_PANIC(25, region, region->regionListReference);
-			}
-
-			if (region->used == 0x0000 && region->regionListNext && region->regionListNext->regionListReference != &region->regionListNext) {
-				HEAP_PANIC(26, region->regionListNext, region);
-			}
-				
-			previous = region;
-			region = HEAP_REGION_NEXT(region);
-		}
-
-		if (region != end) {
-			HEAP_PANIC(20, region, end);
-		}
-	}
-}
-
-extern "C" void *EsHeapAllocate(size_t size, bool zeroMemory, EsHeap *_heap)
-{
-#ifndef KERNEL
-	if (!_heap) _heap = &heap;
-#endif
-	EsHeap &heap = *(EsHeap *) _heap;
-	if (!size) return nullptr;
-
-#ifdef USE_PLATFORM_HEAP
-	return PlatformHeapAllocate(size, zeroMemory);
-#endif
-
-	size_t largeAllocationThreshold = LARGE_ALLOCATION_THRESHOLD;
-
-	size_t originalSize = size;
-
-	if ((ptrdiff_t) size < 0) {
-		HEAP_PANIC(0, 0, 0);
-	}
-
-	size += USED_HEAP_REGION_HEADER_SIZE; // Region metadata.
-	size = (size + 0x1F) & ~0x1F; // Allocation granularity: 32 bytes.
-
-	if (size >= largeAllocationThreshold) {
-		// This is a very large allocation, so allocate it by itself.
-		// We don't need to zero this memory. (It'll be done by the PMM).
-		HeapRegion *region = (HeapRegion *) HEAP_ALLOCATE_CALL(size);
-		if (!region) return nullptr; 
-		region->used = USED_HEAP_REGION_MAGIC;
-		region->size = 0;
-		region->allocationSize = originalSize;
-		__sync_fetch_and_add(&heap.size, originalSize);
-		MemoryLeakDetectorAdd(&heap, HEAP_REGION_DATA(region), originalSize);
-		return HEAP_REGION_DATA(region);
-	}
-
-	HEAP_ACQUIRE_MUTEX(heap.mutex);
-
-	MAYBE_VALIDATE_HEAP();
-
-	HeapRegion *region = nullptr;
-
-	for (int i = HeapCalculateIndex(size); i < 12; i++) {
-		if (heap.regions[i] == nullptr || heap.regions[i]->size < size) {
-			continue;
-		}
-
-		region = heap.regions[i];
-		HeapRemoveFreeRegion(region);
-		goto foundRegion;
-	}
-
-	region = (HeapRegion *) HEAP_ALLOCATE_CALL(65536);
-	if (heap.blockCount < 16) heap.blocks[heap.blockCount] = region;
-	else heap.cannotValidate = true;
-	heap.blockCount++;
-	if (!region) {
-		HEAP_RELEASE_MUTEX(heap.mutex);
-		return nullptr; 
-	}
-	region->size = 65536 - 32;
-
-	// Prevent EsHeapFree trying to merge off the end of the block.
-	{
-		HeapRegion *endRegion = HEAP_REGION_NEXT(region);
-		endRegion->used = USED_HEAP_REGION_MAGIC;
-		endRegion->offset = 65536 - 32;
-		endRegion->next = 32;
-		*((EsHeap **) HEAP_REGION_DATA(endRegion)) = &heap;
-	}
-
-	foundRegion:
-
-	if (region->used || region->size < size) {
-		HEAP_PANIC(4, region, size);
-	}
-
-	heap.allocationsCount++;
-	__sync_fetch_and_add(&heap.size, size);
-
-	if (region->size == size) {
-		// If the size of this region is equal to the size of the region we're trying to allocate,
-		// return this region immediately.
-		region->used = USED_HEAP_REGION_MAGIC;
-		region->allocationSize = originalSize;
-		HEAP_RELEASE_MUTEX(heap.mutex);
-		uint8_t *address = (uint8_t *) HEAP_REGION_DATA(region);
-		if (zeroMemory) EsMemoryZero(address, originalSize);
-#ifdef DEBUG_BUILD
-		else EsMemoryFill(address, (uint8_t *) address + originalSize, 0xA1);
-#endif
-		MemoryLeakDetectorAdd(&heap, address, originalSize);
-		return address;
-	}
-
-	// Split the region into 2 parts.
-	
-	HeapRegion *allocatedRegion = region;
-	size_t oldSize = allocatedRegion->size;
-	allocatedRegion->size = size;
-	allocatedRegion->used = USED_HEAP_REGION_MAGIC;
-
-	HeapRegion *freeRegion = HEAP_REGION_NEXT(allocatedRegion);
-	freeRegion->size = oldSize - size;
-	freeRegion->previous = size;
-	freeRegion->offset = allocatedRegion->offset + size;
-	freeRegion->used = false;
-	HeapAddFreeRegion(freeRegion, heap.regions);
-
-	HeapRegion *nextRegion = HEAP_REGION_NEXT(freeRegion);
-	nextRegion->previous = freeRegion->size;
-
-	MAYBE_VALIDATE_HEAP();
-
-	region->allocationSize = originalSize;
-
-	HEAP_RELEASE_MUTEX(heap.mutex);
-
-	void *address = HEAP_REGION_DATA(region);
-
-	if (zeroMemory) EsMemoryZero(address, originalSize);
-#ifdef DEBUG_BUILD
-	else EsMemoryFill(address, (uint8_t *) address + originalSize, 0xA1);
-#endif
-
-	MemoryLeakDetectorAdd(&heap, address, originalSize);
-	return address;
-}
-
-extern "C" void EsHeapFree(void *address, size_t expectedSize, EsHeap *_heap) {
-#ifndef KERNEL
-	if (!_heap) _heap = &heap;
-#endif
-	EsHeap &heap = *(EsHeap *) _heap;
-
-	if (!address && expectedSize) HEAP_PANIC(10, address, expectedSize);
-	if (!address) return;
-
-#ifdef USE_PLATFORM_HEAP
-	PlatformHeapFree(address);
-	return;
-#endif
-
-	MemoryLeakDetectorRemove(&heap, address);
-
-	HeapRegion *region = HEAP_REGION_HEADER(address);
-	if (region->used != USED_HEAP_REGION_MAGIC) HEAP_PANIC(region->used, region, nullptr);
-	if (expectedSize && region->allocationSize != expectedSize) HEAP_PANIC(6, region, expectedSize);
-
-	if (!region->size) {
-		// The region was allocated by itself.
-		__sync_fetch_and_sub(&heap.size, region->allocationSize);
-		HEAP_FREE_CALL(region);
-		return;
-	}
-
-#ifdef DEBUG_BUILD
-	EsMemoryFill(address, (uint8_t *) address + region->allocationSize, 0xB1);
-#endif
-
-	// Check this is the correct heap.
-
-	if (*(EsHeap **) HEAP_REGION_DATA((uint8_t *) region - region->offset + 65536 - 32) != &heap) {
-		HEAP_PANIC(52, address, 0);
-	}
-
-	HEAP_ACQUIRE_MUTEX(heap.mutex);
-
-	MAYBE_VALIDATE_HEAP();
-
-	region->used = false;
-
-	if (region->offset < region->previous) {
-		HEAP_PANIC(31, address, 0);
-	}
-
-	heap.allocationsCount--;
-	__sync_fetch_and_sub(&heap.size, region->size);
-
-	// Attempt to merge with the next region.
-
-	HeapRegion *nextRegion = HEAP_REGION_NEXT(region);
-
-	if (nextRegion && !nextRegion->used) {
-		HeapRemoveFreeRegion(nextRegion);
-
-		// Merge the regions.
-		region->size += nextRegion->size;
-		HEAP_REGION_NEXT(nextRegion)->previous = region->size;
-	}
-
-	// Attempt to merge with the previous region.
-
-	HeapRegion *previousRegion = HEAP_REGION_PREVIOUS(region);
-
-	if (previousRegion && !previousRegion->used) {
-		HeapRemoveFreeRegion(previousRegion);
-
-		// Merge the regions.
-		previousRegion->size += region->size;
-		HEAP_REGION_NEXT(region)->previous = previousRegion->size;
-		region = previousRegion;
-	}
-
-	if (region->size == 65536 - 32) {
-		if (region->offset) HEAP_PANIC(7, region, region->offset);
-
-		// The memory block is empty.
-		heap.blockCount--;
-
-		if (!heap.cannotValidate) {
-			bool found = false;
-
-			for (uintptr_t i = 0; i <= heap.blockCount; i++) {
-				if (heap.blocks[i] == region) {
-					heap.blocks[i] = heap.blocks[heap.blockCount];
-					found = true;
-					break;
-				}
-			}
-
-			EsAssert(found);
-		}
-
-		HEAP_FREE_CALL(region);
-		HEAP_RELEASE_MUTEX(heap.mutex);
-		return;
-	}
-
-	// Put the free region in the region list.
-	HeapAddFreeRegion(region, heap.regions);
-
-	MAYBE_VALIDATE_HEAP();
-
-	HEAP_RELEASE_MUTEX(heap.mutex);
-}
-
-void *EsHeapReallocate(void *oldAddress, size_t newAllocationSize, bool zeroNewSpace, EsHeap *_heap) {
-#ifndef KERNEL
-	if (!_heap) _heap = &heap;
-#endif
-	EsHeap &heap = *(EsHeap *) _heap;
-
-	/*
-		Test with:
-			void *a = EsHeapReallocate(nullptr, 128, true);
-			a = EsHeapReallocate(a, 256, true);
-			a = EsHeapReallocate(a, 128, true);
-			a = EsHeapReallocate(a, 65536, true);
-			a = EsHeapReallocate(a, 128, true);
-			a = EsHeapReallocate(a, 128, true);
-			void *b = EsHeapReallocate(nullptr, 64, true);
-			void *c = EsHeapReallocate(nullptr, 64, true);
-			EsHeapReallocate(b, 0, true);
-			a = EsHeapReallocate(a, 128 + 88, true);
-			a = EsHeapReallocate(a, 128, true);
-			EsHeapReallocate(a, 0, true);
-			EsHeapReallocate(c, 0, true);
-	*/
-
-	if (!oldAddress) {
-		return EsHeapAllocate(newAllocationSize, zeroNewSpace, _heap);
-	} else if (!newAllocationSize) {
-		EsHeapFree(oldAddress, 0, _heap);
-		return nullptr;
-	}
-
-#ifdef USE_PLATFORM_HEAP
-	return PlatformHeapReallocate(oldAddress, newAllocationSize, zeroNewSpace);
-#endif
-
-	HeapRegion *region = HEAP_REGION_HEADER(oldAddress);
-
-	if (region->used != USED_HEAP_REGION_MAGIC) {
-		HEAP_PANIC(region->used, region, nullptr);
-	}
-
-	size_t oldAllocationSize = region->allocationSize;
-	size_t oldRegionSize = region->size;
-	size_t newRegionSize = (newAllocationSize + USED_HEAP_REGION_HEADER_SIZE + 0x1F) & ~0x1F;
-	void *newAddress = oldAddress;
-	bool inHeapBlock = region->size;
-	bool canMerge = true;
-
-	if (inHeapBlock) {
-		HEAP_ACQUIRE_MUTEX(heap.mutex);
-		MAYBE_VALIDATE_HEAP();
-
-		HeapRegion *adjacent = HEAP_REGION_NEXT(region);
-
-		if (oldRegionSize < newRegionSize) {
-			if (!adjacent->used && newRegionSize < oldRegionSize + adjacent->size - FREE_HEAP_REGION_HEADER_SIZE) {
-				HeapRegion *post = HEAP_REGION_NEXT(adjacent);
-				HeapRemoveFreeRegion(adjacent);
-				region->size = newRegionSize;
-				adjacent = HEAP_REGION_NEXT(region);
-				adjacent->next = (uint8_t *) post - (uint8_t *) adjacent;
-				adjacent->used = 0;
-				adjacent->offset = region->offset + region->size;
-				post->previous = adjacent->next;
-				adjacent->previous = region->next;
-				HeapAddFreeRegion(adjacent, heap.regions);
-			} else if (!adjacent->used && newRegionSize <= oldRegionSize + adjacent->size) {
-				HeapRegion *post = HEAP_REGION_NEXT(adjacent);
-				HeapRemoveFreeRegion(adjacent);
-				region->size = newRegionSize;
-				post->previous = region->next;
-			} else {
-				canMerge = false;
-			}
-		} else if (newRegionSize < oldRegionSize) {
-			if (!adjacent->used) {
-				HeapRegion *post = HEAP_REGION_NEXT(adjacent);
-				HeapRemoveFreeRegion(adjacent);
-				region->size = newRegionSize;
-				adjacent = HEAP_REGION_NEXT(region);
-				adjacent->next = (uint8_t *) post - (uint8_t *) adjacent;
-				adjacent->used = 0;
-				adjacent->offset = region->offset + region->size;
-				post->previous = adjacent->next;
-				adjacent->previous = region->next;
-				HeapAddFreeRegion(adjacent, heap.regions);
-			} else if (newRegionSize + USED_HEAP_REGION_HEADER_SIZE <= oldRegionSize) {
-				region->size = newRegionSize;
-				HeapRegion *middle = HEAP_REGION_NEXT(region);
-				middle->size = oldRegionSize - newRegionSize;
-				middle->used = 0;
-				middle->previous = region->size;
-				middle->offset = region->offset + region->size;
-				adjacent->previous = middle->size;
-				HeapAddFreeRegion(middle, heap.regions);
-			}
-		}
-
-		MAYBE_VALIDATE_HEAP();
-		HEAP_RELEASE_MUTEX(heap.mutex);
-	} else {
-		canMerge = false;
-	}
-
-	if (!canMerge) {
-		newAddress = EsHeapAllocate(newAllocationSize, false, _heap);
-		EsMemoryCopy(newAddress, oldAddress, oldAllocationSize > newAllocationSize ? newAllocationSize : oldAllocationSize);
-		EsHeapFree(oldAddress, 0, _heap);
-	} else {
-		HEAP_REGION_HEADER(newAddress)->allocationSize = newAllocationSize;
-		__sync_fetch_and_add(&heap.size, newRegionSize - oldRegionSize);
-	}
-
-	if (zeroNewSpace && newAllocationSize > oldAllocationSize) {
-		EsMemoryZero((uint8_t *) newAddress + oldAllocationSize, newAllocationSize - oldAllocationSize);
-	}
-	return newAddress;
-}
-
-#ifndef KERNEL
-void EsHeapValidate() {
-	HeapValidate(&heap);
-
-#endif
 
 enum EsSyscallType
 {
@@ -1625,54 +923,6 @@ enum EsSyscallType
     ES_SYSCALL_BATCH,
     ES_SYSCALL_COUNT,
 };
-
-
-// MMArchMapPage.
-#define MM_MAP_PAGE_NOT_CACHEABLE 		(1 << 0)
-#define MM_MAP_PAGE_USER 			(1 << 1)
-#define MM_MAP_PAGE_OVERWRITE 			(1 << 2)
-#define MM_MAP_PAGE_COMMIT_TABLES_NOW 		(1 << 3)
-#define MM_MAP_PAGE_READ_ONLY			(1 << 4)
-#define MM_MAP_PAGE_COPIED			(1 << 5)
-#define MM_MAP_PAGE_NO_NEW_TABLES		(1 << 6)
-#define MM_MAP_PAGE_FRAME_LOCK_ACQUIRED		(1 << 7)
-#define MM_MAP_PAGE_WRITE_COMBINING		(1 << 8)
-#define MM_MAP_PAGE_IGNORE_IF_MAPPED		(1 << 9)
-
-// MMArchUnmapPages.
-#define MM_UNMAP_PAGES_FREE 			(1 << 0)
-#define MM_UNMAP_PAGES_FREE_COPIED		(1 << 1)
-#define MM_UNMAP_PAGES_BALANCE_FILE		(1 << 2)
-
-// MMPhysicalAllocate.
-// --> Moved to module.h.
-
-// MMHandlePageFault.
-#define MM_HANDLE_PAGE_FAULT_WRITE 		(1 << 0)
-#define MM_HANDLE_PAGE_FAULT_LOCK_ACQUIRED	(1 << 1)
-#define MM_HANDLE_PAGE_FAULT_FOR_SUPERVISOR	(1 << 2)
-
-// MMStandardAllocate - flags passed through into MMReserve.
-// --> Moved to module.h.
-
-// MMReserve - region types.
-#define MM_REGION_PHYSICAL                      (0x0100) // The region is mapped to device memory.
-#define MM_REGION_NORMAL                        (0x0200) // A normal region.
-#define MM_REGION_SHARED                        (0x0400) // The region's contents is shared via a MMSharedRegion.
-#define MM_REGION_GUARD	                        (0x0800) // A guard region, to make sure we don't accidentally go into other regions.
-#define MM_REGION_CACHE	                        (0x1000) // Used for the file cache.
-#define MM_REGION_FILE	                        (0x2000) // A mapped file. 
-
-#define MM_SHARED_ENTRY_PRESENT 		(1)
-
-#define MM_PHYSICAL_ALLOCATE_CAN_FAIL		(1 << 0)	// Don't panic if the allocation fails.
-#define MM_PHYSICAL_ALLOCATE_COMMIT_NOW 	(1 << 1)	// Commit (fixed) the allocated pages.
-#define MM_PHYSICAL_ALLOCATE_ZEROED		(1 << 2)	// Zero the pages.
-#define MM_PHYSICAL_ALLOCATE_LOCK_ACQUIRED	(1 << 3)	// The page frame mutex is already acquired.
-
-#define MM_HANDLE_PAGE_FAULT_WRITE 		(1 << 0)
-#define MM_HANDLE_PAGE_FAULT_LOCK_ACQUIRED	(1 << 1)
-#define MM_HANDLE_PAGE_FAULT_FOR_SUPERVISOR	(1 << 2)
 
 enum EsDeviceType {
 	ES_DEVICE_OTHER,
@@ -1747,45 +997,23 @@ struct Array
 		if (failIfNotFound) EsPanic("Array::Find - Item not found in %x.\n", this);
 		return -1;
 	}
-
 };
 
 struct Range {
 	uintptr_t from, to;
 };
 
+
+struct RangeSet;
+// Range C API
+extern "C"
+{
+    Range* RangeSetFind(RangeSet* rangeSet, uintptr_t offset, bool touching);
+    bool RangeSetContains(RangeSet* rangeSet, uintptr_t offset);
+}
 struct RangeSet {
 	Array<Range, K_CORE> ranges;
 	uintptr_t contiguous;
-
-    Range *Find(uintptr_t offset, bool touching) {
-        if (!ranges.Length()) return nullptr;
-
-        intptr_t low = 0, high = ranges.Length() - 1;
-
-        while (low <= high) {
-            intptr_t i = low + (high - low) / 2;
-            Range *range = &ranges[i];
-
-            if (range->from <= offset && (offset < range->to || (touching && offset <= range->to))) {
-                return range;
-            } else if (range->from <= offset) {
-                low = i + 1;
-            } else {
-                high = i - 1;
-            }
-        }
-
-        return nullptr;
-    }
-
-    bool Contains(uintptr_t offset) {
-        if (ranges.Length()) {
-            return Find(offset, false);
-        } else {
-            return offset < contiguous;
-        }
-    }
 
     void Validate() {
 #ifdef DEBUG_BUILD
@@ -1864,8 +1092,8 @@ struct RangeSet {
         Range newRange = {};
 
         {
-            Range *left = Find(from, true);
-            Range *right = Find(to, true);
+            Range *left = RangeSetFind(this, from, true);
+            Range *right = RangeSetFind(this, to, true);
 
             newRange.from = left ? left->from : from;
             newRange.to = right ? right->to : to;
@@ -2069,25 +1297,11 @@ struct RangeSet {
 
         Validate();
         return true;
-
     }
 };
 
-// Range C API
 extern "C"
 {
-    Range* RangeSetFind(RangeSet* rangeSet, uintptr_t offset, bool touching)
-    {
-        return rangeSet->Find(offset, touching);
-    }
-    bool RangeSetContains(RangeSet* rangeSet, uintptr_t offset)
-    {
-        return rangeSet->Contains(offset);
-    }
-    void RangeSetValidate(RangeSet* rangeSet)
-    {
-        rangeSet->Validate();
-    }
     bool RangeSetClear(RangeSet* rangeSet, uintptr_t from, uintptr_t to, intptr_t* delta, bool modify)
     {
         return rangeSet->Clear(from, to, delta, modify);
@@ -2102,33 +1316,7 @@ extern "C"
     }
 }
 
-struct KDevice {
-	const char *cDebugName;
-
-	KDevice *parent;                    // The parent device.
-	Array<KDevice *, K_FIXED> children; // Child devices.
-
-#define K_DEVICE_REMOVED         (1 << 0)
-#define K_DEVICE_VISIBLE_TO_USER (1 << 1)   // A ES_MSG_DEVICE_CONNECTED message was sent to Desktop for this device.
-	uint8_t flags;
-	uint32_t handles;
-	EsDeviceType type;
-	EsObjectID objectID;
-
-	// These callbacks are called with the deviceTreeMutex locked, and are all optional.
-	void (*shutdown)(KDevice *device);  // Called when the computer is about to shutdown.
-	void (*dumpState)(KDevice *device); // Dump the entire state of the device for debugging.
-	void (*removed)(KDevice *device);   // Called when the device is removed. Called after the children are informed.
-	void (*destroy)(KDevice *device);   // Called just before the device is destroyed.
-};
-
 #define ES_SNAPSHOT_MAX_PROCESS_NAME_LENGTH 	(31)
-
-struct Process;
-struct Thread;
-struct Handle;
-struct Scheduler;
-struct MessageQueue;
 
 struct EsProcessCreateData {
     EsHandle systemData;
@@ -2553,9 +1741,6 @@ extern Process* desktopProcess;
 #define SPAWN_THREAD_ASYNC_TASK   (1 << 3)
 #define SPAWN_THREAD_IDLE         (1 << 4)
 
-#define THREAD_PRIORITY_NORMAL 	(0) // Lower value = higher priority.
-#define THREAD_PRIORITY_LOW 	(1)
-#define THREAD_PRIORITY_COUNT	(2)
 
 struct KTimer {
 	KEvent event;
@@ -2862,10 +2047,6 @@ struct MMRegion {
 	};
 };
 
-extern "C" MMRegion *MMFindAndPinRegion(MMSpace *space, uintptr_t address, uintptr_t size); 
-extern "C" bool MMCommitRange(MMSpace *space, MMRegion *region, uintptr_t pageOffset, size_t pageCount);
-extern "C" void MMUnpinRegion(MMSpace *space, MMRegion *region);
-
 #define ES_SHARED_MEMORY_NAME_MAX_LENGTH (32)
 struct MMSharedRegion {
 	size_t sizeBytes;
@@ -2944,11 +2125,7 @@ struct Bitset {
 #endif
 };
 
-extern "C" void BitsetInitialise(Bitset* self, size_t count, bool mapAll)
-{
-    self->Initialise(count, mapAll);
-}
-
+extern "C" void BitsetInitialise(Bitset* self, size_t count, bool mapAll);
 extern "C" uintptr_t BitsetGet(Bitset* self, size_t count, uintptr_t align, uintptr_t below)
 {
     return self->Get(count, align, below);
@@ -3216,7 +2393,6 @@ extern "C" void MMUnreserve(MMSpace *space, MMRegion *remove, bool unmapPages, b
 extern "C" void ThreadKill(KAsyncTask *task);
 extern "C" void KRegisterAsyncTask(KAsyncTask *task, KAsyncTaskCallback callback);
 extern "C" void thread_exit(Thread *thread);
-extern "C" void KThreadTerminate();
 extern "C" void MMSpaceOpenReference(MMSpace *space);
 extern "C" void MMZeroPageThread();
 extern "C" void MMBalanceThread();
@@ -3562,10 +2738,6 @@ void Scheduler::Yield(InterruptContext *context) {
 	KernelPanic("Scheduler::Yield - DoContextSwitch unexpectedly returned.\n");
 }
 
-extern "C" uint64_t MMArchPopulatePageFrameDatabase();
-extern "C" uintptr_t MMArchGetPhysicalMemoryHighest();
-extern "C" bool MMArchIsBufferInUserRange(uintptr_t baseAddress, size_t byteCount);
-extern "C" void ContextSanityCheck(InterruptContext *context);
 extern "C" void AsyncTaskThread();
 
 void Scheduler::CreateProcessorThreads(CPULocalStorage *local) {
@@ -3591,268 +2763,6 @@ void KernelPanic(const char *format, ...) {
     // @TODO @Log
 	ProcessorHalt();
 }
-
-
-//void InterruptHandler(InterruptContext *context) {
-    //if (scheduler.panic && context->interruptNumber != 2) {
-        //return;
-    //}
-
-    //if (ProcessorAreInterruptsEnabled()) {
-        //KernelPanic("InterruptHandler - Interrupts were enabled at the start of an interrupt handler.\n");
-    //}
-
-    //CPULocalStorage *local = GetLocalStorage();
-    //uintptr_t interrupt = context->interruptNumber;
-
-    //if (local && local->currentThread)
-    //{
-        //local->currentThread->lastInterruptTimeStamp = ProcessorReadTimeStamp();
-    //}
-
-    //if (local && local->spinlockCount && context->cr8 != 0xE) {
-        //KernelPanic("InterruptHandler - Local spinlockCount is %d but interrupts were enabled (%x/%x).\n", local->spinlockCount, local, context);
-    //}
-
-    //if (interrupt < 0x20) {
-        //// If we received a non-maskable interrupt, halt execution.
-        //if (interrupt == 2) {
-            //local->panicContext = context;
-            //ProcessorHalt();
-        //}
-
-        //bool supervisor = (context->cs & 3) == 0;
-        //Thread* currentThread = GetCurrentThread();
-
-        //if (!supervisor) {
-            //// EsPrint("User interrupt: %x/%x/%x\n", interrupt, context->cr2, context->errorCode);
-
-            //if (context->cs != 0x5B && context->cs != 0x6B) {
-                //KernelPanic("InterruptHandler - Unexpected value of CS 0x%X\n", context->cs);
-            //}
-
-            //if (currentThread->isKernelThread) {
-                //KernelPanic("InterruptHandler - Kernel thread executing user code. (1)\n");
-            //}
-
-            //// User-code exceptions are *basically* the same thing as system calls.
-            //ThreadTerminatableState previousTerminatableState = currentThread->terminatableState;
-            //currentThread->terminatableState = THREAD_IN_SYSCALL;
-
-            //if (local && local->spinlockCount) {
-                //KernelPanic("InterruptHandler - User exception occurred with spinlock acquired.\n");
-            //}
-
-            //// Re-enable interrupts during exception handling.
-            //ProcessorEnableInterrupts();
-            //local = nullptr; // The CPU we're executing on could change
-
-            //if (interrupt == 14) {
-                //bool success = MMArchHandlePageFault(context->cr2, (context->errorCode & 2) ? MM_HANDLE_PAGE_FAULT_WRITE : 0);
-
-                //if (success) {
-                    //goto resolved;
-                //}
-            //}
-
-            //if (interrupt == 0x13) {
-                ////EsPrint("ProcessorReadMXCSR() = %x\n", ProcessorReadMXCSR());
-            //}
-
-            //// TODO Usermode exceptions and debugging.
-            //// @Log
-            ////KernelLog(LOG_ERROR, "Arch", "unhandled userland exception", 
-                    ////"InterruptHandler - Exception (%z) in userland process (%z).\nRIP = %x\nRSP = %x\nX86_64 error codes: [err] %x, [cr2] %x\n", 
-                    ////exceptionInformation[interrupt], 
-                    ////currentThread->process->cExecutableName,
-                    ////context->rip, context->rsp, context->errorCode, context->cr2);
-
-            ////EsPrint("Attempting to make a stack trace...\n");
-
-            //{
-                //uint64_t rbp = context->rbp;
-                //int traceDepth = 0;
-
-                //while (rbp && traceDepth < 32) {
-                    //uint64_t value;
-                    //if (!MMArchIsBufferInUserRange(rbp, 16)) break;
-                    //if (!MMArchSafeCopy((uintptr_t) &value, rbp + 8, sizeof(uint64_t))) break;
-                    ////EsPrint("\t%d: %x\n", ++traceDepth, value);
-                    //if (!value) break;
-                    //if (!MMArchSafeCopy((uintptr_t) &rbp, rbp, sizeof(uint64_t))) break;
-                //}
-            //}
-
-            ////EsPrint("Stack trace complete.\n");
-
-            //EsCrashReason crashReason;
-            //EsMemoryZero(&crashReason, sizeof(EsCrashReason));
-            //crashReason.errorCode = ES_FATAL_ERROR_PROCESSOR_EXCEPTION;
-            //crashReason.duringSystemCall = (EsSyscallType) -1;
-            //ProcessCrash(currentThread->process, &crashReason);
-
-            //resolved:;
-
-            //if (currentThread->terminatableState != THREAD_IN_SYSCALL) {
-                //KernelPanic("InterruptHandler - Thread changed terminatable status during interrupt.\n");
-            //}
-
-            //currentThread->terminatableState = previousTerminatableState;
-
-            //if (currentThread->terminating || currentThread->paused) {
-                //ProcessorFakeTimerInterrupt();
-            //}
-
-            //// Disable interrupts when we're done.
-            //ProcessorDisableInterrupts();
-
-            //// EsPrint("User interrupt complete.\n", interrupt, context->cr2);
-        //} else {
-            //if (context->cs != 0x48) {
-                //KernelPanic("InterruptHandler - Unexpected value of CS 0x%X\n", context->cs);
-            //}
-
-            //if (interrupt == 14) {
-                //// EsPrint("PF: %x\n", context->cr2);
-
-                //if ((context->errorCode & (1 << 3))) {
-                    //goto fault;
-                //}
-
-                //if (local && local->spinlockCount && ((context->cr2 >= 0xFFFF900000000000 && context->cr2 < 0xFFFFF00000000000) 
-                            //|| context->cr2 < 0x8000000000000000)) {
-                    //KernelPanic("HandlePageFault - Page fault occurred with spinlocks active at %x (S = %x, B = %x, LG = %x, CR2 = %x, local = %x).\n", 
-                            //context->rip, context->rsp, context->rbp, local->currentThread->lastKnownExecutionAddress, context->cr2, local);
-                //}
-
-                //if ((context->flags & 0x200) && context->cr8 != 0xE) {
-                    //ProcessorEnableInterrupts();
-                    //local = nullptr; // The CPU we're executing on could change
-                //}
-                
-                //if (!MMArchHandlePageFault(context->cr2, MM_HANDLE_PAGE_FAULT_FOR_SUPERVISOR
-                            //| ((context->errorCode & 2) ? MM_HANDLE_PAGE_FAULT_WRITE : 0))) {
-                    //if (currentThread->inSafeCopy && context->cr2 < 0x8000000000000000) {
-                        //context->rip = context->r8; // See definition of MMArchSafeCopy.
-                    //} else {
-                        //goto fault;
-                    //}
-                //}
-
-                //ProcessorDisableInterrupts();
-            //} else {
-                //fault:
-                //KernelPanic("Unresolvable processor exception encountered in supervisor mode.\n%z\nRIP = %x\nX86_64 error codes: [err] %x, [cr2] %x\n"
-                        //"Stack: [rsp] %x, [rbp] %x\nRegisters: [rax] %x, [rbx] %x, [rsi] %x, [rdi] %x.\nThread ID = %d\n", 
-                        //exceptionInformation[interrupt], context->rip, context->errorCode, context->cr2, 
-                        //context->rsp, context->rbp, context->rax, context->rbx, context->rsi, context->rdi, 
-                        //currentThread ? currentThread->id : -1);
-            //}
-        //}
-    //} else if (interrupt == 0xFF) {
-        //// Spurious interrupt (APIC), ignore.
-    //} else if (interrupt >= 0x20 && interrupt < 0x30) {
-        //// Spurious interrupt (PIC), ignore.
-    //} else if (interrupt >= 0xF0 && interrupt < 0xFE) {
-        //// IPI.
-        //// Warning: This code executes at a special IRQL! Do not acquire spinlocks!!
-
-        //if (interrupt == CALL_FUNCTION_ON_ALL_PROCESSORS_IPI) {
-            //if (!callFunctionOnAllProcessorsRemaining) KernelPanic("InterruptHandler - callFunctionOnAllProcessorsRemaining is 0 (a).\n");
-            //CallFunctionOnAllProcessorCallbackWrapper();
-            //if (!callFunctionOnAllProcessorsRemaining) KernelPanic("InterruptHandler - callFunctionOnAllProcessorsRemaining is 0 (b).\n");
-            //__sync_fetch_and_sub(&callFunctionOnAllProcessorsRemaining, 1);
-        //}
-
-        //LapicEndOfInterrupt();
-    //} else if (interrupt >= INTERRUPT_VECTOR_MSI_START && interrupt < INTERRUPT_VECTOR_MSI_START + INTERRUPT_VECTOR_MSI_COUNT && local) {
-        //KSpinlockAcquire(&irqHandlersLock);
-        //MSIHandler handler = msiHandlers[interrupt - INTERRUPT_VECTOR_MSI_START];
-        //KSpinlockRelease(&irqHandlersLock);
-        //local->irqSwitchThread = false;
-
-        //if (!handler.callback) {
-            //// @Log
-        //} else {
-            //handler.callback(interrupt - INTERRUPT_VECTOR_MSI_START, handler.context);
-        //}
-
-        //if (local->irqSwitchThread && scheduler.started && local->schedulerReady) {
-            //SchedulerYield(context); // LapicEndOfInterrupt is called in PostContextSwitch.
-            //KernelPanic("InterruptHandler - Returned from Scheduler::Yield.\n");
-        //}
-
-        //LapicEndOfInterrupt();
-    //} else if (local) {
-        //// IRQ.
-
-        //local->irqSwitchThread = false;
-
-        //if (interrupt == TIMER_INTERRUPT) {
-            //local->irqSwitchThread = true;
-        //} else if (interrupt == YIELD_IPI) {
-            //local->irqSwitchThread = true;
-            //GetCurrentThread()->receivedYieldIPI = true;
-        //} else if (interrupt >= IRQ_BASE && interrupt < IRQ_BASE + 0x20) {
-            //KernelPanic("PCI involved, not implemented\n");
-            ////GetLocalStorage()->inIRQ = true;
-
-            ////uintptr_t line = interrupt - IRQ_BASE;
-            ////KernelLog(LOG_VERBOSE, "Arch", "IRQ start", "IRQ start %d.\n", line);
-            ////KSpinlockAcquire(&irqHandlersLock);
-
-            ////for (uintptr_t i = 0; i < sizeof(irqHandlers) / sizeof(irqHandlers[0]); i++) {
-                ////IRQHandler handler = irqHandlers[i];
-                ////if (!handler.callback) continue;
-
-                ////if (handler.line == -1) {
-                    ////// Before we get the actual IRQ line information from ACPI (which might take it a while),
-                    ////// only test that the IRQ is in the correct range for PCI interrupts.
-                    ////// This is a bit slower because we have to dispatch the interrupt to more drivers,
-                    ////// but it shouldn't break anything because they're all supposed to handle overloading anyway.
-                    ////// This is mess. Hopefully all modern computers will use MSIs for anything important.
-
-                    ////if (line != 9 && line != 10 && line != 11) {
-                        ////continue;
-                    ////} else {
-                        ////uint8_t mappedLine = pciIRQLines[handler.pciDevice->slot][handler.pciDevice->interruptPin - 1];
-
-                        ////if (mappedLine && line != mappedLine) {
-                            ////continue;
-                        ////}
-                    ////}
-                ////} else {
-                    ////if ((uintptr_t) handler.line != line) {
-                        ////continue;
-                    ////}
-                ////}
-
-                ////KSpinlockRelease(&irqHandlersLock);
-                ////handler.callback(interrupt - IRQ_BASE, handler.context);
-                ////KSpinlockAcquire(&irqHandlersLock);
-            ////}
-
-            ////KSpinlockRelease(&irqHandlersLock);
-            ////KernelLog(LOG_VERBOSE, "Arch", "IRQ end", "IRQ end %d.\n", line);
-
-            ////GetLocalStorage()->inIRQ = false;
-        //}
-
-        //if (local->irqSwitchThread && scheduler.started && local->schedulerReady) {
-            //SchedulerYield(context); // LapicEndOfInterrupt is called in PostContextSwitch.
-            //KernelPanic("InterruptHandler - Returned from Scheduler::Yield.\n");
-        //}
-
-        //LapicEndOfInterrupt();
-    //}
-
-    //// Sanity check.
-    //ContextSanityCheck(context);
-
-    //if (ProcessorAreInterruptsEnabled()) {
-        //KernelPanic("InterruptHandler - Interrupts were enabled while returning from an interrupt handler.\n");
-    //}
-//}
 
 extern "C" void ProcessLoadDesktopExecutable();
 extern "C" Thread* CreateLoadExecutableThread(Process* process)

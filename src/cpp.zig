@@ -2177,316 +2177,318 @@ pub const Heap = extern struct
     blocks: [16]?*HeapRegion,
     cannot_validate: bool,
 
-    //pub fn allocate(self: *@This(), asked_size: u64, zero_memory: bool) u64
-    //{
-        //if (@bitCast(i64, asked_size) < 0) KernelPanic("heap panic");
+    pub fn allocate(self: *@This(), asked_size: u64, zero_memory: bool) u64
+    {
+        if (@bitCast(i64, asked_size) < 0) KernelPanic("heap panic");
 
-        //const size = (asked_size + HeapRegion.used_header_size + 0x1f) & ~@as(u64, 0x1f);
+        const size = (asked_size + HeapRegion.used_header_size + 0x1f) & ~@as(u64, 0x1f);
 
-        //if (size >= large_allocation_threshold)
-        //{
-            //if (@intToPtr(?*HeapRegion, self.allocate_call(size))) |region|
-            //{
-                //region.used = HeapRegion.used_magic;
-                //region.u1.size = 0;
-                //region.u2.allocation_size = asked_size;
-                //_ = self.size.atomic_fetch_add(asked_size);
-                //return region.get_data();
-            //}
-            //else
-            //{
-                //return 0;
-            //}
-        //}
+        if (size >= large_allocation_threshold)
+        {
+            if (@intToPtr(?*HeapRegion, self.allocate_call(size))) |region|
+            {
+                region.used = HeapRegion.used_magic;
+                region.u1.size = 0;
+                region.u2.allocation_size = asked_size;
+                _ = self.size.atomic_fetch_add(asked_size);
+                return region.get_data();
+            }
+            else
+            {
+                return 0;
+            }
+        }
 
-        //_ = self.mutex.acquire();
+        _ = self.mutex.acquire();
 
-        //self.validate();
+        self.validate();
 
-        //const region = blk:
-        //{
-            //var heap_index = heap_calculate_index(size);
-            //if (heap_index < self.regions.len)
-            //{
-                //for (self.regions[heap_index..]) |maybe_heap_region|
-                //{
-                    //if (maybe_heap_region) |heap_region|
-                    //{
-                        //if (heap_region.u1.size >= size)
-                        //{
-                            //const result = heap_region;
-                            //result.remove_free();
-                            //break :blk result;
-                        //}
-                    //}
-                //}
-            //}
+        const region = blk:
+        {
+            var heap_index = HeapCalculateIndex(size);
+            if (heap_index < self.regions.len)
+            {
+                for (self.regions[heap_index..]) |maybe_heap_region|
+                {
+                    if (maybe_heap_region) |heap_region|
+                    {
+                        if (heap_region.u1.size >= size)
+                        {
+                            const result = heap_region;
+                            result.remove_free();
+                            break :blk result;
+                        }
+                    }
+                }
+            }
 
-            //const allocation = @intToPtr(?*HeapRegion, self.allocate_call(65536));
-            //if (self.block_count.read_volatile() < 16)
-            //{
-                //self.blocks[self.block_count.read_volatile()] = allocation;
-            //}
-            //else
-            //{
-                //self.cannot_validate = true;
-            //}
-            //self.block_count.increment();
+            const allocation = @intToPtr(?*HeapRegion, self.allocate_call(65536));
+            if (self.block_count.read_volatile() < 16)
+            {
+                self.blocks[self.block_count.read_volatile()] = allocation;
+            }
+            else
+            {
+                self.cannot_validate = true;
+            }
+            self.block_count.increment();
 
-            //if (allocation) |result|
-            //{
-                //result.u1.size = 65536 - 32;
-                //const end_region = result.get_next().?;
-                //end_region.used = HeapRegion.used_magic;
-                //end_region.offset = 65536 - 32;
-                //end_region.u1.next = 32;
-                //@intToPtr(?*?*Heap, end_region.get_data()).?.* = self;
+            if (allocation) |result|
+            {
+                result.u1.size = 65536 - 32;
+                const end_region = result.get_next().?;
+                end_region.used = HeapRegion.used_magic;
+                end_region.offset = 65536 - 32;
+                end_region.u1.next = 32;
+                @intToPtr(?*?*Heap, end_region.get_data()).?.* = self;
 
-                //break :blk result;
-            //}
-            //else
-            //{
-                //// it failed
-                //self.mutex.release();
-                //return 0;
-            //}
-        //};
+                break :blk result;
+            }
+            else
+            {
+                // it failed
+                self.mutex.release();
+                return 0;
+            }
+        };
 
-        //if (region.used != 0 or region.u1.size < size) KernelPanic("heap panic\n");
+        if (region.used != 0 or region.u1.size < size) KernelPanic("heap panic\n");
 
-        //self.allocation_count.increment();
-        //_ = self.size.atomic_fetch_add(size);
+        self.allocation_count.increment();
+        _ = self.size.atomic_fetch_add(size);
 
-        //if (region.u1.size != size)
-        //{
-            //const old_size = region.u1.size;
-            //assert(size <= std.math.maxInt(u16));
-            //const truncated_size = @intCast(u16, size);
-            //region.u1.size = truncated_size;
-            //region.used = HeapRegion.used_magic;
+        if (region.u1.size != size)
+        {
+            const old_size = region.u1.size;
+            assert(size <= std.math.maxInt(u16));
+            const truncated_size = @intCast(u16, size);
+            region.u1.size = truncated_size;
+            region.used = HeapRegion.used_magic;
 
-            //const free_region = region.get_next().?;
-            //free_region.u1.size = old_size - truncated_size;
-            //free_region.previous = truncated_size;
-            //free_region.offset = region.offset + truncated_size;
-            //free_region.used = 0;
-            //self.add_free_region(free_region);
+            const free_region = region.get_next().?;
+            free_region.u1.size = old_size - truncated_size;
+            free_region.previous = truncated_size;
+            free_region.offset = region.offset + truncated_size;
+            free_region.used = 0;
+            self.add_free_region(free_region);
 
-            //const next_region = free_region.get_next().?;
-            //next_region.previous = free_region.u1.size;
+            const next_region = free_region.get_next().?;
+            next_region.previous = free_region.u1.size;
 
-            //self.validate();
-        //}
+            self.validate();
+        }
 
-        //region.used = HeapRegion.used_magic;
-        //region.u2.allocation_size = asked_size;
-        //self.mutex.release();
+        region.used = HeapRegion.used_magic;
+        region.u2.allocation_size = asked_size;
+        self.mutex.release();
 
-        //const address = region.get_data();
-        //const memory = @intToPtr([*]u8, address)[0..asked_size];
-        //if (zero_memory)
-        //{
-            //std.mem.set(u8, memory, 0);
-        //}
-        //else
-        //{
-            //std.mem.set(u8, memory, 0xa1);
-        //}
+        const address = region.get_data();
+        const memory = @intToPtr([*]u8, address)[0..asked_size];
+        if (zero_memory)
+        {
+            std.mem.set(u8, memory, 0);
+        }
+        else
+        {
+            std.mem.set(u8, memory, 0xa1);
+        }
 
-        //return address;
-    //}
+        return address;
+    }
 
     //fn allocateT(self: *@This(), comptime T: type, zero_memory: bool) callconv(.Inline) ?*T
     //{
         //return @intToPtr(?*T, self.allocate(@sizeOf(T), zero_memory));
     //}
 
-    //fn add_free_region(self: *@This(), region: *HeapRegion) void
-    //{
-        //if (region.used != 0 or region.u1.size < 32)
-        //{
-            //KernelPanic("heap panic\n");
-        //}
+    fn add_free_region(self: *@This(), region: *HeapRegion) void
+    {
+        if (region.used != 0 or region.u1.size < 32)
+        {
+            KernelPanic("heap panic\n");
+        }
 
-        //const index = heap_calculate_index(region.u1.size);
-        //region.u2.region_list_next = self.regions[index];
-        //if (region.u2.region_list_next) |region_list_next|
-        //{
-            //region_list_next.region_list_reference = &region.u2.region_list_next;
-        //}
-        //self.regions[index] = region;
-        //region.region_list_reference = &self.regions[index];
-    //}
+        const index = HeapCalculateIndex(region.u1.size);
+        assert(index < std.math.maxInt(u32));
+        region.u2.region_list_next = self.regions[index];
+        if (region.u2.region_list_next) |region_list_next|
+        {
+            region_list_next.region_list_reference = &region.u2.region_list_next;
+        }
+        self.regions[index] = region;
+        region.region_list_reference = &self.regions[index];
+    }
 
-    //fn allocate_call(self: *@This(), size: u64) u64
-    //{
-        //if (self == &kernel.core.heap)
-        //{
+    fn allocate_call(self: *@This(), size: u64) u64
+    {
+        if (self == &heapCore)
+        {
             //return kernel.core.address_space.standard_allocate(size, Region.Flags.from_flag(.fixed));
-        //}
-        //else
-        //{
-            //return kernel.process.address_space.standard_allocate(size, Region.Flags.from_flag(.fixed));
-        //}
-    //}
+            return MMStandardAllocate(&_coreMMSpace, size, Region.Flags.from_flag(.fixed), 0, true);
+        }
+        else
+        {
+            return MMStandardAllocate(&_kernelMMSpace, size, Region.Flags.from_flag(.fixed), 0, true);
+        }
+    }
 
-    //fn free_call(self: *@This(), region: *HeapRegion) void
-    //{
-        //if (self == &kernel.core.heap)
-        //{
-            //_ = kernel.core.address_space.free(@ptrToInt(region));
-        //}
-        //else
-        //{
-            //_ = kernel.process.address_space.free(@ptrToInt(region));
-        //}
-    //}
+    fn free_call(self: *@This(), region: *HeapRegion) void
+    {
+        if (self == &heapCore)
+        {
+            _ = MMFree(&_coreMMSpace, @ptrToInt(region), 0, false);
+        }
+        else
+        {
+            _ = MMFree(&_kernelMMSpace, @ptrToInt(region), 0, false);
+        }
+    }
 
-    //pub fn free(self: *@This(), address: u64, expected_size: u64) void
-    //{
-        //if (address == 0 and expected_size != 0) KernelPanic("heap panic");
-        //if (address == 0) return;
+    pub fn free(self: *@This(), address: u64, expected_size: u64) void
+    {
+        if (address == 0 and expected_size != 0) KernelPanic("heap panic");
+        if (address == 0) return;
 
-        //var region = @intToPtr(*HeapRegion, address).get_header().?;
-        //if (region.used != HeapRegion.used_magic) KernelPanic("heap panic");
-        //if (expected_size != 0 and region.u2.allocation_size != expected_size) KernelPanic("heap panic");
+        var region = @intToPtr(*HeapRegion, address).get_header().?;
+        if (region.used != HeapRegion.used_magic) KernelPanic("heap panic");
+        if (expected_size != 0 and region.u2.allocation_size != expected_size) KernelPanic("heap panic");
 
-        //if (region.u1.size == 0)
-        //{
-            //_ = self.size.atomic_fetch_sub(region.u2.allocation_size);
-            //self.free_call(region);
-            //return;
-        //}
+        if (region.u1.size == 0)
+        {
+            _ = self.size.atomic_fetch_sub(region.u2.allocation_size);
+            self.free_call(region);
+            return;
+        }
 
-        //{
-            //const first_region = @intToPtr(*HeapRegion, @ptrToInt(region) - region.offset + 65536 - 32);
-            //if (@intToPtr(**Heap, first_region.get_data()).* != self) KernelPanic("heap panic");
-        //}
+        {
+            const first_region = @intToPtr(*HeapRegion, @ptrToInt(region) - region.offset + 65536 - 32);
+            if (@intToPtr(**Heap, first_region.get_data()).* != self) KernelPanic("heap panic");
+        }
 
-        //_ = self.mutex.acquire();
+        _ = self.mutex.acquire();
 
-        //self.validate();
+        self.validate();
 
-        //region.used = 0;
+        region.used = 0;
 
-        //if (region.offset < region.previous) KernelPanic("heap panic");
+        if (region.offset < region.previous) KernelPanic("heap panic");
 
-        //self.allocation_count.decrement();
-        //_ = self.size.atomic_fetch_sub(region.u1.size);
+        self.allocation_count.decrement();
+        _ = self.size.atomic_fetch_sub(region.u1.size);
 
-        //if (region.get_next()) |next_region|
-        //{
-            //if (next_region.used == 0)
-            //{
-                //next_region.remove_free();
-                //region.u1.size += next_region.u1.size;
-                //next_region.get_next().?.previous = region.u1.size;
-            //}
-        //}
+        if (region.get_next()) |next_region|
+        {
+            if (next_region.used == 0)
+            {
+                next_region.remove_free();
+                region.u1.size += next_region.u1.size;
+                next_region.get_next().?.previous = region.u1.size;
+            }
+        }
 
-        //if (region.get_previous()) |previous_region|
-        //{
-            //if (previous_region.used == 0)
-            //{
-                //previous_region.remove_free();
+        if (region.get_previous()) |previous_region|
+        {
+            if (previous_region.used == 0)
+            {
+                previous_region.remove_free();
 
-                //previous_region.u1.size += region.u1.size;
-                //region.get_next().?.previous = previous_region.u1.size;
-                //region = previous_region;
-            //}
-        //}
+                previous_region.u1.size += region.u1.size;
+                region.get_next().?.previous = previous_region.u1.size;
+                region = previous_region;
+            }
+        }
 
-        //if (region.u1.size == 65536 - 32)
-        //{
-            //if (region.offset != 0) KernelPanic("heap panic");
+        if (region.u1.size == 65536 - 32)
+        {
+            if (region.offset != 0) KernelPanic("heap panic");
 
-            //self.block_count.decrement();
+            self.block_count.decrement();
 
-            //if (!self.cannot_validate)
-            //{
-                //var found = false;
-                //for (self.blocks[0..self.block_count.read_volatile() + 1]) |*heap_region|
-                //{
-                    //if (heap_region.* == region)
-                    //{
-                        //heap_region.* = self.blocks[self.block_count.read_volatile()];
-                        //found = true;
-                        //break;
-                    //}
-                //}
+            if (!self.cannot_validate)
+            {
+                var found = false;
+                for (self.blocks[0..self.block_count.read_volatile() + 1]) |*heap_region|
+                {
+                    if (heap_region.* == region)
+                    {
+                        heap_region.* = self.blocks[self.block_count.read_volatile()];
+                        found = true;
+                        break;
+                    }
+                }
 
-                //assert(found);
-            //}
+                assert(found);
+            }
 
-            //self.free_call(region);
-            //self.mutex.release();
-            //return;
-        //}
+            self.free_call(region);
+            self.mutex.release();
+            return;
+        }
 
-        //self.add_free_region(region);
-        //self.validate();
-        //self.mutex.release();
-    //}
+        self.add_free_region(region);
+        self.validate();
+        self.mutex.release();
+    }
 
-    //fn validate(self: *@This()) void
-    //{
-        //if (self.cannot_validate) return;
+    fn validate(self: *@This()) void
+    {
+        if (self.cannot_validate) return;
 
-        //for (self.blocks[0..self.block_count.read_volatile()]) |maybe_start, i|
-        //{
-            //if (maybe_start) |start|
-            //{
-                //const end = @intToPtr(*HeapRegion, @ptrToInt(self.blocks[i]) + 65536);
-                //var maybe_previous: ?* HeapRegion = null;
-                //var region = start;
+        for (self.blocks[0..self.block_count.read_volatile()]) |maybe_start, i|
+        {
+            if (maybe_start) |start|
+            {
+                const end = @intToPtr(*HeapRegion, @ptrToInt(self.blocks[i]) + 65536);
+                var maybe_previous: ?* HeapRegion = null;
+                var region = start;
 
-                //while (@ptrToInt(region) < @ptrToInt(end))
-                //{
-                    //if (maybe_previous) |previous|
-                    //{
-                        //if (@ptrToInt(previous) != @ptrToInt(region.get_previous()))
-                        //{
-                            //KernelPanic("heap panic\n");
-                        //}
-                    //}
-                    //else
-                    //{
-                        //if (region.previous != 0) KernelPanic("heap panic\n");
-                    //}
+                while (@ptrToInt(region) < @ptrToInt(end))
+                {
+                    if (maybe_previous) |previous|
+                    {
+                        if (@ptrToInt(previous) != @ptrToInt(region.get_previous()))
+                        {
+                            KernelPanic("heap panic\n");
+                        }
+                    }
+                    else
+                    {
+                        if (region.previous != 0) KernelPanic("heap panic\n");
+                    }
 
-                    //if (region.u1.size & 31 != 0) KernelPanic("heap panic");
+                    if (region.u1.size & 31 != 0) KernelPanic("heap panic");
 
-                    //if (@ptrToInt(region) - @ptrToInt(start) != region.offset)
-                    //{
-                        //KernelPanic("heap panic\n");
-                    //}
+                    if (@ptrToInt(region) - @ptrToInt(start) != region.offset)
+                    {
+                        KernelPanic("heap panic\n");
+                    }
 
-                    //if (region.used != HeapRegion.used_magic and region.used != 0)
-                    //{
-                        //KernelPanic("heap panic");
-                    //}
+                    if (region.used != HeapRegion.used_magic and region.used != 0)
+                    {
+                        KernelPanic("heap panic");
+                    }
 
-                    //if (region.used == 0 and region.region_list_reference == null)
-                    //{
-                        //KernelPanic("heap panic\n");
-                    //}
+                    if (region.used == 0 and region.region_list_reference == null)
+                    {
+                        KernelPanic("heap panic\n");
+                    }
 
-                    //if (region.used == 0 and region.u2.region_list_next != null and region.u2.region_list_next.?.region_list_reference != &region.u2.region_list_next)
-                    //{
-                        //KernelPanic("heap panic");
-                    //}
+                    if (region.used == 0 and region.u2.region_list_next != null and region.u2.region_list_next.?.region_list_reference != &region.u2.region_list_next)
+                    {
+                        KernelPanic("heap panic");
+                    }
 
-                    //maybe_previous = region;
-                    //region = region.get_next().?;
-                //}
+                    maybe_previous = region;
+                    region = region.get_next().?;
+                }
 
-                //if (region != end)
-                //{
-                    //KernelPanic("heap panic");
-                //}
-            //}
-        //}
-    //}
+                if (region != end)
+                {
+                    KernelPanic("heap panic");
+                }
+            }
+        }
+    }
 
     //// @TODO: this may be relying on C undefined behavior and might be causing different results than expected
     //// @TODO: make this a zig function
@@ -2505,15 +2507,11 @@ pub const Heap = extern struct
         //);
     //}
 
-    //const large_allocation_threshold = 32768;
+    const large_allocation_threshold = 32768;
 };
 
 export var heapCore: Heap = undefined;
 export var heapFixed: Heap = undefined;
-
-extern fn EsHeapAllocate(size: u64, zeroMemory: bool, heap: *Heap) callconv(.C) u64;
-extern fn EsHeapReallocate(old_address: u64, new_allocation_size: u64, zero_new_space: bool, heap: *Heap) callconv(.C) u64;
-extern fn EsHeapFree(address: u64, expectedSize: u64, heap: *Heap) callconv(.C) void;
 
 // @TODO: initialize
 export var mmCoreRegions: [*]Region = undefined;
@@ -2544,45 +2542,45 @@ pub const HeapRegion = extern struct
     const free_header_size = @sizeOf(HeapRegion);
     const used_magic = 0xabcd;
 
-    //fn remove_free(self: *@This()) void
-    //{
-        //if (self.region_list_reference == null or self.used != 0) KernelPanic("heap panic\n");
+    fn remove_free(self: *@This()) void
+    {
+        if (self.region_list_reference == null or self.used != 0) KernelPanic("heap panic\n");
 
-        //self.region_list_reference.?.* = self.u2.region_list_next;
+        self.region_list_reference.?.* = self.u2.region_list_next;
 
-        //if (self.u2.region_list_next) |region_list_next|
-        //{
-            //region_list_next.region_list_reference = self.region_list_reference;
-        //}
-        //self.region_list_reference = null;
-    //}
+        if (self.u2.region_list_next) |region_list_next|
+        {
+            region_list_next.region_list_reference = self.region_list_reference;
+        }
+        self.region_list_reference = null;
+    }
 
-    //fn get_header(self: *@This()) ?*HeapRegion
-    //{
-        //return @intToPtr(?*HeapRegion, @ptrToInt(self) - used_header_size);
-    //}
+    fn get_header(self: *@This()) ?*HeapRegion
+    {
+        return @intToPtr(?*HeapRegion, @ptrToInt(self) - used_header_size);
+    }
 
-    //fn get_data(self: *@This()) u64
-    //{
-        //return @ptrToInt(self) + used_header_size;
-    //}
+    fn get_data(self: *@This()) u64
+    {
+        return @ptrToInt(self) + used_header_size;
+    }
 
-    //fn get_next(self: *@This()) ?*HeapRegion
-    //{
-        //return @intToPtr(?*HeapRegion, @ptrToInt(self) + self.u1.next);
-    //}
+    fn get_next(self: *@This()) ?*HeapRegion
+    {
+        return @intToPtr(?*HeapRegion, @ptrToInt(self) + self.u1.next);
+    }
 
-    //fn get_previous(self: *@This()) ?*HeapRegion
-    //{
-        //if (self.previous != 0)
-        //{
-            //return @intToPtr(?*HeapRegion, @ptrToInt(self) - self.previous);
-        //}
-        //else
-        //{
-            //return null;
-        //}
-    //}
+    fn get_previous(self: *@This()) ?*HeapRegion
+    {
+        if (self.previous != 0)
+        {
+            return @intToPtr(?*HeapRegion, @ptrToInt(self) - self.previous);
+        }
+        else
+        {
+            return null;
+        }
+    }
 };
 
 pub const Pool = extern struct
@@ -3846,6 +3844,16 @@ pub fn Array(comptime T: type, comptime heap_type: HeapType) type
                 .fixed => &heapFixed,
             };
         }
+
+        fn insert(self: *@This(), item: T, position: u64) ?*T
+        {
+            return @intToPtr(?*T, _ArrayInsert(@ptrCast(*?*u64, &self.ptr), @ptrToInt(&item), @sizeOf(T), @bitCast(i64, position), 0, get_heap()));
+        }
+
+        fn delete_many(self: *@This(), position: u64, count: u64) void
+        {
+            _ArrayDelete(@ptrCast(?*u64, self.ptr), position, @sizeOf(T), count);
+        }
     };
 }
 
@@ -4494,15 +4502,175 @@ pub const Range = extern struct
     {
         ranges: Array(Range, .core),
         contiguous: u64,
+
+        pub fn find(self: *@This(), offset: u64, touching: bool) ?*Range
+        {
+            const length = self.ranges.length();
+            if (length == 0) return null;
+
+            var low: i64 = 0;
+            var high = @intCast(i64, length) - 1;
+
+            while (low <= high)
+            {
+                const i = @divTrunc(low + (high - low), 2);
+                assert(i >= 0);
+                const range = &self.ranges.ptr.?[@intCast(u64, i)];
+
+                if (range.from <= offset and (offset < range.to or (touching and offset <= range.to))) return range
+                else if (range.from <= offset) low = i + 1
+                else high = i - 1;
+            }
+
+            return null;
+        }
+
+        fn contains(self: *@This(), offset: u64) bool
+        {
+            if (self.ranges.length() != 0) return self.find(offset, false) != null
+            else return offset < self.contiguous;
+        }
+
+        fn validate(self: *@This()) void
+        {
+            var previous_to: u64 = 0;
+            if (self.ranges.length() == 0) return;
+
+            for (self.ranges.get_slice()) |range|
+            {
+                if (previous_to != 0 and range.from <= previous_to) KernelPanic("range in set is not placed after the prior range\n");
+                if (range.from >= range.to) KernelPanic("range in set is invalid\n");
+
+                previous_to = range.to;
+            }
+        }
+
+        pub fn set(self: *@This(), from: u64, to: u64, maybe_delta: ?*i64, modify: bool) bool
+        {
+            if (to <= from) KernelPanic("invalid range");
+
+            if (self.ranges.length() == 0)
+            {
+                if (maybe_delta) |delta|
+                {
+                    if (from >= self.contiguous) delta.* = @intCast(i64, to) - @intCast(i64, from)
+                    else if (to >= self.contiguous) delta.* = @intCast(i64, to) - @intCast(i64, self.contiguous)
+                    else delta.* = 0;
+                }
+
+                if (!modify) return true;
+
+                if (from <= self.contiguous)
+                {
+                    if (to > self.contiguous) self.contiguous = to;
+                    return true;
+                }
+
+                if (!self.normalize()) return false;
+            }
+
+            const new_range = blk:
+            {
+                var range = std.mem.zeroes(Range);
+                range.from = if (self.find(from, true)) |left| left.from else from;
+                range.to = if (self.find(to, true)) |right| right.to else to;
+                break :blk range;
+            };
+
+            const index = blk:
+            {
+                if (!modify) break :blk @as(u64, 0);
+
+                if (self.ranges.length() != 0)
+                {
+                    for (self.ranges.get_slice()) |range, range_i|
+                    {
+                        if (range.to > new_range.from)
+                        {
+                            if (self.ranges.insert(new_range, range_i) == null)
+                            {
+                                return false;
+                            }
+
+                            break :blk range_i + 1;
+                        }
+                    }
+                }
+
+                const result_index = self.ranges.length();
+                if (self.ranges.insert(new_range, result_index) == null)
+                {
+                    return false;
+                }
+                break :blk result_index + 1;
+            };
+
+            var delete_start = index;
+            var delete_count: u64 = 0;
+            var delete_total: u64 = 0;
+
+            for (self.ranges.get_slice()) |range|
+            {
+                const overlap =
+                    (range.from >= new_range.from and range.from <= new_range.to) or
+                    (range.to >= new_range.from and range.to <= new_range.to);
+                if (overlap)
+                {
+                    delete_count += 1;
+                    delete_total += range.to - range.from;
+                }
+                else
+                {
+                    break;
+                }
+            }
+
+            if (modify) self.ranges.delete_many(delete_start, delete_count);
+
+            self.validate();
+
+            if (maybe_delta) |delta|
+            {
+                delta.* = @intCast(i64, new_range.to) - @intCast(i64, new_range.from) - @intCast(i64, delete_total);
+            }
+
+            return true;
+        }
+
+        pub fn normalize(self: *@This()) bool
+        {
+            if (self.contiguous != 0)
+            {
+                const old_contiguous = self.contiguous;
+                self.contiguous = 0;
+
+                if (!self.set(0, old_contiguous, null, true)) return false;
+            }
+
+            return true;
+        }
     };
 };
 
-extern fn RangeSetFind(range_set: *Range.Set, offset: u64, touching: bool) callconv(.C) ?*Range;
-extern fn RangeSetContains(range_set: *Range.Set, offset: u64) callconv(.C) bool;
-extern fn RangeSetValidate(range_set: *Range.Set) callconv(.C) void;
+export fn RangeSetFind(range_set: *Range.Set, offset: u64, touching: bool) callconv(.C) ?*Range
+{
+    return range_set.find(offset, touching);
+}
+export fn RangeSetContains(range_set: *Range.Set, offset: u64) callconv(.C) bool
+{
+    return range_set.contains(offset);
+}
 extern fn RangeSetClear(range_set: *Range.Set, from: u64, to: u64, delta: ?*i64, modify: bool) callconv(.C) bool;
 extern fn RangeSetSet(range_set: *Range.Set, from: u64, to: u64, delta: ?*i64, modify: bool) callconv(.C) bool;
 extern fn RangeSetNormalize(range_set: *Range.Set) callconv(.C) bool;
+//export fn RangeSetSet(range_set: *Range.Set, from: u64, to: u64, delta: ?*i64, modify: bool) callconv(.C) bool
+//{
+    //return range_set.set(from, to, delta, modify);
+//}
+//export fn RangeSetNormalize(range_set: *Range.Set) callconv(.C) bool
+//{
+    //return range_set.normalize();
+//}
 
 export fn EsMemoryFill(from: u64, to: u64, byte: u8) callconv(.C) void
 {
@@ -4682,16 +4850,20 @@ export fn _ArrayEnsureAllocated(array: *?*u64, minimum_allocated: u64, item_size
 
     if (old_header.allocated >= minimum_allocated) return true;
 
-    if (@intToPtr(?*ArrayHeader, EsHeapReallocate(@ptrToInt(old_header) - additional_header_bytes, @sizeOf(ArrayHeader) + additional_header_bytes + item_size * minimum_allocated, false, heap))) |new_header|
-    {
-        new_header.allocated = minimum_allocated;
-        array.* = @intToPtr(?*u64, @ptrToInt(new_header) + @sizeOf(ArrayHeader) + additional_header_bytes);
-        return true;
-    }
-    else
-    {
-        return false;
-    }
+    _ = additional_header_bytes;
+
+    TODO();
+
+    //if (@intToPtr(?*ArrayHeader, EsHeapReallocate(@ptrToInt(old_header) - additional_header_bytes, @sizeOf(ArrayHeader) + additional_header_bytes + item_size * minimum_allocated, false, heap))) |new_header|
+    //{
+        //new_header.allocated = minimum_allocated;
+        //array.* = @intToPtr(?*u64, @ptrToInt(new_header) + @sizeOf(ArrayHeader) + additional_header_bytes);
+        //return true;
+    //}
+    //else
+    //{
+        //return false;
+    //}
 }
 
 export fn _ArraySetLength(array: *?*u64, new_length: u64, item_size: u64, additional_header_bytes: u8, heap: *Heap) callconv(.C) bool
@@ -5023,13 +5195,13 @@ pub const Bitset = extern struct
     single_usage_count: u64,
     group_usage_count: u64,
 
-    //pub fn init(self: *@This(), count: u64, map_all: bool) void
-    //{
-        //self.single_usage.len = (count + 31) & ~@as(u64, 31);
-        //self.group_usage.len = self.single_usage.len / group_size + 1;
-        //self.single_usage.ptr = @intToPtr([*]u32, kernel.process.address_space.standard_allocate((self.single_usage.len >> 3) + (self.group_usage.len * 2), if (map_all) memory.Region.Flags.from_flag(.fixed) else memory.Region.Flags.empty()));
-        //self.group_usage.ptr = @intToPtr([*]u16, @ptrToInt(self.single_usage.ptr) + ((self.single_usage.len >> 4) * @sizeOf(u16)));
-    //}
+    pub fn init(self: *@This(), count: u64, map_all: bool) void
+    {
+        self.single_usage_count = (count + 31) & ~@as(u64, 31);
+        self.group_usage_count = self.single_usage_count / group_size + 1;
+        self.single_usage = @intToPtr([*]u32, MMStandardAllocate(&_kernelMMSpace, (self.single_usage_count >> 3) + (self.group_usage_count * 2), if (map_all) Region.Flags.from_flag(.fixed) else Region.Flags.empty(), 0, true));
+        self.group_usage = @intToPtr([*]u16, @ptrToInt(self.single_usage) + ((self.single_usage_count >> 4) * @sizeOf(u16)));
+    }
 
     //pub fn put(self: *@This(), index: u64) void
     //{
@@ -5047,6 +5219,10 @@ pub const Bitset = extern struct
     const group_size = 0x1000;
 };
 
+export fn BitsetInitialise(self: *Bitset, count: u64, map_all: bool) callconv(.C) void
+{
+    self.init(count, map_all);
+}
 
 pub const PageFrame = extern struct
 {
@@ -6561,7 +6737,6 @@ export fn MMPhysicalAllocate(flags: Physical.Flags, count: u64, alignment: u64, 
     return 0;
 }
 
-extern fn BitsetInitialise(bitset: *Bitset, count: u64, map_all: bool) callconv(.C) u64;
 extern fn BitsetGet(bitset: *Bitset, count: u64, alignment: u64, below: u64) callconv(.C) u64;
 extern fn BitsetTake(bitset: *Bitset, index: u64) callconv(.C) void;
 extern fn BitsetPut(bitset: *Bitset, index: u64) callconv(.C) void;
@@ -10787,6 +10962,24 @@ export fn InterruptHandler(context: *InterruptContext) callconv(.C) void
     ContextSanityCheck(context);
 
     if (ProcessorAreInterruptsEnabled()) KernelPanic("interrupts were enabled while returning from an interrupt handler");
+}
+
+export fn EsHeapAllocate(size: u64, zero_memory: bool, heap: *Heap) callconv(.C) u64
+{
+    return heap.allocate(size, zero_memory);
+}
+
+export fn EsHeapFree(address: u64, expected_size: u64, heap: *Heap) callconv(.C) void
+{
+    heap.free(address, expected_size);
+}
+
+export fn HeapCalculateIndex(size: u64) callconv(.C) u64
+{
+    assert(size != 0 or size != std.math.maxInt(u32));
+    const clz = @clz(u32, @intCast(u32, size));
+    const msb = @sizeOf(u32) * 8 - clz - 1;
+    return msb - 4;
 }
 
 extern fn SchedulerYield(context: *InterruptContext) callconv(.C) void;
