@@ -6522,10 +6522,12 @@ export fn ThreadSetTemporaryAddressSpace(space: ?*AddressSpace) callconv(.C) voi
     const old_space = if (thread.temporary_address_space) |tas| tas else &_kernelMMSpace;
     thread.temporary_address_space = space;
     const new_space = if (space) |sp| sp else &_kernelMMSpace;
-    MMSpaceOpenReference(new_space);
+    MMSpaceOpenReference(new_space); //open our reference to the space
+    MMSpaceOpenReference(new_space); // this reference will be closed in PostContextSwitch, simulating the reference opened in Scheduler.yield
     ProcessorSetAddressSpace(&new_space.arch);
     scheduler.dispatch_spinlock.release();
-    MMSpaceCloseReference(@ptrCast(*AddressSpace, old_space));
+    MMSpaceCloseReference(@ptrCast(*AddressSpace, old_space)); // close our reference to the space
+    MMSpaceCloseReference(@ptrCast(*AddressSpace, old_space)); // this reference was opened by Scheduler.yield and would have been closed in PostContextSwitch
 }
 
 extern fn ProcessorSetAddressSpace(address_space: *ArchAddressSpace) callconv(.C) void;
@@ -6612,7 +6614,6 @@ export fn MMSpaceOpenReference(space: *AddressSpace) callconv(.C) void
     if (space != &_kernelMMSpace)
     {
         if (space.reference_count.read_volatile() < 1) KernelPanic("space has invalid reference count");
-        if (space.reference_count.read_volatile() >= max_processors + 1) KernelPanic("space has too many references");
         _ = space.reference_count.atomic_fetch_add(1);
     }
 }
@@ -6666,10 +6667,6 @@ export fn ProcessKill(process: *Process) callconv(.C) void
     _ = process.killed_event.set(true);
     process.handle_table.destroy();
     MMSpaceDestroy(process.address_space);
-    if (!scheduler.shutdown.read_volatile())
-    {
-        // @TODO @Desktop send message to the desktop
-    }
 }
 
 export fn MMFindAndPinRegion(space: *AddressSpace, address: u64, size: u64) callconv(.C) ?*Region
@@ -8307,32 +8304,31 @@ export fn ProcessPause(process: *Process, resume_after: bool) callconv(.C) void
 
 export fn ProcessCrash(process: *Process, crash_reason: *CrashReason) callconv(.C) void
 {
+    assert(GetCurrentThread().?.process == process);
     if (process == kernelProcess) KernelPanic("kernel process has crashed");
     if (process.type != .normal) KernelPanic("A critical process has crashed");
-    if (GetCurrentThread().?.process != process)
-    {
-        KernelPanic("Attempt to crash process from different process");
-    }
 
+    var pause_process = false;
     _ = process.crash_mutex.acquire();
 
-    if (process.crashed)
+    if (!process.crashed)
     {
-        process.crash_mutex.release();
-        return;
-    }
-
-    process.crashed = true;
-
-    EsMemoryCopy(@ptrToInt(&process.crash_reason), @ptrToInt(crash_reason), @sizeOf(CrashReason));
-
-    if (!scheduler.shutdown.read_volatile())
-    {
-        // Send message to desktop
+        process.crashed = true;
+        pause_process = true;
+        // @Log
+        EsMemoryCopy(@ptrToInt(&process.crash_reason), @ptrToInt(crash_reason), @sizeOf(CrashReason));
+        if (!scheduler.shutdown.read_volatile())
+        {
+            // Send message to desktop
+        }
     }
 
     process.crash_mutex.release();
-    ProcessPause(GetCurrentThread().?.process.?, false);
+
+    if (pause_process)
+    {
+        ProcessPause(process, false);
+    }
 }
 
 export fn MMPhysicalInsertFreePagesNext(page: u64) callconv(.C) void
