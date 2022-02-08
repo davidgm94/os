@@ -133,6 +133,7 @@ const Kernel = struct
         kernel.disable_stack_probing = true;
         kernel.disable_sanitize_c = false;
         kernel.link_function_sections = false;
+        kernel.setBuildMode(b.standardReleaseOptions());
         kernel.setMainPkgPath("src");
         kernel.setLinkerScriptPath(FileSource.relative(Kernel.linker_script_path));
         kernel.setOutputDir(build_cache_dir);
