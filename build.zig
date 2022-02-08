@@ -16,6 +16,8 @@ const panic = std.debug.panic;
 const allocPrint = std.fmt.allocPrint;
 const comptimePrint = std.fmt.comptimePrint;
 
+const RNUFS = @import("src/rnu_fs.zig");
+
 const a_megabyte = 1024 * 1024;
 
 const cross_target = CrossTarget
@@ -312,6 +314,9 @@ const BIOS = struct
 
             self.align_buffer(0x200);
 
+            const superblock = @ptrCast(*RNUFS.Superblock, @alignCast(@alignOf(RNUFS.Superblock), &self.file_buffer.items[RNUFS.Superblock.offset]));
+            const disk_start = self.file_buffer.items.len;
+            superblock.format(kernel_offset, kernel_size, disk_start);
             try self.copy_file(Desktop.out_elf_path, null);
 
             // @TODO: continue writing to the disk
