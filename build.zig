@@ -184,7 +184,7 @@ const Kernel = struct
         {
             const kernel = build_kernel_common(b, "src/cpp.zig", cpp.elf_name);
 
-            kernel.addCSourceFiles(c_source_files, common_c_flags);
+            //kernel.addCSourceFiles(c_source_files, common_c_flags);
 
             //NASM.build_object(b, kernel, "src/x86_64.S", "zig-cache/kernel_x86.o");
 

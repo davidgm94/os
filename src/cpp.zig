@@ -1381,8 +1381,6 @@ export fn SchedulerYield(context: *InterruptContext) callconv(.C) void
 {
     scheduler.yield(context);
 }
-extern fn SchedulerCreateProcessorThreads(local: *LocalStorage) callconv(.C) void;
-
 const GlobalData = extern struct
 {
     click_chain_timeout_ms: Volatile(i32),
@@ -5240,7 +5238,8 @@ export fn MMInitialise() callconv(.C) void
     {
         pmm.zero_page_event.auto_reset.write_volatile(true);
         _ = MMCommit(Physical.memory_manipulation_region_page_count * page_size, true);
-        SpawnMemoryThreads();
+        pmm.zero_page_thread = ThreadSpawn(GetMMZeroPageThreadAddress(), 0, Thread.Flags.from_flag(.low_priority), null, 0) orelse KernelPanic("Unable to spawn zero page thread");
+        ThreadSpawn(GetMMBalanceThreadAddress(), 0, Thread.Flags.empty(), null, 0).?.is_page_generator = true;
     }
 
     {
@@ -5251,7 +5250,6 @@ export fn MMInitialise() callconv(.C) void
 }
 
 extern fn SpawnMemoryThreads() callconv(.C) void;
-
 extern fn CreateMainThread() callconv(.C) void;
 
 export fn ThreadSpawn(start_address: u64, argument1: u64, flags: Thread.Flags, maybe_process: ?*Process, argument2: u64) callconv(.C) ?*Thread
@@ -7120,6 +7118,26 @@ export fn MMPhysicalInsertZeroedPage(page: u64) callconv(.C) void
     MMUpdateAvailablePageCount(true);
 }
 
+extern fn GetMMZeroPageThreadAddress() callconv(.C) u64;
+extern fn GetMMBalanceThreadAddress() callconv(.C) u64;
+comptime
+{
+    asm(
+        \\.intel_syntax noprefix
+        \\.global GetMMZeroPageThreadAddress
+        \\.extern MMZeroPageThread
+        \\GetMMZeroPageThreadAddress:
+        \\mov rax, OFFSET MMZeroPageThread
+        \\ret
+        
+        \\.global GetMMBalanceThreadAddress
+        \\.extern MMBalanceThread
+        \\GetMMBalanceThreadAddress:
+        \\mov rax, OFFSET MMBalanceThread
+        \\ret
+    );
+}
+
 export fn MMZeroPageThread() callconv(.C) void
 {
     while (true)
@@ -8102,7 +8120,11 @@ const NewProcessorStorage = extern struct
         storage.gdt = MMMapPhysical(&_kernelMMSpace, gdt_physical_address, page_size, Region.Flags.empty());
         storage.local.cpu = cpu;
         cpu.local_storage = storage.local;
-        SchedulerCreateProcessorThreads(storage.local);
+        storage.local.async_task_thread = ThreadSpawn(GetAsyncTaskThreadAddress(), 0, Thread.Flags.from_flag(.async_task), null, 0);
+        storage.local.idle_thread = ThreadSpawn(0, 0, Thread.Flags.from_flag(.idle), null, 0);
+        storage.local.current_thread = storage.local.idle_thread;
+        storage.local.processor_ID = @intCast(u32, @atomicRmw(@TypeOf(scheduler.next_processor_id), &scheduler.next_processor_id, .Add, 1, .SeqCst));
+        if (storage.local.processor_ID >= max_processors) KernelPanic("cpu max count exceeded");
         cpu.kernel_processor_ID = @intCast(u8, storage.local.processor_ID);
         return storage;
     }
@@ -8160,7 +8182,7 @@ export fn ProcessSpawn(process_type: Process.Type) callconv(.C) ?*Process
             return null;
         });
 
-    process.id = @atomicRmw(@TypeOf(scheduler.next_processor_id), &scheduler.next_process_id, .Add, 1, .SeqCst);
+    process.id = @atomicRmw(@TypeOf(scheduler.next_process_id), &scheduler.next_process_id, .Add, 1, .SeqCst);
     process.address_space.reference_count.write_volatile(1);
     process.all_item.value = process;
     process.handle_count.write_volatile(1);
@@ -8821,6 +8843,18 @@ export fn PostContextSwitch(context: *InterruptContext, old_address_space: *Addr
 
 extern fn MMArchSafeCopy(destination_address: u64, source_address: u64, byte_count: u64) callconv(.C) bool;
 
+extern fn GetAsyncTaskThreadAddress() callconv(.C) u64;
+comptime
+{
+    asm(
+        \\.intel_syntax noprefix
+        \\.global GetAsyncTaskThreadAddress
+        \\.extern AsyncTaskThread
+        \\GetAsyncTaskThreadAddress:
+        \\mov rax, OFFSET AsyncTaskThread
+        \\ret
+    );
+}
 export fn AsyncTaskThread() callconv(.C) void
 {
     const local = GetLocalStorage().?;
