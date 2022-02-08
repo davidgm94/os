@@ -274,12 +274,12 @@ const BIOS = struct
 
             print("Reading MBR file...\n", .{});
             try self.copy_file(BIOS.mbr_output_path, MBR.length);
-            var partitions = @intToPtr(*align(1) [16]u32, @ptrToInt(&self.file_buffer.items[MBR.Offset.partition]));
-            partitions[0] = 0x80; // bootable
-            partitions[1] = 0x83; // type
-            partitions[2] = 0x800; // offset
-            partitions[3] = @intCast(u32, Image.size / 0x200) - 0x800; // sector count
-            fix_partition(partitions);
+            var partitions = @intToPtr(*align(1) [4][4]u32, @ptrToInt(&self.file_buffer.items[MBR.Offset.partition]));
+            partitions[0][0] = 0x80; // bootable
+            partitions[0][1] = 0x83; // type
+            partitions[0][2] = 0x800; // offset
+            partitions[0][3] = @intCast(u32, Image.size / 0x200) - 0x800; // sector count
+            fix_partition(&partitions[0]);
 
             // fill out 0s for this space
             const blank_size = 0x800 * 0x200 - 0x200;
@@ -326,7 +326,7 @@ const BIOS = struct
             self.file_buffer.items.len = std.mem.alignForward(self.file_buffer.items.len, alignment);
         }
 
-        fn fix_partition(partitions: *align(1) [16]u32) void
+        fn fix_partition(partitions: *align(1) [4]u32) void
         {
             const heads_per_cylinder = 256;
             const sectors_per_track = 63;
