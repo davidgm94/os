@@ -1104,7 +1104,7 @@ const Scheduler = extern struct
                         self.active_timers.remove(timer_item);
                         _ = timer.event.set(false);
 
-                        if (timer.callback) |callback|
+                        if (@intToPtr(?AsyncTask.Callback, timer.callback)) |callback|
                         {
                             timer.async_task.register(callback);
                         }
@@ -1782,7 +1782,7 @@ pub const Timer = extern struct
     async_task: AsyncTask,
     item: LinkedList(Timer).Item,
     trigger_time_ms: u64,
-    callback: ?AsyncTask.Callback,
+    callback: u64, //?AsyncTask.Callback,
     argument: u64,
 
     pub fn set_extended(self: *@This(), trigger_in_ms: u64, maybe_callback: ?AsyncTask.Callback, maybe_argument: u64) void
@@ -1794,7 +1794,7 @@ pub const Timer = extern struct
         self.event.reset();
 
         self.trigger_time_ms = trigger_in_ms + scheduler.time_ms;
-        self.callback = maybe_callback;
+        self.callback = @ptrToInt(maybe_callback);
         self.argument = maybe_argument;
         self.item.value = self;
 
@@ -1829,7 +1829,7 @@ pub const Timer = extern struct
     {
         scheduler.active_timers_spinlock.acquire();
 
-        if (self.callback != null) KernelPanic("timer with callback cannot be removed");
+        if (self.callback != 0) KernelPanic("timer with callback cannot be removed");
 
         if (self.item.list != null) scheduler.active_timers.remove(&self.item);
 
@@ -1838,11 +1838,6 @@ pub const Timer = extern struct
 };
 
 //extern fn TimeoutTimerHit(task: *AsyncTask) callconv(.C) void;
-
-export fn KTimerSet(timer: *Timer, trigger_in_ms: u64, callback: ?AsyncTask.Callback, argument: u64) callconv(.C) void
-{
-    timer.set_extended(trigger_in_ms, callback, argument);
-}
 
 export fn KTimerRemove(timer: *Timer) callconv(.C) void
 {
@@ -3795,7 +3790,7 @@ export fn KWriterLockAssertLocked(lock: *WriterLock) callconv(.C) void
 pub const AsyncTask = extern struct
 {
     item: SimpleList,
-    callback: ?Callback,
+    callback: u64, // ?Callback
 
     comptime
     {
@@ -3808,9 +3803,9 @@ pub const AsyncTask = extern struct
     {
         assert(@ptrToInt(callback) != 0);
         scheduler.async_task_spinlock.acquire();
-        if (self.callback == null)
+        if (self.callback == 0)
         {
-            self.callback = callback;
+            self.callback = @ptrToInt(callback);
             GetLocalStorage().?.async_task_list.insert(&self.item, false);
         }
         scheduler.async_task_spinlock.release();
@@ -6537,8 +6532,7 @@ export fn ThreadSetTemporaryAddressSpace(space: ?*AddressSpace) callconv(.C) voi
 }
 
 extern fn ProcessorSetAddressSpace(address_space: *ArchAddressSpace) callconv(.C) void;
-
-export fn ThreadKill(task: *AsyncTask) callconv(.C) void
+fn ThreadKill(task: *AsyncTask) void
 {
     const thread = @fieldParentPtr(Thread, "kill_async_task", task);
     ThreadSetTemporaryAddressSpace(thread.process.?.address_space);
@@ -6561,13 +6555,13 @@ export fn ThreadKill(task: *AsyncTask) callconv(.C) void
     CloseHandleToObject(@ptrToInt(thread), KernelObjectType.thread, 0);
 }
 
-export fn KRegisterAsyncTask(task: *AsyncTask, callback: AsyncTask.Callback) callconv(.C) void
+fn KRegisterAsyncTask(task: *AsyncTask, callback: AsyncTask.Callback) void
 {
     scheduler.async_task_spinlock.acquire();
 
-    if (task.callback == null)
+    if (task.callback == 0)
     {
-        task.callback = callback;
+        task.callback = @ptrToInt(callback);
         GetLocalStorage().?.async_task_list.insert(&task.item, false);
     }
 
@@ -7324,7 +7318,7 @@ export fn MMSpaceCloseReference(space: *AddressSpace) callconv(.C) void
     KRegisterAsyncTask(&space.remove_async_task, CloseReferenceTask);
 }
 
-fn CloseReferenceTask(task: *AsyncTask) callconv(.C) void
+fn CloseReferenceTask(task: *AsyncTask) void
 {
     const space = @fieldParentPtr(AddressSpace, "remove_async_task", task);
     MMArchFinalizeVAS(space);
@@ -8839,8 +8833,8 @@ export fn AsyncTaskThread() callconv(.C) void
             scheduler.async_task_spinlock.acquire();
             const item = first;
             const task = @fieldParentPtr(AsyncTask, "item", item);
-            const callback = task.callback.?;
-            task.callback = null;
+            const callback = @intToPtr(?AsyncTask.Callback, task.callback) orelse unreachable;
+            task.callback = 0;
             local.in_async_task = true;
             item.remove();
             scheduler.async_task_spinlock.release();
@@ -10092,7 +10086,7 @@ const AHCI = struct
             _ = MMFree(&_kernelMMSpace, identify_data, 0, false);
             MMPhysicalFree(identify_data_physical, false, 1);
 
-            KTimerSet(&self.timeout_timer, general_timeout, TimeoutTimerHit, @ptrToInt(self));
+            self.timeout_timer.set_extended(general_timeout, TimeoutTimerHit, @ptrToInt(self));
 
             for (self.ports) |*port, _port_i|
             {
@@ -10917,7 +10911,7 @@ export fn process_start_with_something(process: *Process) bool
     }
 }
 
-export fn TimeoutTimerHit(task: *AsyncTask) callconv(.C) void
+fn TimeoutTimerHit(task: *AsyncTask) void
 {
     const driver = @fieldParentPtr(AHCI.Driver, "timeout_timer", @fieldParentPtr(Timer, "async_task", task));
     const current_timestamp = scheduler.time_ms;
