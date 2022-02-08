@@ -956,11 +956,18 @@ comptime
 }
 
 var panic_buffer: [0x4000]u8 = undefined;
-extern fn KernelPanic(format: [*:0]const u8, ...) callconv(.C) noreturn;
+fn KernelPanic(format: []const u8) noreturn
+{
+    _ = format;
+    ProcessorDisableInterrupts();
+    _ = ProcessorSendIPI(kernel_panic_ipi, true, -1);
+    scheduler.panic.write_volatile(true);
+    ProcessorHalt();
+}
 pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace) noreturn
 {
     _ = stack_trace;
-    KernelPanic(@ptrCast([*:0]const u8, message.ptr));
+    KernelPanic(message);
 }
 
 pub const Spinlock = extern struct
@@ -5246,11 +5253,6 @@ export fn MMInitialise() callconv(.C) void
 extern fn SpawnMemoryThreads() callconv(.C) void;
 
 extern fn CreateMainThread() callconv(.C) void;
-export fn KThreadCreate(entry: u64, argument: u64) callconv(.C) bool
-{
-    return ThreadSpawn(entry, argument, Thread.Flags.empty(), null, 0) != null;
-}
-
 
 export fn ThreadSpawn(start_address: u64, argument1: u64, flags: Thread.Flags, maybe_process: ?*Process, argument2: u64) callconv(.C) ?*Thread
 {

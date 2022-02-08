@@ -1143,8 +1143,6 @@ struct MMSharedRegion {
 };
 
 extern "C" Thread* ThreadSpawn(uintptr_t startAddress, uintptr_t argument1 = 0, uint32_t flags = ES_FLAGS_DEFAULT, Process *process = nullptr, uintptr_t argument2 = 0);
-extern "C" bool KThreadCreate(uintptr_t startAddress, uintptr_t argument = 0);
-
 
 struct Bitset {
 	uint32_t *singleUsage;
@@ -1502,23 +1500,12 @@ void Scheduler::CreateProcessorThreads(CPULocalStorage *local) {
 	local->processorID = __sync_fetch_and_add(&nextProcessorID, 1);
 
 	if (local->processorID >= K_MAX_PROCESSORS) { 
-		KernelPanic("Scheduler::CreateProcessorThreads - Maximum processor count (%d) exceeded.\n", local->processorID);
+        TODO();
 	}
 }
 
 #define KERNEL_PANIC_IPI (0) // NMIs ignore the interrupt vector.
 extern "C" size_t ProcessorSendIPI(uintptr_t interrupt, bool nmi = false, int processorID = -1);
-void KernelPanic(const char *format, ...) {
-	ProcessorDisableInterrupts();
-	ProcessorSendIPI(KERNEL_PANIC_IPI, true);
-
-	// Disable synchronisation objects. The panic IPI must be sent before this, 
-	// so other processors don't start getting "mutex not correctly acquired" panics.
-	scheduler.panic = true; 
-
-    // @TODO @Log
-	ProcessorHalt();
-}
 
 extern "C" void ProcessLoadDesktopExecutable();
 extern "C" Thread* CreateLoadExecutableThread(Process* process)
@@ -1531,7 +1518,7 @@ extern "C" void KernelMain(uintptr_t);
 
 extern "C" void CreateMainThread()
 {
-    KThreadCreate((uintptr_t)KernelMain);
+    ThreadSpawn((uintptr_t)KernelMain, 0, ES_FLAGS_DEFAULT, 0, 0);
 }
 
 extern "C" uint64_t get_size(MMRegion* region)
