@@ -1085,7 +1085,7 @@ const Scheduler = extern struct
         {
             if (!local.scheduler_ready) return;
 
-            if (local.processor_ID != 0)
+            if (local.processor_ID == 0)
             {
                 self.time_ms = ArchGetTimeMs();
                 globalData.scheduler_time_ms.write_volatile(self.time_ms);
@@ -1131,7 +1131,7 @@ const Scheduler = extern struct
 
             if (!local.current_thread.?.executing.read_volatile()) KernelPanic("current thread marked as not executing");
 
-            const old_addres_space = if (local.current_thread.?.temporary_address_space) |tas| @ptrCast(*AddressSpace, tas) else local.current_thread.?.process.?.address_space;
+            const old_address_space = if (local.current_thread.?.temporary_address_space) |tas| @ptrCast(*AddressSpace, tas) else local.current_thread.?.process.?.address_space;
 
             local.current_thread.?.interrupt_context = context;
             local.current_thread.?.executing.write_volatile(false);
@@ -1150,7 +1150,7 @@ const Scheduler = extern struct
                 if (!keep_thread_alive and mutex.owner != null)
                 {
                     mutex.owner.?.blocked_thread_priorities[@intCast(u64, local.current_thread.?.priority)] += 1;
-                    SchedulerMaybeUpdateActiveList(mutex.owner.?);
+                    SchedulerMaybeUpdateActiveList(@ptrCast(*Thread, @alignCast(@alignOf(Thread), mutex.owner.?)));
                     mutex.blocked_threads.insert_at_end(&local.current_thread.?.item);
                 }
                 else
@@ -1232,7 +1232,7 @@ const Scheduler = extern struct
             const new_context = new_thread.interrupt_context;
             const address_space = if (new_thread.temporary_address_space) |tas| @ptrCast(*AddressSpace, tas) else new_thread.process.?.address_space;
             MMSpaceOpenReference(address_space);
-            ArchSwitchContext(new_context, &address_space.arch, new_thread.kernel_stack, new_thread, old_addres_space);
+            ArchSwitchContext(new_context, &address_space.arch, new_thread.kernel_stack, new_thread, old_address_space);
             KernelPanic("do context switch unexpectedly returned");
         }
     }
@@ -1369,7 +1369,11 @@ export fn SchedulerUnblockThread(unblocked_thread: *Thread, previous_mutex_owner
     TODO();
     //scheduler.unblock_thread(unblocked_thread, previous_mutex_owner);
 }
-extern fn SchedulerYield(context: *InterruptContext) callconv(.C) void;
+//extern fn SchedulerYield(context: *InterruptContext) callconv(.C) void;
+export fn SchedulerYield(context: *InterruptContext) callconv(.C) void
+{
+    scheduler.yield(context);
+}
 extern fn SchedulerCreateProcessorThreads(local: *LocalStorage) callconv(.C) void;
 
 const GlobalData = extern struct
@@ -1635,8 +1639,6 @@ pub fn LinkedList(comptime T: type) type
 
         pub fn remove(self: *@This(), item: *Item) void
         {
-            // @TODO: modchecks
-
             if (item.list) |list|
             {
                 if (list != self) KernelPanic("item is in another list");
@@ -1655,6 +1657,7 @@ pub fn LinkedList(comptime T: type) type
             item.previous = null;
             item.next = null;
             item.list = null;
+
             self.count -= 1;
             self.validate();
         }
@@ -3799,10 +3802,11 @@ pub const AsyncTask = extern struct
         assert(@sizeOf(AsyncTask) == @sizeOf(SimpleList) + 8);
     }
 
-    pub const Callback = fn (*@This()) callconv(.C) void;
+    pub const Callback = fn (*@This()) void;
 
     pub fn register(self: *@This(), callback: Callback) void
     {
+        assert(@ptrToInt(callback) != 0);
         scheduler.async_task_spinlock.acquire();
         if (self.callback == null)
         {
@@ -10666,7 +10670,7 @@ fn drivers_init() callconv(.C) void
     AHCI.Driver.init();
 }
 
-const Timeout = struct
+const Timeout = extern struct
 {
     end: u64,
 
