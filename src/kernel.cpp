@@ -1506,7 +1506,6 @@ void Scheduler::CreateProcessorThreads(CPULocalStorage *local) {
 
 #define KERNEL_PANIC_IPI (0) // NMIs ignore the interrupt vector.
 extern "C" size_t ProcessorSendIPI(uintptr_t interrupt, bool nmi = false, int processorID = -1);
-
 extern "C" void ProcessLoadDesktopExecutable();
 extern "C" Thread* CreateLoadExecutableThread(Process* process)
 {

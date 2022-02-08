@@ -9150,7 +9150,7 @@ export fn KernelInitialise() callconv(.C) void
     kernelProcess = ProcessSpawn(.kernel).?;
     MMInitialise();
     // Currently it felt impossible to pass arguments to this function
-    CreateMainThread();
+    _ = ThreadSpawn(GetKernelMainAddress(), 0, Thread.Flags.empty(), null, 0);
     ArchInitialise();
     scheduler.started.write_volatile(true);
 }
@@ -9162,6 +9162,19 @@ export fn KernelMain(_: u64) callconv(.C) void
 
     start_desktop_process();
     _ = shutdownEvent.wait();
+}
+
+extern fn GetKernelMainAddress() callconv(.C) u64;
+comptime 
+{
+    asm(
+        \\.intel_syntax noprefix
+        \\.extern KernelMain
+        \\.global GetKernelMainAddress
+        \\GetKernelMainAddress:
+        \\mov rax, OFFSET KernelMain
+        \\ret
+    );
 }
 
 fn arch_pci_read_config32(bus: u8, device: u8, function: u8, offset: u8) u32
@@ -10841,30 +10854,6 @@ export fn LoadDesktopELF(exe: *LoadedExecutable) Error
     return ES_SUCCESS;
 }
 
-export fn ProcessLoadDesktopExecutable() callconv(.C) void
-{
-    const process = GetCurrentThread().?.process.?;
-    var exe = zeroes(LoadedExecutable);
-    exe.is_desktop = true;
-    const result = LoadDesktopELF(&exe);
-    if (result != ES_SUCCESS) KernelPanic("Failed to load desktop executable");
-
-    const startup_information = @intToPtr(?*ProcessStartupInformation, MMStandardAllocate(process.address_space, @sizeOf(ProcessStartupInformation), Region.Flags.empty(), 0, true)) orelse KernelPanic("Can't allocate startup information");
-    startup_information.is_desktop = true;
-    startup_information.is_bundle = false;
-    startup_information.application_start_address = exe.start_address;
-    startup_information.tls_image_start = exe.tls_image_start;
-    startup_information.tls_image_byte_count = exe.tls_image_byte_count;
-    startup_information.tls_byte_count = exe.tls_byte_count;
-    startup_information.timestamp_ticks_per_ms = timeStampTicksPerMs;
-    startup_information.process_create_data = process.data;
-    
-    var thread_flags = Thread.Flags.from_flag(.userland);
-    if (process.creation_flags.contains(.paused)) thread_flags = thread_flags.or_flag(.paused);
-    process.executable_state = .loaded;
-    process.executable_main_thread = ThreadSpawn(exe.start_address, @ptrToInt(startup_information), thread_flags, process, 0) orelse KernelPanic("Couldn't create main thread for executable");
-    _ = process.executable_load_attempt_complete.set(false);
-}
 
 // ProcessStartWithNode
 export fn process_start_with_something(process: *Process) bool
@@ -10893,7 +10882,7 @@ export fn process_start_with_something(process: *Process) bool
 
     _ = scheduler.all_processes_mutex.acquire();
     scheduler.all_processes.insert_at_end(&process.all_item);
-    const load_executable_thread = CreateLoadExecutableThread(process);
+    const load_executable_thread = ThreadSpawn(GetProcesssLoadDesktopExecutableAddress(), 0, Thread.Flags.empty(), process, 0);
     scheduler.all_processes_mutex.release();
 
     if (load_executable_thread) |thread|
@@ -10908,6 +10897,44 @@ export fn process_start_with_something(process: *Process) bool
         CloseHandleToObject(@ptrToInt(process), .process, 0);
         return false;
     }
+}
+
+extern fn GetProcesssLoadDesktopExecutableAddress() callconv(.C) u64;
+comptime
+{
+    asm(
+        \\.intel_syntax noprefix
+        \\.extern ProcessLoadDesktopExecutable
+        \\.global GetProcesssLoadDesktopExecutableAddress
+        \\GetProcesssLoadDesktopExecutableAddress:
+        \\mov rax, OFFSET ProcessLoadDesktopExecutable
+        \\ret
+    );
+}
+
+export fn ProcessLoadDesktopExecutable() callconv(.C) void
+{
+    const process = GetCurrentThread().?.process.?;
+    var exe = zeroes(LoadedExecutable);
+    exe.is_desktop = true;
+    const result = LoadDesktopELF(&exe);
+    if (result != ES_SUCCESS) KernelPanic("Failed to load desktop executable");
+
+    const startup_information = @intToPtr(?*ProcessStartupInformation, MMStandardAllocate(process.address_space, @sizeOf(ProcessStartupInformation), Region.Flags.empty(), 0, true)) orelse KernelPanic("Can't allocate startup information");
+    startup_information.is_desktop = true;
+    startup_information.is_bundle = false;
+    startup_information.application_start_address = exe.start_address;
+    startup_information.tls_image_start = exe.tls_image_start;
+    startup_information.tls_image_byte_count = exe.tls_image_byte_count;
+    startup_information.tls_byte_count = exe.tls_byte_count;
+    startup_information.timestamp_ticks_per_ms = timeStampTicksPerMs;
+    startup_information.process_create_data = process.data;
+    
+    var thread_flags = Thread.Flags.from_flag(.userland);
+    if (process.creation_flags.contains(.paused)) thread_flags = thread_flags.or_flag(.paused);
+    process.executable_state = .loaded;
+    process.executable_main_thread = ThreadSpawn(exe.start_address, @ptrToInt(startup_information), thread_flags, process, 0) orelse KernelPanic("Couldn't create main thread for executable");
+    _ = process.executable_load_attempt_complete.set(false);
 }
 
 fn TimeoutTimerHit(task: *AsyncTask) void
