@@ -893,13 +893,13 @@ extern "C"
     void SchedulerAddActiveThread(Thread *thread, bool start); // Add an active thread into the queue.
     int8_t SchedulerGetThreadEffectivePriority(Thread *thread);
     Thread * SchedulerPickThread(CPULocalStorage *local); // Pick the next thread to execute.
+    void SchedulerMaybeUpdateActiveList(Thread *thread); // After changing the priority of a thread, call this to move it to the correct active thread queue if needed.
 }
 
 extern "C"
 {
     void SchedulerYield(InterruptContext *context);
     void SchedulerCreateProcessorThreads(CPULocalStorage *local);
-    void SchedulerMaybeUpdateActiveList(Thread *thread); // After changing the priority of a thread, call this to move it to the correct active thread queue if needed.
     void SchedulerUnblockThread(Thread *unblockedThread, Thread *previousMutexOwner = nullptr);
 }
 
@@ -1010,10 +1010,10 @@ extern "C"
     {
         scheduler.Yield(context);
     }
-    void SchedulerMaybeUpdateActiveList(Thread *thread) // After changing the priority of a thread, call this to move it to the correct active thread queue if needed.
-    {
-        scheduler.MaybeUpdateActiveList(thread);
-    }
+    //void SchedulerMaybeUpdateActiveList(Thread *thread) // After changing the priority of a thread, call this to move it to the correct active thread queue if needed.
+    //{
+        //scheduler.MaybeUpdateActiveList(thread);
+    //}
     void SchedulerUnblockThread(Thread *unblockedThread, Thread *previousMutexOwner)
     {
         scheduler.UnblockThread(unblockedThread, previousMutexOwner);
@@ -1300,45 +1300,45 @@ struct IRQHandler {
 	//return local->idleThread;
 //}
 
-void Scheduler::MaybeUpdateActiveList(Thread *thread) {
-	// TODO Is this correct with regards to paused threads?
+//void Scheduler::MaybeUpdateActiveList(Thread *thread) {
+	//// TODO Is this correct with regards to paused threads?
 
-	if (thread->type == THREAD_ASYNC_TASK) {
-		// Asynchronous task threads do not go in the activeThreads lists.
-		return;
-	}
+	//if (thread->type == THREAD_ASYNC_TASK) {
+		//// Asynchronous task threads do not go in the activeThreads lists.
+		//return;
+	//}
 
-	if (thread->type != THREAD_NORMAL) {
-		KernelPanic("Scheduler::MaybeUpdateActiveList - Trying to update the active list of a non-normal thread %x.\n", thread);
-	}
+	//if (thread->type != THREAD_NORMAL) {
+		//KernelPanic("Scheduler::MaybeUpdateActiveList - Trying to update the active list of a non-normal thread %x.\n", thread);
+	//}
 
-	KSpinlockAssertLocked(&dispatchSpinlock);
+	//KSpinlockAssertLocked(&dispatchSpinlock);
 
-	if (thread->state != THREAD_ACTIVE || thread->executing) {
-		// The thread is not currently in an active list, 
-		// so it'll end up in the correct activeThreads list when it becomes active.
-		return;
-	}
+	//if (thread->state != THREAD_ACTIVE || thread->executing) {
+		//// The thread is not currently in an active list, 
+		//// so it'll end up in the correct activeThreads list when it becomes active.
+		//return;
+	//}
 
-	if (!thread->item.list) {
-		KernelPanic("Scheduler::MaybeUpdateActiveList - Despite thread %x being active and not executing, it is not in an activeThreads lists.\n", thread);
-	}
+	//if (!thread->item.list) {
+		//KernelPanic("Scheduler::MaybeUpdateActiveList - Despite thread %x being active and not executing, it is not in an activeThreads lists.\n", thread);
+	//}
 
-	int8_t effectivePriority = SchedulerGetThreadEffectivePriority(thread);
+	//int8_t effectivePriority = SchedulerGetThreadEffectivePriority(thread);
 
-	if (&activeThreads[effectivePriority] == thread->item.list) {
-		// The thread's effective priority has not changed.
-		// We don't need to do anything.
-		return;
-	}
+	//if (&activeThreads[effectivePriority] == thread->item.list) {
+		//// The thread's effective priority has not changed.
+		//// We don't need to do anything.
+		//return;
+	//}
 
-	// Remove the thread from its previous active list.
-	thread->item.RemoveFromList();
+	//// Remove the thread from its previous active list.
+	//thread->item.RemoveFromList();
 
-	// Add it to the start of its new active list.
-	// TODO I'm not 100% sure we want to always put it at the start.
-	activeThreads[effectivePriority].InsertStart(&thread->item);
-}
+	//// Add it to the start of its new active list.
+	//// TODO I'm not 100% sure we want to always put it at the start.
+	//activeThreads[effectivePriority].InsertStart(&thread->item);
+//}
 
 void Scheduler::Yield(InterruptContext *context) {
 	CPULocalStorage *local = GetLocalStorage();

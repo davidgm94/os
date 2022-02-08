@@ -1290,11 +1290,26 @@ const Scheduler = extern struct
 
         return local.idle_thread;
     }
+
+    fn maybe_update_list(self: *@This(), thread: *Thread) void
+    {
+        if (thread.type == .async_task) return;
+        if (thread.type != .normal) KernelPanic("trying to update the active list of a non-normal thread");
+
+        self.dispatch_spinlock.assert_locked();
+
+        if (thread.state.read_volatile() != .active or thread.executing.read_volatile()) return;
+        if (thread.item.list == null) KernelPanic("Despite thread being active and not executing, it is not in an active thread list");
+
+        const effective_priority = @intCast(u64, SchedulerGetThreadEffectivePriority(thread));
+        if (&self.active_threads[effective_priority] == thread.item.list) return;
+        thread.item.remove_from_list();
+        self.active_threads[effective_priority].insert_at_start(&thread.item);
+    }
 };
 
 extern fn ArchSwitchContext(context: *InterruptContext, arch_address_space: *ArchAddressSpace, thread_kernel_stack: u64, new_thread: *Thread, old_address_space: *AddressSpace) callconv(.C) void;
 
-extern fn SchedulerCreateProcessorThreads(local: *LocalStorage) callconv(.C) void;
 export fn SchedulerNotifyObject(blocked_threads: *LinkedList(Thread), unblock_all: bool, previous_mutex_owner: ?*Thread) callconv(.C) void
 {
     scheduler.dispatch_spinlock.assert_locked();
@@ -1326,9 +1341,14 @@ export fn SchedulerPickThread(local: *LocalStorage) callconv(.C) ?*Thread
 {
     return scheduler.pick_thread(local);
 }
+export fn SchedulerMaybeUpdateActiveList(thread: *Thread) callconv(.C) void
+{
+    scheduler.maybe_update_list(thread);
+}
 
-extern fn SchedulerMaybeUpdateActiveList(thread: *align(1) volatile Thread) callconv(.C) void;
 extern fn SchedulerUnblockThread(thread: *Thread, previous_mutex_owner: ?*Thread) callconv(.C) void;
+extern fn SchedulerYield(context: *InterruptContext) callconv(.C) void;
+extern fn SchedulerCreateProcessorThreads(local: *LocalStorage) callconv(.C) void;
 
 const GlobalData = extern struct
 {
@@ -11255,7 +11275,6 @@ export fn HeapCalculateIndex(size: u64) callconv(.C) u64
     return msb - 4;
 }
 
-extern fn SchedulerYield(context: *InterruptContext) callconv(.C) void;
 export fn get_size_zig() callconv(.C) u64
 {
     return @sizeOf(Scheduler);
