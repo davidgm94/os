@@ -1306,6 +1306,22 @@ const Scheduler = extern struct
         thread.item.remove_from_list();
         self.active_threads[effective_priority].insert_at_start(&thread.item);
     }
+
+    fn unblock_thread(self: *@This(), unblocked_thread: *Thread, previous_mutex_owner: ?*Thread) void
+    {
+        _ = previous_mutex_owner;
+        self.dispatch_spinlock.assert_locked();
+        switch (unblocked_thread.state.read_volatile())
+        {
+            .waiting_mutex => TODO(),
+            .waiting_event => TODO(),
+            .waiting_writer_lock => TODO(),
+            else => KernelPanic("unexpected thread state"),
+        }
+
+        unblocked_thread.state.write_volatile(.active);
+        if (!unblocked_thread.executing.read_volatile()) SchedulerAddActiveThread(unblocked_thread, true);
+    }
 };
 
 extern fn ArchSwitchContext(context: *InterruptContext, arch_address_space: *ArchAddressSpace, thread_kernel_stack: u64, new_thread: *Thread, old_address_space: *AddressSpace) callconv(.C) void;
@@ -1346,7 +1362,13 @@ export fn SchedulerMaybeUpdateActiveList(thread: *Thread) callconv(.C) void
     scheduler.maybe_update_list(thread);
 }
 
-extern fn SchedulerUnblockThread(thread: *Thread, previous_mutex_owner: ?*Thread) callconv(.C) void;
+export fn SchedulerUnblockThread(unblocked_thread: *Thread, previous_mutex_owner: ?*Thread) callconv(.C) void
+{
+    _ = unblocked_thread;
+    _ = previous_mutex_owner;
+    TODO();
+    //scheduler.unblock_thread(unblocked_thread, previous_mutex_owner);
+}
 extern fn SchedulerYield(context: *InterruptContext) callconv(.C) void;
 extern fn SchedulerCreateProcessorThreads(local: *LocalStorage) callconv(.C) void;
 
