@@ -1495,8 +1495,6 @@ pub const Thread = extern struct
     interrupt_context: *InterruptContext,
     last_known_execution_address: u64, // @TODO: for debugging
 
-    name: [*:0]const u8,
-
     pub const Priority = enum(i8)
     {
         normal = 0,
@@ -5248,13 +5246,13 @@ export fn MMInitialise() callconv(.C) void
 extern fn SpawnMemoryThreads() callconv(.C) void;
 
 extern fn CreateMainThread() callconv(.C) void;
-export fn KThreadCreate(name: [*:0]const u8, entry: fn (u64) callconv(.C) void, argument: u64) callconv(.C) bool
+export fn KThreadCreate(entry: u64, argument: u64) callconv(.C) bool
 {
-    return ThreadSpawn(name, @ptrToInt(entry), argument, Thread.Flags.empty(), null, 0) != null;
+    return ThreadSpawn(entry, argument, Thread.Flags.empty(), null, 0) != null;
 }
 
 
-export fn ThreadSpawn(name: [*:0]const u8, start_address: u64, argument1: u64, flags: Thread.Flags, maybe_process: ?*Process, argument2: u64) callconv(.C) ?*Thread
+export fn ThreadSpawn(start_address: u64, argument1: u64, flags: Thread.Flags, maybe_process: ?*Process, argument2: u64) callconv(.C) ?*Thread
 {
     if (start_address == 0 and !flags.contains(.idle)) KernelPanic("Start address is 0");
     const userland = flags.contains(.userland);
@@ -5305,7 +5303,6 @@ export fn ThreadSpawn(name: [*:0]const u8, start_address: u64, argument1: u64, f
         thread.handle_count.write_volatile(2);
         thread.is_kernel_thread = !userland;
         thread.priority = if (flags.contains(.low_priority)) @enumToInt(Thread.Priority.low) else @enumToInt(Thread.Priority.normal);
-        thread.name = name;
         thread.kernel_stack_base = kernel_stack;
         thread.user_stack_base = if (userland) user_stack else 0;
         thread.user_stack_reserve = user_stack_reserve;
@@ -10863,7 +10860,7 @@ export fn ProcessLoadDesktopExecutable() callconv(.C) void
     var thread_flags = Thread.Flags.from_flag(.userland);
     if (process.creation_flags.contains(.paused)) thread_flags = thread_flags.or_flag(.paused);
     process.executable_state = .loaded;
-    process.executable_main_thread = ThreadSpawn("MainThread", exe.start_address, @ptrToInt(startup_information), thread_flags, process, 0) orelse KernelPanic("Couldn't create main thread for executable");
+    process.executable_main_thread = ThreadSpawn(exe.start_address, @ptrToInt(startup_information), thread_flags, process, 0) orelse KernelPanic("Couldn't create main thread for executable");
     _ = process.executable_load_attempt_complete.set(false);
 }
 

@@ -354,16 +354,16 @@ struct KWriterLock { // One writer or many readers.
 #define K_LOCK_SHARED (false)
 
 struct KMutex { // Mutual exclusion. Thread-owned.
-	struct Thread *volatile owner;
+	Thread *volatile owner;
 	LinkedList<struct Thread> blockedThreads;
 };
 
 #define PHYSICAL_MEMORY_MANIPULATION_REGION_PAGES (16)
 #define POOL_CACHE_COUNT                          (16)
 struct CPULocalStorage {
-	struct Thread *currentThread;          // The currently executing thread on this CPU.
-	struct Thread *idleThread;             // The CPU's idle thread.
-	struct Thread *asyncTaskThread;        // The CPU's async task thread, used to process the asyncTaskList.
+	Thread *currentThread;          // The currently executing thread on this CPU.
+	Thread *idleThread;             // The CPU's idle thread.
+	Thread *asyncTaskThread;        // The CPU's async task thread, used to process the asyncTaskList.
 	struct InterruptContext *panicContext; // The interrupt context saved from a kernel panic IPI.
 	bool irqSwitchThread;                  // The CPU should call Scheduler::Yield after the IRQ handler exits.
 	bool schedulerReady;                   // The CPU is ready to execute threads from the pre-emptive scheduler.
@@ -585,12 +585,6 @@ struct Thread {
 
 	InterruptContext *interruptContext;  // TODO Store the userland interrupt context instead?
 	uintptr_t lastKnownExecutionAddress; // For debugging.
-
-#ifdef ENABLE_POSIX_SUBSYSTEM
-	struct POSIXThread *posixData;
-#endif
-
-	const char *cName;
 };
 
 
@@ -1148,8 +1142,8 @@ struct MMSharedRegion {
 	void *data;
 };
 
-extern "C" Thread* ThreadSpawn(const char *cName, uintptr_t startAddress, uintptr_t argument1 = 0, uint32_t flags = ES_FLAGS_DEFAULT, Process *process = nullptr, uintptr_t argument2 = 0);
-extern "C" bool KThreadCreate(const char *cName, void (*startAddress)(uintptr_t), uintptr_t argument = 0);
+extern "C" Thread* ThreadSpawn(uintptr_t startAddress, uintptr_t argument1 = 0, uint32_t flags = ES_FLAGS_DEFAULT, Process *process = nullptr, uintptr_t argument2 = 0);
+extern "C" bool KThreadCreate(uintptr_t startAddress, uintptr_t argument = 0);
 
 
 struct Bitset {
@@ -1226,8 +1220,8 @@ extern "C" void MMBalanceThread();
 
 extern "C" void SpawnMemoryThreads()
 {
-    pmm.zeroPageThread = ThreadSpawn("MMZero", (uintptr_t) MMZeroPageThread, 0, SPAWN_THREAD_LOW_PRIORITY);
-    ThreadSpawn("MMBalance", (uintptr_t) MMBalanceThread, 0, ES_FLAGS_DEFAULT)->isPageGenerator = true;
+    pmm.zeroPageThread = ThreadSpawn((uintptr_t) MMZeroPageThread, 0, SPAWN_THREAD_LOW_PRIORITY);
+    ThreadSpawn((uintptr_t) MMBalanceThread, 0, ES_FLAGS_DEFAULT)->isPageGenerator = true;
     //ThreadSpawn("MMObjTrim", (uintptr_t) MMObjectCacheTrimThread, 0, ES_FLAGS_DEFAULT);
 }
 
@@ -1503,8 +1497,8 @@ struct IRQHandler {
 extern "C" void AsyncTaskThread();
 
 void Scheduler::CreateProcessorThreads(CPULocalStorage *local) {
-	local->asyncTaskThread = ThreadSpawn("AsyncTasks", (uintptr_t) AsyncTaskThread, 0, SPAWN_THREAD_ASYNC_TASK);
-	local->currentThread = local->idleThread = ThreadSpawn("Idle", 0, 0, SPAWN_THREAD_IDLE);
+	local->asyncTaskThread = ThreadSpawn((uintptr_t) AsyncTaskThread, 0, SPAWN_THREAD_ASYNC_TASK);
+	local->currentThread = local->idleThread = ThreadSpawn(0, 0, SPAWN_THREAD_IDLE);
 	local->processorID = __sync_fetch_and_add(&nextProcessorID, 1);
 
 	if (local->processorID >= K_MAX_PROCESSORS) { 
@@ -1529,7 +1523,7 @@ void KernelPanic(const char *format, ...) {
 extern "C" void ProcessLoadDesktopExecutable();
 extern "C" Thread* CreateLoadExecutableThread(Process* process)
 {
-    Thread *loadExecutableThread = ThreadSpawn("ExecLoad", (uintptr_t) ProcessLoadDesktopExecutable, 0, ES_FLAGS_DEFAULT, process);
+    Thread *loadExecutableThread = ThreadSpawn((uintptr_t) ProcessLoadDesktopExecutable, 0, ES_FLAGS_DEFAULT, process);
     return loadExecutableThread;
 }
 
@@ -1537,7 +1531,7 @@ extern "C" void KernelMain(uintptr_t);
 
 extern "C" void CreateMainThread()
 {
-    KThreadCreate("KernelMain", KernelMain);
+    KThreadCreate((uintptr_t)KernelMain);
 }
 
 extern "C" uint64_t get_size(MMRegion* region)
