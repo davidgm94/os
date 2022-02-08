@@ -886,11 +886,17 @@ struct KTimer {
 	KAsyncTaskCallback callback;
 	EsGeneric argument;
 };
+
+// DONE
+extern "C"
+{
+    void SchedulerAddActiveThread(Thread *thread, bool start); // Add an active thread into the queue.
+}
+
 extern "C"
 {
     void SchedulerYield(InterruptContext *context);
     void SchedulerCreateProcessorThreads(CPULocalStorage *local);
-    void SchedulerAddActiveThread(Thread *thread, bool start); // Add an active thread into the queue.
     void SchedulerMaybeUpdateActiveList(Thread *thread); // After changing the priority of a thread, call this to move it to the correct active thread queue if needed.
     void SchedulerUnblockThread(Thread *unblockedThread, Thread *previousMutexOwner = nullptr);
     Thread * SchedulerPickThread(CPULocalStorage *local); // Pick the next thread to execute.
@@ -900,40 +906,6 @@ extern "C"
 struct Scheduler {
 	void Yield(InterruptContext *context);
 	void CreateProcessorThreads(CPULocalStorage *local);
-	void AddActiveThread(Thread *thread, bool start /* put it at the start of the active list */) // Add an active thread into the queue.
-    {
-        if (thread->type == THREAD_ASYNC_TASK) {
-            // An asynchronous task thread was unblocked.
-            // It will be run immediately, so there's no need to add it to the active thread list.
-            return;
-        }
-
-        KSpinlockAssertLocked(&dispatchSpinlock);
-
-        if (thread->state != THREAD_ACTIVE) {
-            KernelPanic("Scheduler::AddActiveThread - Thread %d not active\n", thread->id);
-        } else if (thread->executing) {
-            KernelPanic("Scheduler::AddActiveThread - Thread %d executing\n", thread->id);
-        } else if (thread->type != THREAD_NORMAL) {
-            KernelPanic("Scheduler::AddActiveThread - Thread %d has type %d\n", thread->id, thread->type);
-        } else if (thread->item.list) {
-            KernelPanic("Scheduler::AddActiveThread - Thread %d is already in queue %x.\n", thread->id, thread->item.list);
-        }
-
-        if (thread->paused && thread->terminatableState == THREAD_TERMINATABLE) {
-            // The thread is paused, so we can put it into the paused queue until it is resumed.
-            pausedThreads.InsertStart(&thread->item);
-        } else {
-            int8_t effectivePriority = SchedulerGetThreadEffectivePriority(thread);
-
-            if (start) {
-                activeThreads[effectivePriority].InsertStart(&thread->item);
-            } else {
-                activeThreads[effectivePriority].InsertEnd(&thread->item);
-            }
-        }
-
-    }
 	void MaybeUpdateActiveList(Thread *thread); // After changing the priority of a thread, call this to move it to the correct active thread queue if needed.
 
     void UnblockThread(Thread *unblockedThread, Thread *previousMutexOwner = nullptr) {
@@ -1039,10 +1011,6 @@ extern "C"
     {
         scheduler.CreateProcessorThreads(local);
     }
-    void SchedulerAddActiveThread(Thread *thread, bool start) // Add an active thread into the queue.
-    {
-        scheduler.AddActiveThread(thread, start);
-    }
     void SchedulerMaybeUpdateActiveList(Thread *thread) // After changing the priority of a thread, call this to move it to the correct active thread queue if needed.
     {
         scheduler.MaybeUpdateActiveList(thread);
@@ -1055,10 +1023,10 @@ extern "C"
     {
         return scheduler.PickThread(local);
     }
-    int8_t SchedulerGetThreadEffectivePriority(Thread *thread)
-    {
-        return scheduler.GetThreadEffectivePriority(thread);
-    }
+    //int8_t SchedulerGetThreadEffectivePriority(Thread *thread)
+    //{
+        //return scheduler.GetThreadEffectivePriority(thread);
+    //}
 }
 
 struct MMArchVAS {
@@ -1297,21 +1265,21 @@ struct IRQHandler {
 };
 
 
-int8_t Scheduler::GetThreadEffectivePriority(Thread *thread) {
-	KSpinlockAssertLocked(&dispatchSpinlock);
+//int8_t Scheduler::GetThreadEffectivePriority(Thread *thread) {
+	//KSpinlockAssertLocked(&dispatchSpinlock);
 
-	for (int8_t i = 0; i < thread->priority; i++) {
-		if (thread->blockedThreadPriorities[i]) {
-			// A thread is blocking on a resource owned by this thread,
-			// and the blocking thread has a higher priority than this thread.
-			// Therefore, this thread should assume that higher priority,
-			// until it releases the resource.
-			return i;
-		}
-	}
+	//for (int8_t i = 0; i < thread->priority; i++) {
+		//if (thread->blockedThreadPriorities[i]) {
+			//// A thread is blocking on a resource owned by this thread,
+			//// and the blocking thread has a higher priority than this thread.
+			//// Therefore, this thread should assume that higher priority,
+			//// until it releases the resource.
+			//return i;
+		//}
+	//}
 
-	return thread->priority;
-}
+	//return thread->priority;
+//}
 
 Thread *Scheduler::PickThread(CPULocalStorage *local) {
 	KSpinlockAssertLocked(&dispatchSpinlock);

@@ -1236,20 +1236,43 @@ const Scheduler = extern struct
             KernelPanic("do context switch unexpectedly returned");
         }
     }
+
+    fn add_active_thread(self: *@This(), thread: *Thread, start: bool) void
+    {
+        if (thread.type == .async_task) return;
+        if (thread.state.read_volatile() != .active) KernelPanic("thread not active")
+        else if (thread.executing.read_volatile()) KernelPanic("thread executing")
+        else if (thread.type != .normal) KernelPanic("thread not normal")
+        else if (thread.item.list != null) KernelPanic("thread already in queue");
+
+        if (thread.paused.read_volatile() and thread.terminatable_state.read_volatile() == .terminatable)
+        {
+            self.paused_threads.insert_at_start(&thread.item);
+        }
+        else
+        {
+            const effective_priority = @intCast(u64, SchedulerGetThreadEffectivePriority(thread));
+            if (start) self.active_threads[effective_priority].insert_at_start(&thread.item)
+            else self.active_threads[effective_priority].insert_at_end(&thread.item);
+        }
+    }
+
+    fn get_thread_effective_priority(self: *@This(), thread: *Thread) i8
+    {
+        self.dispatch_spinlock.assert_locked();
+
+        for (thread.blocked_thread_priorities[0..@intCast(u64, thread.priority)]) |priority, i|
+        {
+            if (priority != 0) return @intCast(i8, i);
+        }
+
+        return thread.priority;
+    }
 };
 
 extern fn ArchSwitchContext(context: *InterruptContext, arch_address_space: *ArchAddressSpace, thread_kernel_stack: u64, new_thread: *Thread, old_address_space: *AddressSpace) callconv(.C) void;
 
 extern fn SchedulerCreateProcessorThreads(local: *LocalStorage) callconv(.C) void;
-//export fn SchedulerCreateProcessorThreads(local: *LocalStorage) callconv(.C) void
-//{
-    //local.async_task_thread = ThreadSpawn("AsyncTasks", @ptrToInt(AsyncTaskThread), 0, Thread.Flags.from_flag(.async_task), null, 0) ;
-    //local.current_thread = ThreadSpawn("Idle", 0, 0, Thread.Flags.from_flag(.idle), null, 0);
-    //local.idle_thread = local.current_thread;
-    //local.processor_ID = @intCast(u32, @atomicRmw(u64, &scheduler.next_processor_id, .Add, 1, .SeqCst));
-
-    //if (local.processor_ID >= max_processors) KernelPanic("maximum processor count exceeded");
-//}
 export fn SchedulerNotifyObject(blocked_threads: *LinkedList(Thread), unblock_all: bool, previous_mutex_owner: ?*Thread) callconv(.C) void
 {
     scheduler.dispatch_spinlock.assert_locked();
@@ -1269,8 +1292,18 @@ export fn SchedulerNotifyObject(blocked_threads: *LinkedList(Thread), unblock_al
         if (!(unblock_all and unblocked_item != null)) break;
     }
 }
+export fn SchedulerAddActiveThread(thread: *Thread, start: bool) callconv(.C) void
+{
+    scheduler.add_active_thread(thread, start);
+}
+export fn SchedulerGetThreadEffectivePriority(thread: *Thread) callconv(.C) i8
+{
+    return scheduler.get_thread_effective_priority(thread);
+}
 
 extern fn SchedulerPickThread(local: *LocalStorage) callconv(.C) ?*Thread;
+extern fn SchedulerMaybeUpdateActiveList(thread: *align(1) volatile Thread) callconv(.C) void;
+extern fn SchedulerUnblockThread(thread: *Thread, previous_mutex_owner: ?*Thread) callconv(.C) void;
 
 const GlobalData = extern struct
 {
@@ -1289,10 +1322,6 @@ const GlobalData = extern struct
 export var mmGlobalDataRegion: *SharedRegion = undefined;
 export var globalData: *GlobalData = undefined;
 
-extern fn SchedulerAddActiveThread(thread: *Thread, start: bool) callconv(.C) void;
-extern fn SchedulerMaybeUpdateActiveList(thread: *align(1) volatile Thread) callconv(.C) void;
-extern fn SchedulerUnblockThread(thread: *Thread, previous_mutex_owner: ?*Thread) callconv(.C) void;
-extern fn SchedulerGetThreadEffectivePriority(thread: *Thread) callconv(.C) i8;
 
 const LocalStorage = extern struct
 {
