@@ -4564,97 +4564,97 @@ pub const Range = extern struct
             }
         }
 
-        pub fn set(self: *@This(), from: u64, to: u64, maybe_delta: ?*i64, modify: bool) bool
-        {
-            if (to <= from) KernelPanic("invalid range");
+        //pub fn set(self: *@This(), from: u64, to: u64, maybe_delta: ?*i64, modify: bool) bool
+        //{
+            //if (to <= from) KernelPanic("invalid range");
 
-            if (self.ranges.length() == 0)
-            {
-                if (maybe_delta) |delta|
-                {
-                    if (from >= self.contiguous) delta.* = @intCast(i64, to) - @intCast(i64, from)
-                    else if (to >= self.contiguous) delta.* = @intCast(i64, to) - @intCast(i64, self.contiguous)
-                    else delta.* = 0;
-                }
+            //if (self.ranges.length() == 0)
+            //{
+                //if (maybe_delta) |delta|
+                //{
+                    //if (from >= self.contiguous) delta.* = @intCast(i64, to) - @intCast(i64, from)
+                    //else if (to >= self.contiguous) delta.* = @intCast(i64, to) - @intCast(i64, self.contiguous)
+                    //else delta.* = 0;
+                //}
 
-                if (!modify) return true;
+                //if (!modify) return true;
 
-                if (from <= self.contiguous)
-                {
-                    if (to > self.contiguous) self.contiguous = to;
-                    return true;
-                }
+                //if (from <= self.contiguous)
+                //{
+                    //if (to > self.contiguous) self.contiguous = to;
+                    //return true;
+                //}
 
-                if (!self.normalize()) return false;
-            }
+                //if (!self.normalize()) return false;
+            //}
 
-            const new_range = blk:
-            {
-                var range = std.mem.zeroes(Range);
-                range.from = if (self.find(from, true)) |left| left.from else from;
-                range.to = if (self.find(to, true)) |right| right.to else to;
-                break :blk range;
-            };
+            //const new_range = blk:
+            //{
+                //var range = std.mem.zeroes(Range);
+                //range.from = if (self.find(from, true)) |left| left.from else from;
+                //range.to = if (self.find(to, true)) |right| right.to else to;
+                //break :blk range;
+            //};
 
-            const index = blk:
-            {
-                if (!modify) break :blk @as(u64, 0);
+            //const index = blk:
+            //{
+                //if (!modify) break :blk @as(u64, 0);
 
-                if (self.ranges.length() != 0)
-                {
-                    for (self.ranges.get_slice()) |range, range_i|
-                    {
-                        if (range.to > new_range.from)
-                        {
-                            if (self.ranges.insert(new_range, range_i) == null)
-                            {
-                                return false;
-                            }
+                //if (self.ranges.length() != 0)
+                //{
+                    //for (self.ranges.get_slice()) |range, range_i|
+                    //{
+                        //if (range.to > new_range.from)
+                        //{
+                            //if (self.ranges.insert(new_range, range_i) == null)
+                            //{
+                                //return false;
+                            //}
 
-                            break :blk range_i + 1;
-                        }
-                    }
-                }
+                            //break :blk range_i + 1;
+                        //}
+                    //}
+                //}
 
-                const result_index = self.ranges.length();
-                if (self.ranges.insert(new_range, result_index) == null)
-                {
-                    return false;
-                }
-                break :blk result_index + 1;
-            };
+                //const result_index = self.ranges.length();
+                //if (self.ranges.insert(new_range, result_index) == null)
+                //{
+                    //return false;
+                //}
+                //break :blk result_index + 1;
+            //};
 
-            var delete_start = index;
-            var delete_count: u64 = 0;
-            var delete_total: u64 = 0;
+            //var delete_start = index;
+            //var delete_count: u64 = 0;
+            //var delete_total: u64 = 0;
 
-            for (self.ranges.get_slice()) |range|
-            {
-                const overlap =
-                    (range.from >= new_range.from and range.from <= new_range.to) or
-                    (range.to >= new_range.from and range.to <= new_range.to);
-                if (overlap)
-                {
-                    delete_count += 1;
-                    delete_total += range.to - range.from;
-                }
-                else
-                {
-                    break;
-                }
-            }
+            //for (self.ranges.get_slice()) |range|
+            //{
+                //const overlap =
+                    //(range.from >= new_range.from and range.from <= new_range.to) or
+                    //(range.to >= new_range.from and range.to <= new_range.to);
+                //if (overlap)
+                //{
+                    //delete_count += 1;
+                    //delete_total += range.to - range.from;
+                //}
+                //else
+                //{
+                    //break;
+                //}
+            //}
 
-            if (modify) self.ranges.delete_many(delete_start, delete_count);
+            //if (modify) self.ranges.delete_many(delete_start, delete_count);
 
-            self.validate();
+            //self.validate();
 
-            if (maybe_delta) |delta|
-            {
-                delta.* = @intCast(i64, new_range.to) - @intCast(i64, new_range.from) - @intCast(i64, delete_total);
-            }
+            //if (maybe_delta) |delta|
+            //{
+                //delta.* = @intCast(i64, new_range.to) - @intCast(i64, new_range.from) - @intCast(i64, delete_total);
+            //}
 
-            return true;
-        }
+            //return true;
+        //}
 
         pub fn normalize(self: *@This()) bool
         {
@@ -4803,12 +4803,13 @@ pub const Range = extern struct
         {
             if (to <= from) KernelPanic("invalid range");
 
-            if (self.ranges.length() == 0)
+            const initial_length = self.ranges.length();
+            if (initial_length == 0)
             {
                 if (maybe_delta) |delta|
                 {
                     if (from >= self.contiguous) delta.* = @intCast(i64, to) - @intCast(i64, from)
-                    else if (to >= self.contiguous) delta.* = @intCast(i64, to) - @intCast(self.contiguous)
+                    else if (to >= self.contiguous) delta.* = @intCast(i64, to) - @intCast(i64, self.contiguous)
                     else delta.* = 0;
                 }
 
@@ -4823,10 +4824,50 @@ pub const Range = extern struct
                 if (!self.normalize()) return false;
             }
 
-            TODO();
-            //const new_range = Range
-            //const left = self.find(from, true);
-            //const right = self.find(to, true);
+            const new_range = Range
+            {
+                .from = if (self.find(from, true)) |left| left.from else from,
+                .to = if (self.find(to, true)) |right| right.to else to,
+            };
+
+            var i: u64 = 0;
+            while (i <= self.ranges.length()) : (i += 1)
+            {
+                if (i == self.ranges.length() or self.ranges.ptr.?[i].to > new_range.from)
+                {
+                    if (modify)
+                    {
+                        if (self.ranges.insert(new_range, i) == null) return false;
+                        i += 1;
+                    }
+
+                    break;
+                }
+            }
+
+            var delete_start = i;
+            var delete_count: u64 = 0;
+            var delete_total: u64 = 0;
+
+            for (self.ranges.get_slice()[i..]) |*range|
+            {
+                const overlap = (range.from >= new_range.from and range.from <= new_range.to) or (range.to >= new_range.from and range.to <= new_range.to);
+
+                if (overlap)
+                {
+                    delete_count += 1;
+                    delete_total += range.to - range.from;
+                }
+                else break;
+            }
+
+            if (modify) self.ranges.delete_many(delete_start, delete_count);
+
+            self.validate();
+
+            if (maybe_delta) |delta| delta.* = @intCast(i64, new_range.to) - @intCast(i64, new_range.from) - @intCast(i64, delete_total);
+
+            return true;
         }
     };
 };
@@ -4850,11 +4891,11 @@ export fn RangeSetClear(range_set: *Range.Set, from: u64, to: u64, delta: ?*i64,
 {
     return range_set.clear(from, to, delta, modify);
 }
-extern fn RangeSetSet(range_set: *Range.Set, from: u64, to: u64, delta: ?*i64, modify: bool) callconv(.C) bool;
-//export fn RangeSetSet(range_set: *Range.Set, from: u64, to: u64, delta: ?*i64, modify: bool) callconv(.C) bool
-//{
-    //return range_set.set(from, to, delta, modify);
-//}
+//extern fn RangeSetSet(range_set: *Range.Set, from: u64, to: u64, delta: ?*i64, modify: bool) callconv(.C) bool;
+export fn RangeSetSet(range_set: *Range.Set, from: u64, to: u64, delta: ?*i64, modify: bool) callconv(.C) bool
+{
+    return range_set.set(from, to, delta, modify);
+}
 
 export fn EsMemoryFill(from: u64, to: u64, byte: u8) callconv(.C) void
 {

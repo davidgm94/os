@@ -440,205 +440,20 @@ enum ProcessType {
 	PROCESS_DESKTOP,
 };
 
-struct _ArrayHeader {
-	size_t length, allocated;
-};
-
-extern "C"
-{
-    _ArrayHeader* ArrayHeaderGet(void* array);
-    uint64_t ArrayHeaderGetLength(void* array);
-    bool _ArrayMaybeInitialise(void **array, size_t itemSize, EsHeap *heap);
-    bool _ArrayEnsureAllocated(void **array, size_t minimumAllocated, size_t itemSize, uint8_t additionalHeaderBytes, EsHeap *heap);
-    bool _ArraySetLength(void **array, size_t newLength, size_t itemSize, uint8_t additionalHeaderBytes, EsHeap *heap);
-    void _ArrayDelete(void *array, uintptr_t position, size_t itemSize, size_t count);
-    void _ArrayDeleteSwap(void *array, uintptr_t position, size_t itemSize);
-    void *_ArrayInsert(void **array, const void *item, size_t itemSize, ptrdiff_t position, uint8_t additionalHeaderBytes, EsHeap *heap);
-    void *_ArrayInsertMany(void **array, size_t itemSize, ptrdiff_t position, size_t insertCount, EsHeap *heap);
-    void _ArrayFree(void **array, size_t itemSize, EsHeap *heap);
-}
-
 template <class T, EsHeap *heap>
 struct Array
 {
     T *array;
-
-	inline size_t Length() { return array ? ArrayHeaderGet(array)->length : 0; }
-	inline T &First() { return array[0]; }
-	inline T &Last() { return array[Length() - 1]; }
-	inline void Delete(uintptr_t position) { _ArrayDelete(array, position, sizeof(T), 1); }
-	inline void DeleteSwap(uintptr_t position) { _ArrayDeleteSwap(array, position, sizeof(T)); }
-	inline void DeleteMany(uintptr_t position, size_t count) { _ArrayDelete(array, position, sizeof(T), count); }
-	inline T *Add(T item) { return (T *) _ArrayInsert((void **) &array, &item, sizeof(T), -1, 0, heap); }
-	inline T *Add() { return (T *) _ArrayInsert((void **) &array, nullptr, sizeof(T), -1, 0, heap); }
-	inline T *Insert(T item, uintptr_t position) { return (T *) _ArrayInsert((void **) &array, &item, sizeof(T), position, 0, heap); }
-	inline T *AddPointer(const T *item) { return (T *) _ArrayInsert((void **) &(array), item, sizeof(T), -1, 0, heap); }
-	inline T *InsertPointer(const T *item, uintptr_t position) { return (T *) _ArrayInsert((void **) &array, item, sizeof(T), position, 0, heap); }
-	inline T *InsertMany(uintptr_t position, size_t count) { return (T *) _ArrayInsertMany((void **) &array, sizeof(T), position, count, heap); }
-	inline bool SetLength(size_t length) { return _ArraySetLength((void **) &array, length, sizeof(T), 0, heap); }
-	inline void Free() { _ArrayFree((void **) &array, sizeof(T), heap); }
-	inline T Pop() { T t = Last(); Delete(Length() - 1); return t; }
-	inline T &operator[](uintptr_t index) { return array[index]; }
-
-	inline intptr_t Find(T item, bool failIfNotFound) {
-		for (uintptr_t i = 0; i < Length(); i++) {
-			if (array[i] == item) {
-				return i;
-			}
-		}
-
-		if (failIfNotFound) EsPanic("Array::Find - Item not found in %x.\n", this);
-		return -1;
-	}
 };
 
 struct Range {
 	uintptr_t from, to;
 };
 
-struct RangeSet;
-// Range C API
-extern "C"
-{
-    Range* RangeSetFind(RangeSet* rangeSet, uintptr_t offset, bool touching);
-    bool RangeSetContains(RangeSet* rangeSet, uintptr_t offset);
-    bool RangeSetNormalize(RangeSet* rangeSet);
-    bool RangeSetClear(RangeSet* rangeSet, uintptr_t from, uintptr_t to, intptr_t* delta, bool modify);
-}
-
 struct RangeSet {
 	Array<Range, K_CORE> ranges;
 	uintptr_t contiguous;
-
-    void Validate() {
-#ifdef DEBUG_BUILD
-        uintptr_t previousTo = 0;
-
-        if (!ranges.Length()) return;
-
-        for (uintptr_t i = 0; i < ranges.Length(); i++) {
-            Range *range = &ranges[i];
-
-            if (previousTo && range->from <= previousTo) {
-                KernelPanic("RangeSet::Validate - Range %d in set %x is not placed after the prior range.\n", i, this);
-            }
-
-            if (range->from >= range->to) {
-                KernelPanic("RangeSet::Validate - Range %d in set %x is invalid.\n", i, this);
-            }
-
-            previousTo = range->to;
-        }
-#endif
-    }
-
-    bool Set(uintptr_t from, uintptr_t to, intptr_t *delta, bool modify) {
-        if (to <= from) {
-            KernelPanic("RangeSet::Set - Invalid range %x to %x.\n", from, to);
-        }
-
-        // Can we store this as a single contiguous range?
-
-        if (!ranges.Length()) {
-            if (delta) {
-                if (from >= contiguous) {
-                    *delta = to - from;
-                } else if (to >= contiguous) {
-                    *delta = to - contiguous;
-                } else {
-                    *delta = 0;
-                }
-            }
-
-            if (!modify) {
-                return true;
-            }
-
-            if (from <= contiguous) {
-                if (to > contiguous) {
-                    contiguous = to;
-                }
-
-                return true;
-            }
-
-            if (!RangeSetNormalize(this)) {
-                return false;
-            }
-        }
-
-        // Calculate the contiguous range covered.
-
-        Range newRange = {};
-
-        {
-            Range *left = RangeSetFind(this, from, true);
-            Range *right = RangeSetFind(this, to, true);
-
-            newRange.from = left ? left->from : from;
-            newRange.to = right ? right->to : to;
-        }
-
-        // Insert the new range.
-
-        uintptr_t i = 0;
-
-        for (; i <= ranges.Length(); i++) {
-            if (i == ranges.Length() || ranges[i].to > newRange.from) {
-                if (modify) {
-                    if (!ranges.Insert(newRange, i)) {
-                        return false;
-                    }
-
-                    i++;
-                }
-
-                break;
-            }
-        }
-
-        // Remove overlapping ranges.
-
-        uintptr_t deleteStart = i;
-        size_t deleteCount = 0;
-        uintptr_t deleteTotal = 0;
-
-        for (; i < ranges.Length(); i++) {
-            Range *range = &ranges[i];
-
-            bool overlap = (range->from >= newRange.from && range->from <= newRange.to) 
-                || (range->to >= newRange.from && range->to <= newRange.to);
-
-            if (overlap) {
-                deleteCount++;
-                deleteTotal += range->to - range->from;
-            } else {
-                break;
-            }
-        }
-
-        if (modify) {
-            ranges.DeleteMany(deleteStart, deleteCount);
-        }
-
-        Validate();
-
-        if (delta) {
-            *delta = newRange.to - newRange.from - deleteTotal;
-        }
-
-        return true;
-
-    }
 };
-
-extern "C"
-{
-    bool RangeSetSet(RangeSet* rangeSet, uintptr_t from, uintptr_t to, intptr_t* delta, bool modify)
-    {
-        return rangeSet->Set(from, to, delta, modify);
-    }
-}
 
 #define ES_SNAPSHOT_MAX_PROCESS_NAME_LENGTH 	(31)
 
