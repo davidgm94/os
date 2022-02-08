@@ -4564,98 +4564,6 @@ pub const Range = extern struct
             }
         }
 
-        //pub fn set(self: *@This(), from: u64, to: u64, maybe_delta: ?*i64, modify: bool) bool
-        //{
-            //if (to <= from) KernelPanic("invalid range");
-
-            //if (self.ranges.length() == 0)
-            //{
-                //if (maybe_delta) |delta|
-                //{
-                    //if (from >= self.contiguous) delta.* = @intCast(i64, to) - @intCast(i64, from)
-                    //else if (to >= self.contiguous) delta.* = @intCast(i64, to) - @intCast(i64, self.contiguous)
-                    //else delta.* = 0;
-                //}
-
-                //if (!modify) return true;
-
-                //if (from <= self.contiguous)
-                //{
-                    //if (to > self.contiguous) self.contiguous = to;
-                    //return true;
-                //}
-
-                //if (!self.normalize()) return false;
-            //}
-
-            //const new_range = blk:
-            //{
-                //var range = std.mem.zeroes(Range);
-                //range.from = if (self.find(from, true)) |left| left.from else from;
-                //range.to = if (self.find(to, true)) |right| right.to else to;
-                //break :blk range;
-            //};
-
-            //const index = blk:
-            //{
-                //if (!modify) break :blk @as(u64, 0);
-
-                //if (self.ranges.length() != 0)
-                //{
-                    //for (self.ranges.get_slice()) |range, range_i|
-                    //{
-                        //if (range.to > new_range.from)
-                        //{
-                            //if (self.ranges.insert(new_range, range_i) == null)
-                            //{
-                                //return false;
-                            //}
-
-                            //break :blk range_i + 1;
-                        //}
-                    //}
-                //}
-
-                //const result_index = self.ranges.length();
-                //if (self.ranges.insert(new_range, result_index) == null)
-                //{
-                    //return false;
-                //}
-                //break :blk result_index + 1;
-            //};
-
-            //var delete_start = index;
-            //var delete_count: u64 = 0;
-            //var delete_total: u64 = 0;
-
-            //for (self.ranges.get_slice()) |range|
-            //{
-                //const overlap =
-                    //(range.from >= new_range.from and range.from <= new_range.to) or
-                    //(range.to >= new_range.from and range.to <= new_range.to);
-                //if (overlap)
-                //{
-                    //delete_count += 1;
-                    //delete_total += range.to - range.from;
-                //}
-                //else
-                //{
-                    //break;
-                //}
-            //}
-
-            //if (modify) self.ranges.delete_many(delete_start, delete_count);
-
-            //self.validate();
-
-            //if (maybe_delta) |delta|
-            //{
-                //delta.* = @intCast(i64, new_range.to) - @intCast(i64, new_range.from) - @intCast(i64, delete_total);
-            //}
-
-            //return true;
-        //}
-
         pub fn normalize(self: *@This()) bool
         {
             if (self.contiguous != 0)
@@ -4759,34 +4667,6 @@ pub const Range = extern struct
             if (overlap_count == 1)
             {
                 TODO();
-                //const range = &self.ranges.ptr.?[overlap_start];
-
-                //if (range.from < from and range.to > to)
-                //{
-                    //var new_range = Range { .from = to, .to = range.to };
-                    //_delta -= @intCast(i64, to) - @intCast(i64, from);
-
-                    //if (modify)
-                    //{
-                        //if (!self.ranges.insert(new_range, overlap_start + 1)) return false;
-                        //self.ranges.ptr.?[overlap_start].to = from;
-                    //}
-                //}
-                //else if (range.from < from)
-                //{
-                    //_delta -= @intCast(i64, range.to) - @intCast(i64, from);
-                    //if (modify) range.to = from;
-                //}
-                //else if (range.to > to)
-                //{
-                    //_delta -= @intCast(i64, to) - @intCast(i64, range.from);
-                    //if (modify) range.from = to;
-                //}
-                //else
-                //{
-                    //_delta -= @intCast(i64, range.to) - @intCast(i64, range.from);
-                    //if (modify) self.ranges.delete(overlap_start);
-                //}
             }
             else if (overlap_count > 1)
             {
@@ -5467,7 +5347,7 @@ pub const Bitset = extern struct
                         const index = group_i * group_size + single_i;
                         if (below != 0 and index >= below) return return_value;
                         const index_mask = (@as(u32, 1) << @intCast(u5, index));
-                        if (self.single_usage[index >> 5] & index_mask  != 0)
+                        if (self.single_usage[index >> 5] & index_mask != 0)
                         {
                             self.single_usage[index >> 5] &= ~index_mask;
                             self.group_usage[group_i] -= 1;
@@ -5509,7 +5389,7 @@ pub const Bitset = extern struct
                         if (found == 0)
                         {
                             if (index >= below and below != 0) return return_value;
-                            if (index % alignment == 0) continue;
+                            if (index % alignment != 0) continue;
 
                             start = index;
                         }
@@ -5529,7 +5409,7 @@ pub const Bitset = extern struct
                         while (i < count) : (i += 1)
                         {
                             const index_b = start + i;
-                            self.single_usage[index >> 5] &= ~((@as(u32, 1) << @truncate(u5, index_b)));
+                            self.single_usage[index_b >> 5] &= ~((@as(u32, 1) << @truncate(u5, index_b)));
                         }
 
                         return return_value;
@@ -5559,11 +5439,11 @@ export fn BitsetTake(self: *Bitset, index: u64) callconv(.C) void
     self.take(index);
 }
 
-extern fn BitsetGet(self: *Bitset, count: u64, alignment: u64, below: u64) callconv(.C) u64;
-//export fn BitsetGet(self: *Bitset, count: u64, alignment: u64, below: u64) callconv(.C) u64
-//{
-    //return self.get(count, alignment, below);
-//}
+//extern fn BitsetGet(self: *Bitset, count: u64, alignment: u64, below: u64) callconv(.C) u64;
+export fn BitsetGet(self: *Bitset, count: u64, alignment: u64, below: u64) callconv(.C) u64
+{
+    return self.get(count, alignment, below);
+}
 
 pub const PageFrame = extern struct
 {
