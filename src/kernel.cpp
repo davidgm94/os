@@ -891,6 +891,8 @@ struct KTimer {
 extern "C"
 {
     void SchedulerAddActiveThread(Thread *thread, bool start); // Add an active thread into the queue.
+    int8_t SchedulerGetThreadEffectivePriority(Thread *thread);
+    Thread * SchedulerPickThread(CPULocalStorage *local); // Pick the next thread to execute.
 }
 
 extern "C"
@@ -899,8 +901,6 @@ extern "C"
     void SchedulerCreateProcessorThreads(CPULocalStorage *local);
     void SchedulerMaybeUpdateActiveList(Thread *thread); // After changing the priority of a thread, call this to move it to the correct active thread queue if needed.
     void SchedulerUnblockThread(Thread *unblockedThread, Thread *previousMutexOwner = nullptr);
-    Thread * SchedulerPickThread(CPULocalStorage *local); // Pick the next thread to execute.
-    int8_t SchedulerGetThreadEffectivePriority(Thread *thread);
 }
 
 struct Scheduler {
@@ -976,7 +976,6 @@ struct Scheduler {
 
     }
 	Thread *PickThread(CPULocalStorage *local); // Pick the next thread to execute.
-	int8_t GetThreadEffectivePriority(Thread *thread);
 
 	KSpinlock dispatchSpinlock; // For accessing synchronisation objects, thread states, scheduling lists, etc. TODO Break this up!
 	KSpinlock activeTimersSpinlock; // For accessing the activeTimers lists.
@@ -1003,13 +1002,13 @@ struct Scheduler {
 extern Scheduler scheduler;
 extern "C"
 {
-    void SchedulerYield(InterruptContext *context)
-    {
-        scheduler.Yield(context);
-    }
     void SchedulerCreateProcessorThreads(CPULocalStorage *local)
     {
         scheduler.CreateProcessorThreads(local);
+    }
+    void SchedulerYield(InterruptContext *context)
+    {
+        scheduler.Yield(context);
     }
     void SchedulerMaybeUpdateActiveList(Thread *thread) // After changing the priority of a thread, call this to move it to the correct active thread queue if needed.
     {
@@ -1019,10 +1018,10 @@ extern "C"
     {
         scheduler.UnblockThread(unblockedThread, previousMutexOwner);
     }
-    Thread * SchedulerPickThread(CPULocalStorage *local) // Pick the next thread to execute.
-    {
-        return scheduler.PickThread(local);
-    }
+    //Thread * SchedulerPickThread(CPULocalStorage *local) // Pick the next thread to execute.
+    //{
+        //return scheduler.PickThread(local);
+    //}
     //int8_t SchedulerGetThreadEffectivePriority(Thread *thread)
     //{
         //return scheduler.GetThreadEffectivePriority(thread);
@@ -1281,25 +1280,25 @@ struct IRQHandler {
 	//return thread->priority;
 //}
 
-Thread *Scheduler::PickThread(CPULocalStorage *local) {
-	KSpinlockAssertLocked(&dispatchSpinlock);
+//Thread *Scheduler::PickThread(CPULocalStorage *local) {
+	//KSpinlockAssertLocked(&dispatchSpinlock);
 
-	if ((local->asyncTaskList.first || local->inAsyncTask) && local->asyncTaskThread->state == THREAD_ACTIVE) {
-		// If the asynchronous task thread for this processor isn't blocked, and has tasks to process, execute it.
-		return local->asyncTaskThread;
-	}
+	//if ((local->asyncTaskList.first || local->inAsyncTask) && local->asyncTaskThread->state == THREAD_ACTIVE) {
+		//// If the asynchronous task thread for this processor isn't blocked, and has tasks to process, execute it.
+		//return local->asyncTaskThread;
+	//}
 
-	for (int i = 0; i < THREAD_PRIORITY_COUNT; i++) {
-		// For every priority, check if there is a thread available. If so, execute it.
-		LinkedItem<Thread> *item = activeThreads[i].firstItem;
-		if (!item) continue;
-		item->RemoveFromList();
-		return item->thisItem;
-	}
+	//for (int i = 0; i < THREAD_PRIORITY_COUNT; i++) {
+		//// For every priority, check if there is a thread available. If so, execute it.
+		//LinkedItem<Thread> *item = activeThreads[i].firstItem;
+		//if (!item) continue;
+		//item->RemoveFromList();
+		//return item->thisItem;
+	//}
 
-	// If we couldn't find a thread to execute, idle.
-	return local->idleThread;
-}
+	//// If we couldn't find a thread to execute, idle.
+	//return local->idleThread;
+//}
 
 void Scheduler::MaybeUpdateActiveList(Thread *thread) {
 	// TODO Is this correct with regards to paused threads?

@@ -1268,6 +1268,28 @@ const Scheduler = extern struct
 
         return thread.priority;
     }
+
+    fn pick_thread(self: *@This(), local: *LocalStorage) ?*Thread
+    {
+        self.dispatch_spinlock.assert_locked();
+
+        if ((local.async_task_list.next_or_first != null or local.in_async_task)
+            and local.async_task_thread.?.state.read_volatile() == .active)
+        {
+            return local.async_task_thread;
+        }
+
+        for (self.active_threads) |*thread_item|
+        {
+            if (thread_item.first) |first|
+            {
+                first.remove_from_list();
+                return first.value;
+            }
+        }
+
+        return local.idle_thread;
+    }
 };
 
 extern fn ArchSwitchContext(context: *InterruptContext, arch_address_space: *ArchAddressSpace, thread_kernel_stack: u64, new_thread: *Thread, old_address_space: *AddressSpace) callconv(.C) void;
@@ -1300,8 +1322,11 @@ export fn SchedulerGetThreadEffectivePriority(thread: *Thread) callconv(.C) i8
 {
     return scheduler.get_thread_effective_priority(thread);
 }
+export fn SchedulerPickThread(local: *LocalStorage) callconv(.C) ?*Thread
+{
+    return scheduler.pick_thread(local);
+}
 
-extern fn SchedulerPickThread(local: *LocalStorage) callconv(.C) ?*Thread;
 extern fn SchedulerMaybeUpdateActiveList(thread: *align(1) volatile Thread) callconv(.C) void;
 extern fn SchedulerUnblockThread(thread: *Thread, previous_mutex_owner: ?*Thread) callconv(.C) void;
 
@@ -1587,6 +1612,7 @@ pub fn LinkedList(comptime T: type) type
 
             item.previous = null;
             item.next = null;
+            item.list = null;
             self.count -= 1;
             self.validate();
         }
