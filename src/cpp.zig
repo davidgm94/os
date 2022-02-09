@@ -260,9 +260,9 @@ const idt_entry_count = 0x1000 / @sizeOf(IDTEntry);
 
 comptime { assert(@sizeOf(IDTEntry) == 0x10); }
 
-export fn TODO() noreturn
+fn TODO(src: std.builtin.SourceLocation) noreturn
 {
-    KernelPanic("unimplemented");
+    KernelPanicF("TODO: Unimplemented at {s}:{}:{} -> {s}\n", .{src.file, src.line, src.column, src.fn_name});
 }
 
 export fn _start() callconv(.Naked) noreturn
@@ -1333,9 +1333,9 @@ const Scheduler = extern struct
         self.dispatch_spinlock.assert_locked();
         switch (unblocked_thread.state.read_volatile())
         {
-            .waiting_mutex => TODO(),
-            .waiting_event => TODO(),
-            .waiting_writer_lock => TODO(),
+            .waiting_mutex => TODO(@src()),
+            .waiting_event => TODO(@src()),
+            .waiting_writer_lock => TODO(@src()),
             else => KernelPanic("unexpected thread state"),
         }
 
@@ -3296,7 +3296,7 @@ const HandleTable = extern struct
         }
 
         _ = self;
-        TODO();
+        TODO(@src());
     }
 
     fn destroy(self: *@This()) void
@@ -4007,11 +4007,11 @@ pub const Range = extern struct
 
             if (overlap_count == 1)
             {
-                TODO();
+                TODO(@src());
             }
             else if (overlap_count > 1)
             {
-                TODO();
+                TODO(@src());
             }
 
             if (maybe_delta) |delta| delta.* = _delta;
@@ -4298,7 +4298,7 @@ export fn _ArrayEnsureAllocated(array: *?*u64, minimum_allocated: u64, item_size
 
     _ = additional_header_bytes;
 
-    TODO();
+    TODO(@src());
 
     //if (@intToPtr(?*ArrayHeader, EsHeapReallocate(@ptrToInt(old_header) - additional_header_bytes, @sizeOf(ArrayHeader) + additional_header_bytes + item_size * minimum_allocated, false, heap))) |new_header|
     //{
@@ -4434,8 +4434,6 @@ export fn MMUnpinRegion(space: *AddressSpace, region: *Region) callconv(.C) void
     region.data.pin.return_lock(WriterLock.shared);
     space.reserve_mutex.release();
 }
-
-//extern fn drivers_init() callconv(.C) void;
 
 export var shutdownEvent: Event = undefined;
 
@@ -4694,11 +4692,11 @@ pub const Bitset = extern struct
         }
         else if (count == 16 and alignment == 16)
         {
-            TODO();
+            TODO(@src());
         }
         else if (count == 32 and alignment == 32)
         {
-            TODO();
+            TODO(@src());
         }
         else
         {
@@ -4920,7 +4918,7 @@ pub const Physical = extern struct
             //}
             //else if (!simple)
             //{
-                //TODO();
+                //TODO(@src());
             //}
             //else
             //{
@@ -4964,7 +4962,7 @@ pub const Physical = extern struct
                     //const address = page << page_bit_count;
                     //if (not_zeroed and flags.contains(.zeroed))
                     //{
-                        //TODO();
+                        //TODO(@src());
                     //}
 
                     //return address;
@@ -5019,7 +5017,7 @@ pub const Physical = extern struct
 
                 //if (self.should_trim_object_cache())
                 //{
-                    //TODO();
+                    //TODO(@src());
                 //}
             //}
         
@@ -5031,7 +5029,7 @@ pub const Physical = extern struct
             //_ = self;
             //_ = byte_count;
             //_ = fixed;
-            //TODO();
+            //TODO(@src());
         //}
         //pub fn activate_pages(self: *@This(), pages: u64, page_count: u64) void
         //{
@@ -5110,7 +5108,7 @@ pub const Physical = extern struct
             //_ = page;
             //_ = mutex_already_acquired;
             //_ = count;
-            //TODO();
+            //TODO(@src());
         //}
 
         fn get_available_page_count(self: @This()) callconv(.Inline) u64
@@ -5383,7 +5381,7 @@ export fn MMHandlePageFault(space: *AddressSpace, asked_address: u64, flags: Han
     }
     else if (region.flags.contains(.file))
     {
-        TODO();
+        TODO(@src());
     }
     else if (region.flags.contains(.normal))
     {
@@ -5401,7 +5399,7 @@ export fn MMHandlePageFault(space: *AddressSpace, asked_address: u64, flags: Han
     }
     else if (region.flags.contains(.guard))
     {
-        TODO();
+        TODO(@src());
     }
     else
     {
@@ -5730,7 +5728,7 @@ export fn MMFree(space: *AddressSpace, address: u64, expected_size: u64, user_on
         }
         else if (region.flags.contains(.file))
         {
-            TODO();
+            TODO(@src());
         }
         else if (region.flags.contains(.physical)) { } // do nothing
         else if (region.flags.contains(.guard)) return false
@@ -6474,11 +6472,11 @@ export fn MMBalanceThread() callconv(.C) void
 
             if (region.flags.contains(.file))
             {
-                TODO();
+                TODO(@src());
             }
             else if (region.flags.contains(.cache))
             {
-                TODO();
+                TODO(@src());
                 //_ = activeSectionManager.mutex.acquire();
 
                 //var maybe_item2 = activeSectionManager.LRU_list.first;
@@ -6488,7 +6486,7 @@ export fn MMBalanceThread() callconv(.C) void
                     //const section = item2.value.?;
                     //if (section.cache != null and section.referenced_page_count != 0) 
                     //{
-                        //TODO();
+                        //TODO(@src());
                         //// CCDereferenceActiveSection(section, 0);
                     //}
                     //maybe_item2 = item2.next;
@@ -6584,7 +6582,7 @@ fn CloseReferenceTask(task: *AsyncTask) void
 export fn MMArchFinalizeVAS(space: *AddressSpace) callconv(.C) void
 {
     _ = space;
-    TODO();
+    TODO(@src());
 }
 
 const ACPI = extern struct
@@ -8215,7 +8213,7 @@ export fn MMArchUnmapPages(space: *AddressSpace, virtual_address_start: u64, pag
         else if (flags.contains(.balance_file))
         {
             _ = unmap_maximum;
-            TODO();
+            TODO(@src());
         }
     }
 
@@ -8463,6 +8461,7 @@ export fn KernelMain(_: u64) callconv(.C) void
     serial_write("KernelMain\n");
     desktopProcess = ProcessSpawn(.desktop).?;
     drivers_init();
+
 
     parse_superblock();
     start_desktop_process();
@@ -8782,7 +8781,7 @@ const PCI = struct
             var line = @intCast(i64, self.interrupt_line);
             if (bootloader_ID == 2) line = -1;
 
-            TODO();
+            TODO(@src());
         }
 
         fn enable_MSI(self: *@This(), handler: KIRQHandler, context: u64, owner_name: []const u8) bool
@@ -9468,7 +9467,7 @@ const AHCI = struct
 
                 if (interrupt_status & ((1 << 30 | (1 << 29) | (1 << 28) | (1 << 27) | (1 << 26) | (1 << 24) | (1 << 23))) != 0)
                 {
-                    TODO();
+                    TODO(@src());
                 }
                 port.command_spinlock.acquire();
                 const commands_issued = PCI_register.read(self, port_i);
@@ -9980,12 +9979,149 @@ const InterruptEvent = extern struct
     complete: bool,
 };
 
+const SVGA = struct
+{
+    const Driver = struct
+    {
+        linear_buffer: [*]volatile u8,
+        width: u32,
+        height: u32,
+        pixel_byte_count_x: u32,
+        pixel_byte_count_y: u32,
+
+        fn init() void
+        {
+            driver.setup();
+        }
+
+        fn setup(self: *@This()) void
+        {
+            info = @intToPtr(?*VideoModeInformation, MMMapPhysical(&_kernelMMSpace, 0x7000 + bootloader_information_offset, @sizeOf(VideoModeInformation), Region.Flags.empty())) orelse KernelPanic("Unable to map VBE");
+
+            if (!info.validation.contains(.valid)) KernelPanic("Unable to initialize VBE: valid is missing\n");
+
+            if (info.validation.contains(.edid_valid))
+            {
+                serial_write("EDID:\n");
+                for (info.edid) |edid_byte, i|
+                {
+                    if (i % 10 == 0) serial_write("\n");
+                    log(" 0x{x:0>2} |", .{edid_byte});
+                }
+                serial_write("\n");
+            }
+            
+            self.linear_buffer = @intToPtr(?[*]volatile u8, MMMapPhysical(&_kernelMMSpace, info.buffer_physical_address, @intCast(u32, info.bytes_per_scanline) * @intCast(u32, info.height), Region.Flags.from_flag(.write_combining))) orelse KernelPanic("Unable to map VBE");
+            log("Linear buffer: {*}\n", .{self.linear_buffer});
+            self.width = info.width;
+            self.height = info.height;
+            self.pixel_byte_count_x = info.bits_per_pixel >> 3;
+            self.pixel_byte_count_y = info.bytes_per_scanline;
+
+            if (info.bits_per_pixel != 32)
+            {
+                KernelPanicF("Only 32 bit pixels are supported. VBE pixel count: {}", .{info.bits_per_pixel});
+            }
+        }
+
+        fn update_screen(self: *@This(), source_ptr: [*]const u8, source_width: u32, source_height: u32, source_stride: u32, destination_x: u32, destination_y: u32) void
+        {
+            var destination_row_start = @intToPtr([*]u32, @ptrToInt(self.linear_buffer) + destination_x * @sizeOf(u32) + destination_y * self.pixel_byte_count_y);
+            const source_row_start = @ptrCast([*]const u32, source_ptr);
+
+            if (destination_x > self.width or source_width > self.width - destination_x or destination_y > self.height or source_height > self.height - destination_y)
+            {
+                KernelPanic("Update region outside graphics target bounds");
+
+                var y: u64 = 0;
+                while (y < source_height) :
+                    ({
+                        y += 1;
+                        destination_row_start += self.pixel_byte_count_y / 4;
+                        source_row_start += source_stride / 4;
+                    })
+                {
+                    const destination = destination_row_start[0..source_width];
+                    const source = source_row_start[0..source_width];
+                    std.mem.copy(@TypeOf(source), destination, source);
+                }
+            }
+        }
+
+        fn debug_put_block(self: *@This(), x: u64, y: u64, toggle: bool) void
+        {
+            if (toggle)
+            {
+                self.linear_buffer[y * self.pixel_byte_count_y + x * @sizeOf(u32) + 0] += 0x4c;
+                self.linear_buffer[y * self.pixel_byte_count_y + x * @sizeOf(u32) + 1] += 0x4c;
+                self.linear_buffer[y * self.pixel_byte_count_y + x * @sizeOf(u32) + 2] += 0x4c;
+            }
+            else
+            {
+                self.linear_buffer[y * self.pixel_byte_count_y + x * @sizeOf(u32) + 0] = 0xff;
+                self.linear_buffer[y * self.pixel_byte_count_y + x * @sizeOf(u32) + 1] = 0xff;
+                self.linear_buffer[y * self.pixel_byte_count_y + x * @sizeOf(u32) + 2] = 0xff;
+            }
+
+            self.linear_buffer[(y + 1) * self.pixel_byte_count_y + (x + 1) * @sizeOf(u32) + 0] = 0;
+            self.linear_buffer[(y + 1) * self.pixel_byte_count_y + (x + 1) * @sizeOf(u32) + 1] = 0;
+            self.linear_buffer[(y + 1) * self.pixel_byte_count_y + (x + 1) * @sizeOf(u32) + 2] = 0;
+
+        }
+
+        fn debug_clear_screen(self: *@This()) void
+        {
+            var height_i: u64 = 0;
+            while (height_i < self.height) : (height_i += 1)
+            {
+                var width_i: u64 = 0;
+                while (width_i < self.width * @sizeOf(u32)) : (width_i += @sizeOf(u32))
+                {
+                    if (true)
+                    {
+                        self.linear_buffer[height_i * self.pixel_byte_count_y + width_i + 2] = 0x18;
+                        self.linear_buffer[height_i * self.pixel_byte_count_y + width_i + 1] = 0x7e;
+                        self.linear_buffer[height_i * self.pixel_byte_count_y + width_i + 0] = 0xcf;
+                    }
+                    else
+                    {
+                        TODO();
+                    }
+                }
+            }
+        }
+    };
+
+    var driver: Driver = undefined;
+    var info: *VideoModeInformation = undefined;
+
+    const VideoModeInformation = extern struct
+    {
+        validation: Validation,
+        bits_per_pixel: u8,
+        width: u16,
+        height: u16,
+        bytes_per_scanline: u16,
+        buffer_physical_address: u64,
+        edid: [128]u8,
+
+        const Validation = Bitflag(enum(u8)
+            {
+                valid = 0,
+                edid_valid = 1,
+            });
+    };
+};
+
 fn drivers_init() callconv(.C) void
 {
     PCI.Driver.init();
     serial_write("PCI driver initialized\n");
     AHCI.Driver.init();
     serial_write("AHCI driver initialized\n");
+    SVGA.Driver.init();
+    serial_write("SVGA driver initialized\n");
+    SVGA.driver.debug_clear_screen();
 }
 
 const Timeout = extern struct
@@ -10229,6 +10365,7 @@ export fn process_start_with_something(process: *Process) bool
         CloseHandleToObject(@ptrToInt(thread), .thread, 0);
         _ = process.executable_load_attempt_complete.wait();
         if (process.executable_state == .failed_to_load) return false;
+        serial_write("Loaded executable...\n");
         return true;
     }
     else
@@ -10426,7 +10563,7 @@ export fn OpenHandleToObject(object: u64, object_type: KernelObjectType, flags: 
             if (!had_no_handles) region.handle_count.increment();
             region.mutex.release();
         },
-        else => TODO(),
+        else => TODO(@src()),
     }
 
     if (had_no_handles) KernelPanic("object had no handles");
@@ -10445,7 +10582,7 @@ export fn CloseHandleToObject(object: u64, object_type: KernelObjectType, flags:
             const previous = process.handle_count.atomic_fetch_sub(1);
             // @Log
             if (previous == 0) KernelPanic("All handles to process have been closed")
-            else if (previous == 1) TODO();
+            else if (previous == 1) TODO(@src());
         },
         .thread =>
         {
@@ -10455,7 +10592,7 @@ export fn CloseHandleToObject(object: u64, object_type: KernelObjectType, flags:
             if (previous == 0) KernelPanic("All handles to thread have been closed")
             else if (previous == 1) ThreadRemove(thread);
         },
-        else => TODO(),
+        else => TODO(@src()),
     }
 }
 
@@ -10574,7 +10711,7 @@ export fn InterruptHandler(context: *InterruptContext) callconv(.C) void
     }
     else if (interrupt >= 0xf0 and interrupt < 0xfe)
     {
-        TODO();
+        TODO(@src());
     }
     else if (maybe_local) |local|
     {
@@ -10621,7 +10758,7 @@ export fn InterruptHandler(context: *InterruptContext) callconv(.C) void
             }
             else if (interrupt >= irq_base and interrupt < irq_base + 0x20)
             {
-                TODO();
+                TODO(@src());
             }
 
             if (local.IRQ_switch_thread and scheduler.started.read_volatile() and local.scheduler_ready)
