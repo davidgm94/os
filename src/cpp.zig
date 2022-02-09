@@ -10173,10 +10173,10 @@ const LoadedExecutable = extern struct
 
 const hardcoded_kernel_file_offset = 1056768;
 const hardcoded_desktop_size = 17344;
-comptime { assert(align_address(hardcoded_desktop_size, 0x200) < desktop_executable_buffer.len); }
+comptime { assert(align_u64(hardcoded_desktop_size, 0x200) < desktop_executable_buffer.len); }
 export var desktop_executable_buffer: [0x8000]u8 align(0x1000) = undefined;
 
-fn align_address(address: u64, alignment: u64) u64
+fn align_u64(address: u64, alignment: u64) u64
 {
     const mask = alignment - 1;
     assert(alignment & mask == 0);
@@ -10186,7 +10186,7 @@ fn align_address(address: u64, alignment: u64) u64
 fn hard_disk_read_desktop_executable() Error
 {
     //const unaligned_desktop_offset = hardcoded_kernel_file_offset + kernel_size;
-    //const desktop_offset = align_address(unaligned_desktop_offset, 0x200);
+    //const desktop_offset = align_u64(unaligned_desktop_offset, 0x200);
 
     //assert(AHCI.driver.drives.len > 0);
     //assert(AHCI.driver.drives.len == 1);
@@ -10197,10 +10197,10 @@ fn hard_disk_read_desktop_executable() Error
     buffer.virtual_address = @ptrToInt(&desktop_executable_buffer);
     var request = zeroes(BlockDevice.AccessRequest);
     //request.offset = desktop_offset;
-    //request.count = align_address(hardcoded_desktop_size, 0x200);
+    //request.count = align_u64(hardcoded_desktop_size, 0x200);
     //while (!superblock_mutex.acquire()) { }
     request.offset = superblock.desktop_raw_offset;
-    request.count = align_address(superblock.desktop_size, 0x200);
+    request.count = align_u64(superblock.desktop_size, 0x200);
     //superblock_mutex.release();
     request.operation = BlockDevice.read;
     request.device = @ptrCast(*BlockDevice, AHCI.driver.get_drive());
@@ -10221,7 +10221,7 @@ fn parse_superblock() void
     buffer.virtual_address = @ptrToInt(&superblock_buffer);
     var request = zeroes(BlockDevice.AccessRequest);
     request.offset = RNUFS.Superblock.offset;
-    request.count = align_address(@sizeOf(RNUFS.Superblock), 0x200);
+    request.count = align_u64(@sizeOf(RNUFS.Superblock), 0x200);
     request.operation = BlockDevice.read;
     request.device = @ptrCast(*BlockDevice, AHCI.driver.get_drive());
     request.buffer = &buffer;
