@@ -805,8 +805,8 @@ const qemu_base_command_str = &[_][]const u8
     "-no-reboot", "-no-shutdown",
     "-M", "q35", "-cpu", "Haswell",
     "-m", "4096",
-    //"-serial", "stdio",
-    "-d", "int,cpu_reset,in_asm",
+    "-serial", "stdio",
+    //"-d", "int,cpu_reset,in_asm",
     //"-D", "logging.txt",
     //"-d", "guest_errors,int,cpu,cpu_reset,in_asm"
 };

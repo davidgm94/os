@@ -958,18 +958,29 @@ comptime
 }
 
 var panic_buffer: [0x4000]u8 = undefined;
-fn KernelPanic(format: []const u8) noreturn
+fn KernelPanic(message: []const u8) noreturn
 {
-    _ = format;
     ProcessorDisableInterrupts();
     _ = ProcessorSendIPI(kernel_panic_ipi, true, -1);
     scheduler.panic.write_volatile(true);
+    serial_write("KERNEL PANIC:\n");
+    serial_write(message);
     ProcessorHalt();
 }
+
+fn KernelPanicF(comptime format: []const u8, args: anytype) noreturn
+{
+    ProcessorDisableInterrupts();
+    _ = ProcessorSendIPI(kernel_panic_ipi, true, -1);
+    scheduler.panic.write_volatile(true);
+    serial_write("KERNEL PANIC:\n");
+    log(format, args);
+    ProcessorHalt();
+}
+
 pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace) noreturn
 {
-    _ = stack_trace;
-    KernelPanic(message);
+    KernelPanicF("{s}.\nStack trace: {}\n", .{message, stack_trace});
 }
 
 pub const Spinlock = extern struct
@@ -2125,143 +2136,6 @@ pub const Process = extern struct
         {
             paused = 0,
         });
-
-    //pub fn register(self: *@This(), process_type: Process.Type) void
-    //{
-        //self.id = @atomicRmw(@TypeOf(scheduler.next_processor_id), &scheduler.next_process_id, .Add, 1, .SeqCst);
-        //self.address_space.reference_count.write_volatile(1);
-        ////// list, table
-        //self.handle_count.write_volatile(1);
-        //self.permissions = Process.Permission.all();
-        //self.type = process_type;
-    //}
-
-    //pub fn spawn_thread_extended(self: *@This(), start_address: u64, argument1: u64, flags: Thread.Flags, argument2: u64) ?*Thread
-    //{
-        //const userland = flags.contains(.userland);
-
-        //const parent_thread = GetCurrentThread();
-        //_ = parent_thread;
-
-        //if (userland and self == kernelProcess)
-        //{
-            //KernelPanic("cannot add userland thread to kernel process");
-        //}
-
-        //_ = self.threads_mutex.acquire();
-        //defer self.threads_mutex.release();
-
-        //if (self.prevent_new_threads) return null;
-
-        //if (scheduler.thread_pool.add()) |thread|
-        //{
-            //const kernel_stack_size: u64 = 0x5000;
-            //const user_stack_reserve: u64 = if (userland) 0x400000 else kernel_stack_size;
-            //const user_stack_commit: u64 = if (userland) 0x10000 else 0;
-            //var user_stack: u64 = 0;
-            //var kernel_stack: u64 = 0;
-
-            //var failed = false;
-            //if (!flags.contains(.idle))
-            //{
-                //kernel_stack = kernel.process.address_space.standard_allocate(kernel_stack_size, Region.Flags.from_flag(.fixed));
-                //if (kernel_stack != 0)
-                //{
-                    //if (userland)
-                    //{
-                        //user_stack = self.address_space.standard_allocate_extended(user_stack_reserve, Region.Flags.empty(), 0, false);
-
-                        //const region = self.address_space.find_and_pin_region(user_stack, user_stack_reserve).?;
-                        //_ = self.address_space.reserve_mutex.acquire();
-                        //const success = self.address_space.commit_range(region, (user_stack_reserve - user_stack_commit) / page_size, user_stack_commit / page_size);
-                        //self.address_space.reserve_mutex.release();
-                        //self.address_space.unpin_region(region);
-                        //failed = !success or user_stack == 0;
-                    //}
-                    //else
-                    //{
-                        //user_stack = kernel_stack;
-                    //}
-                //}
-                //else
-                //{
-                    //failed = true;
-                //}
-            //}
-
-            //if (!failed)
-            //{
-                //thread.paused.write_volatile((parent_thread != null and parent_thread.?.process != null and parent_thread.?.paused.read_volatile()) or flags.contains(.paused));
-                //thread.handle_count.write_volatile(2);
-                //thread.is_kernel_thread = !userland;
-                //thread.priority = @enumToInt(if (flags.contains(.low_priority)) Thread.Priority.low else Thread.Priority.normal);
-                //thread.kernel_stack_base = kernel_stack;
-                //thread.user_stack_base = if (userland) user_stack else 0;
-                //thread.user_stack_reserve = user_stack_reserve;
-                //thread.user_stack_commit.write_volatile(user_stack_commit);
-                //thread.terminatable_state.write_volatile(if (userland) .terminatable else .in_syscall);
-                //thread.type = if (flags.contains(.async_task)) Thread.Type.async_task else (if (flags.contains(.idle)) Thread.Type.idle else Thread.Type.normal);
-                //thread.id = @atomicRmw(u64, &scheduler.next_thread_id, .Add, 1, .SeqCst);
-                //thread.process = self;
-                //thread.item.value = thread;
-                //thread.all_item.value = thread;
-                //thread.process_item.value = thread;
-
-                //if (thread.type != .idle)
-                //{
-                    //thread.interrupt_context = kernel.Arch.initialize_thread(kernel_stack, kernel_stack_size, thread, start_address, argument1, argument2, userland, user_stack, user_stack_reserve);
-                //}
-                //else
-                //{
-                    //thread.state.write_volatile(.active);
-                    //thread.executing.write_volatile(true);
-                //}
-
-                //self.threads.insert_at_end(&thread.process_item);
-
-                //_ = scheduler.all_threads_mutex.acquire();
-                //scheduler.all_threads.insert_at_start(&thread.all_item);
-                //scheduler.all_threads_mutex.release();
-
-                //_ = open_handle(Process, self, 0);
-                //// log
-
-                //if (thread.type == .normal)
-                //{
-                    //// add to the start of the active thread list
-                    //scheduler.dispatch_spinlock.acquire();
-                    //scheduler.add_active_thread(thread, true);
-                    //scheduler.dispatch_spinlock.release();
-                //}
-                //else {} // idle and asynchronous threads dont need to be added to a scheduling list
-
-                //// The thread may now be terminated at any moment
-                //return thread;
-            //}
-            //else
-            //{
-                //if (user_stack != 0) _ = self.address_space.free(user_stack);
-                //if (kernel_stack != 0) _ = self.address_space.free(kernel_stack);
-                //scheduler.thread_pool.remove(thread);
-                //return null;
-            //}
-        //}
-        //else
-        //{
-            //return null;
-        //}
-
-    //}
-
-    //pub fn spawn_thread(self: *@This(), start_address: u64, argument1: u64, flags: Thread.Flags) ?*Thread
-    //{
-        //return self.spawn_thread_extended(start_address, argument1, flags, 0);
-    //}
-
-    //pub fn spawn_thread_no_flags(self: *@This(), start_address: u64, argument1: u64) ?*Thread
-    //{
-        //return self.spawn_thread(start_address, argument1, Thread.Flags.empty());
-    //}
 };
 
 pub const Heap = extern struct
@@ -8541,9 +8415,40 @@ const ResolveHandleStatus = enum(u8)
     normal = 2,
 };
 
+var terminal_lock: Spinlock = undefined;
+var terminal_buffer: [0x4000]u8 align(0x1000) = undefined;
+fn serial_write(message: []const u8) void
+{
+    serial_write_ex(message, false);
+}
+fn serial_write_ex(message: []const u8, terminal_locked: bool) callconv(.Inline) void
+{
+    if (terminal_locked) terminal_lock.assert_locked()
+    else terminal_lock.acquire();
+
+    for (message) |c|
+    {
+        ProcessorDebugOutputByte(c);
+    }
+    if (!terminal_locked) terminal_lock.release();
+}
+fn log(comptime format: []const u8, args: anytype) void
+{
+    terminal_lock.acquire();
+    var log_slice = std.fmt.bufPrint(terminal_buffer[0..], format, args)
+    catch |err|
+    {
+        var format_buffer: [512]u8 = undefined;
+        const error_str = std.fmt.bufPrint(format_buffer[0..], "Unable to print: {}", .{err}) catch unreachable;
+        KernelPanic(error_str);
+    };
+    serial_write_ex(log_slice, true);
+    terminal_lock.release();
+}
 
 export fn KernelInitialise() callconv(.C) void
 {
+    serial_write("KernelInitialise\n");
     kernelProcess = &_kernelProcess;
     kernelProcess = ProcessSpawn(.kernel).?;
     MMInitialise();
@@ -8555,6 +8460,7 @@ export fn KernelInitialise() callconv(.C) void
 
 export fn KernelMain(_: u64) callconv(.C) void
 {
+    serial_write("KernelMain\n");
     desktopProcess = ProcessSpawn(.desktop).?;
     drivers_init();
 
@@ -10077,7 +9983,9 @@ const InterruptEvent = extern struct
 fn drivers_init() callconv(.C) void
 {
     PCI.Driver.init();
+    serial_write("PCI driver initialized\n");
     AHCI.Driver.init();
+    serial_write("AHCI driver initialized\n");
 }
 
 const Timeout = extern struct
