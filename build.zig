@@ -314,10 +314,12 @@ const BIOS = struct
 
             self.align_buffer(0x200);
 
-            const superblock = @ptrCast(*RNUFS.Superblock, @alignCast(@alignOf(RNUFS.Superblock), &self.file_buffer.items[RNUFS.Superblock.offset]));
             const disk_start = self.file_buffer.items.len;
-            superblock.format(kernel_offset, kernel_size, disk_start);
+            const desktop_offset = disk_start;
             try self.copy_file(Desktop.out_elf_path, null);
+            const desktop_size = self.file_buffer.items.len - desktop_offset;
+            const superblock = @ptrCast(*RNUFS.Superblock, @alignCast(@alignOf(RNUFS.Superblock), &self.file_buffer.items[RNUFS.Superblock.offset]));
+            superblock.format(kernel_offset, kernel_size, disk_start, desktop_offset, desktop_size);
 
             // @TODO: continue writing to the disk
             print("Writing image disk to {s}\n", .{Image.final_path});
@@ -933,6 +935,7 @@ pub fn build(b: *Builder) !void
                 \\b KernelInitialise
                 \\b KernelPanic
                 \\b KernelMain
+                \\b SchedulerUnblockThread
                 \\b TODO
                 //\\watch *(uint64_t*)0xffffffff8003e168
                 \\target remote localhost:1234

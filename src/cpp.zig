@@ -13,6 +13,8 @@ fn zeroes(comptime T: type) T
     return zero_value;
 }
 
+const RNUFS = @import("rnu_fs.zig");
+
 pub const max_wait_count = 8;
 pub const max_processors = 256;
 pub const wait_no_timeout = std.math.maxInt(u64);
@@ -1371,10 +1373,7 @@ export fn SchedulerMaybeUpdateActiveList(thread: *Thread) callconv(.C) void
 
 export fn SchedulerUnblockThread(unblocked_thread: *Thread, previous_mutex_owner: ?*Thread) callconv(.C) void
 {
-    _ = unblocked_thread;
-    _ = previous_mutex_owner;
-    TODO();
-    //scheduler.unblock_thread(unblocked_thread, previous_mutex_owner);
+    scheduler.unblock_thread(unblocked_thread, previous_mutex_owner);
 }
 //extern fn SchedulerYield(context: *InterruptContext) callconv(.C) void;
 export fn SchedulerYield(context: *InterruptContext) callconv(.C) void
@@ -2588,23 +2587,6 @@ pub const Heap = extern struct
         }
     }
 
-    //// @TODO: this may be relying on C undefined behavior and might be causing different results than expected
-    //// @TODO: make this a zig function
-    //extern fn heap_calculate_index(size: u64) callconv(.C) u64;
-    //comptime
-    //{
-        //asm(
-        //\\.intel_syntax noprefix
-        //\\.global heap_calculate_index
-        //\\heap_calculate_index:
-        //\\bsr eax, edi
-        //\\xor eax, -32
-        //\\add eax, 33
-        //\\add rax, -5
-        //\\ret
-        //);
-    //}
-
     const large_allocation_threshold = 32768;
 };
 
@@ -2780,620 +2762,6 @@ pub const AddressSpace = extern struct
     commit_count: u64,
     reserve_count: u64,
     remove_async_task: AsyncTask,
-    //pub fn handle_page_fault(self: *@This(), fault_address: u64, flags: HandlePageFaultFlags) bool
-    //{
-        //const address = fault_address & ~@as(u64, page_size - 1);
-
-        //const lock_acquired = flags.contains(.lock_acquired);
-        //if (!lock_acquired and kernel.physical_allocator.get_available_page_count() < Physical.Allocator.critical_available_page_threshold and GetCurrentThread() != null and !GetCurrentThread().?.is_page_generator)
-        //{
-            //TODO();
-        //}
-
-        //var region: *Region = undefined;
-        //{
-            //if (!lock_acquired) _ = self.reserve_mutex.acquire()
-            //else self.reserve_mutex.assert_locked();
-            //defer if (!lock_acquired) self.reserve_mutex.release();
-
-            //if (self.find_region(address)) |result|
-            //{
-                //if (!result.data.pin.take_extended(WriterLock.shared, true)) return false;
-                //region = result;
-            //}
-            //else
-            //{
-                //return false;
-            //}
-        //}
-
-        //defer region.data.pin.return_lock(WriterLock.shared);
-        //_ = region.data.map_mutex.acquire();
-        //defer region.data.map_mutex.release();
-
-        //// Spurious page fault
-        //if (kernel.arch.translate_address(address, flags.contains(.write)) != 0)
-        //{
-            //return true;
-        //}
-
-        //var copy_on_write = false;
-        //var mark_modified = false;
-
-        //if (flags.contains(.write))
-        //{
-            //if (region.flags.contains(.copy_on_write)) copy_on_write = true
-            //else if (region.flags.contains(.read_only)) return false
-            //else mark_modified = true;
-        //}
-
-        //const offset_into_region = address - region.descriptor.base_address;
-        //_ = offset_into_region;
-        //var physical_allocation_flags = Physical.Flags.empty();
-        //var zero_page = true;
-        //var map_page_flags: MapPageFlags = MapPageFlags.empty();
-
-        //if (self.user)
-        //{
-            //physical_allocation_flags = physical_allocation_flags.or_flag(.zeroed);
-            //zero_page = false;
-            //map_page_flags = map_page_flags.or_flag(.user);
-        //}
-
-        //if (region.flags.contains(.not_cacheable)) map_page_flags = map_page_flags.or_flag(.not_cacheable);
-        //if (region.flags.contains(.write_combining)) map_page_flags = map_page_flags.or_flag(.write_combining);
-        //if (!mark_modified and !region.flags.contains(.fixed) and region.flags.contains(.file)) map_page_flags = map_page_flags.or_flag(.read_only);
-
-        //if (region.flags.contains(.physical))
-        //{
-            //_ = kernel.arch.map_page(self, region.data.u.physical.offset + address - region.descriptor.base_address, address, map_page_flags);
-            //return true;
-        //}
-        //else if (region.flags.contains(.shared))
-        //{
-            //const shared_region = region.data.u.shared.region.?;
-
-            //if (shared_region.handle_count.read_volatile() == 0) KernelPanic("shared region has no handles");
-
-            //_ = shared_region.mutex.acquire();
-            //defer shared_region.mutex.release();
-
-            //const offset = address - region.descriptor.base_address + region.data.u.shared.offset;
-
-            //if (offset >= shared_region.size)
-            //{
-                //return false;
-            //}
-
-            //const entry = @intToPtr(*u64, shared_region.address + (offset / page_size * @sizeOf(u64)));
-            //if (entry.* & shared_entry_present != 0) zero_page = false
-            //else entry.* = kernel.physical_allocator.allocate_with_flags(physical_allocation_flags) | shared_entry_present;
-
-            //_ = kernel.arch.map_page(self, entry.* & ~@as(u64, page_size - 1), address, map_page_flags);
-            //if (zero_page) std.mem.set(u8, @intToPtr([*]u8, address)[0..page_size], 0);
-            //return true;
-        //}
-        //else if (region.flags.contains(.file))
-        //{
-            //TODO();
-        //}
-        //else if (region.flags.contains(.normal))
-        //{
-            //if (!region.flags.contains(.no_commit_tracking) and !region.data.u.normal.commit.contains(offset_into_region >> page_bit_count))
-            //{
-                //return false;
-            //}
-
-            //const physical_address = kernel.physical_allocator.allocate_with_flags(physical_allocation_flags);
-            //_ = kernel.arch.map_page(self, physical_address, address, map_page_flags);
-            //if (zero_page) std.mem.set(u8, @intToPtr([*]u8, address)[0..page_size], 0);
-            //return true;
-        //}
-        //else if (region.flags.contains(.guard))
-        //{
-            //TODO();
-        //}
-        //else
-        //{
-            //TODO();
-        //}
-    //}
-
-    //pub fn find_region(self: *@This(), address: u64) ?*Region
-    //{
-        //self.reserve_mutex.assert_locked();
-
-        //if (self == &kernel.core.address_space)
-        //{
-            //const regions = kernel.core.regions;
-            //for (regions) |*region|
-            //{
-                //if (region.u.core.used and
-                    //region.descriptor.base_address <= address and
-                    //region.descriptor.base_address + (region.descriptor.page_count * page_size) > address)
-                //{
-                    //return region;
-                //}
-            //}
-        //}
-        //else
-        //{
-            //if (self.used_regions.find(address, .largest_below_or_equal)) |item|
-            //{
-                //const region = item.value.?;
-                //if (region.descriptor.base_address > address) KernelPanic("broken used_regions use\n");
-                //if (region.descriptor.base_address + region.descriptor.page_count * page_size > address)
-                //{
-                    //return region;
-                //}
-            //}
-        //}
-
-        //return null;
-    //}
-
-    //pub fn reserve(self: *@This(), byte_count: u64, flags: Region.Flags) ?*Region
-    //{
-        //return self.reserve_extended(byte_count, flags, 0);
-    //}
-
-    //pub fn reserve_extended(self: *@This(), byte_count: u64, flags: Region.Flags, forced_address: u64) ?*Region
-    //{
-        //const needed_page_count = ((byte_count + page_size - 1) & ~@as(u64, page_size - 1)) / page_size;
-
-        //if (needed_page_count == 0) return null;
-
-        //self.reserve_mutex.assert_locked();
-
-        //const region = blk:
-        //{
-            //if (self == &kernel.core.address_space)
-            //{
-                //if (kernel.core.regions.len == kernel.Arch.core_memory_region_count) return null;
-
-                //if (forced_address != 0) KernelPanic("Using a forced address in core address space\n");
-
-                //{
-                    //const new_region_count = kernel.core.regions.len + 1;
-                    //const needed_commit_page_count = new_region_count * @sizeOf(Region) / page_size;
-
-                    //while (kernel.core.region_commit_count < needed_commit_page_count) : (kernel.core.region_commit_count += 1)
-                    //{
-                        //if (!kernel.physical_allocator.commit(page_size, true)) return null;
-                    //}
-                //}
-
-                //for (kernel.core.regions) |*region|
-                //{
-                    //if (!region.u.core.used and region.descriptor.page_count >= needed_page_count)
-                    //{
-                        //if (region.descriptor.page_count > needed_page_count)
-                        //{
-                            //const last = kernel.core.regions.len;
-                            //kernel.core.regions.len += 1;
-                            //var split = &kernel.core.regions[last];
-                            //split.* = region.*;
-                            //split.descriptor.base_address += needed_page_count * page_size;
-                            //split.descriptor.page_count -= needed_page_count;
-                        //}
-
-                        //region.u.core.used = true;
-                        //region.descriptor.page_count = needed_page_count;
-                        //region.flags = flags;
-                        //// @WARNING: this is not working and may cause problem with the kernel
-                        //// region.data = std.mem.zeroes(@TypeOf(region.data));
-                        //region.zero_data_field();
-                        //assert(region.data.u.normal.commit.ranges.items.len == 0);
-
-                        //break :blk region;
-                    //}
-                //}
-
-                //return null;
-            //}
-            //else if (forced_address != 0)
-            //{
-                //TODO();
-            //}
-            //else
-            //{
-                //// @TODO: implement guard pages?
-                
-                //if (self.free_region_size.find(needed_page_count, .smallest_above_or_equal)) |item|
-                //{
-                    //const region = item.value.?;
-                    //self.free_region_base.remove(&region.u.item.base);
-                    //self.free_region_size.remove(&region.u.item.u.size);
-
-                    //if (region.descriptor.page_count > needed_page_count)
-                    //{
-                        //const split = kernel.core.heap.allocateT(Region, true).?;
-                        //split.* = region.*;
-
-                        //split.descriptor.base_address += needed_page_count * page_size;
-                        //split.descriptor.page_count -= needed_page_count;
-
-                        //_ = self.free_region_base.insert(&split.u.item.base, split, split.descriptor.base_address, .panic);
-                        //_ = self.free_region_size.insert(&split.u.item.u.size, split, split.descriptor.page_count, .allow);
-                    //}
-
-                    //region.zero_data_field();
-                    //region.descriptor.page_count = needed_page_count;
-                    //region.flags = flags;
-                    
-                    //// @TODO: if guard pages needed
-                    //_ = self.used_regions.insert(&region.u.item.base, region, region.descriptor.base_address, .panic);
-                    //break :blk region;
-                //}
-                //else
-                //{
-                    //return null;
-                //}
-            //}
-        //};
-
-        //if (!kernel.arch.commit_page_tables(self, region))
-        //{
-            //self.unreserve(region, false);
-            //return null;
-        //}
-
-        //if (self != &kernel.core.address_space)
-        //{
-            //region.u.item.u.non_guard = std.mem.zeroes(@TypeOf(region.u.item.u.non_guard));
-            //region.u.item.u.non_guard.value = region;
-            //self.used_regions_non_guard.insert_at_end(&region.u.item.u.non_guard);
-        //}
-
-        //self.reserve_count += needed_page_count;
-
-        //return region;
-    //}
-
-    //pub fn unreserve(self: *@This(), region_to_remove: *Region, unmap_pages: bool) void
-    //{
-        //self.unreserve_extended(region_to_remove, unmap_pages, false);
-    //}
-
-    //pub fn unreserve_extended(self: *@This(), region_to_remove: *Region, unmap_pages: bool, guard_region: bool) void
-    //{
-        //self.reserve_mutex.assert_locked();
-
-        //if (kernel.physical_allocator.next_region_to_balance == region_to_remove)
-        //{
-            //// if the balance thread paused while balancing this region, switch to the next region
-            //kernel.physical_allocator.next_region_to_balance = if (region_to_remove.u.item.u.non_guard.next) |next_item| next_item.value else null;
-            //kernel.physical_allocator.balance_resume_position = 0;
-        //}
-
-        //if (region_to_remove.flags.contains(.normal))
-        //{
-            //if (region_to_remove.data.u.normal.guard_before) |guard_before| self.unreserve_extended(guard_before, false, true);
-            //if (region_to_remove.data.u.normal.guard_after) |guard_after| self.unreserve_extended(guard_after, false, true);
-        //}
-        //else if (region_to_remove.flags.contains(.guard) and !guard_region)
-        //{
-            //// you can't free a guard region
-            //// @TODO: error
-            //return;
-        //}
-
-        //if (region_to_remove.u.item.u.non_guard.list != null and !guard_region)
-        //{
-            //region_to_remove.u.item.u.non_guard.remove_from_list();
-        //}
-
-        //if (unmap_pages) kernel.arch.unmap_pages(self, region_to_remove.descriptor.base_address, region_to_remove.descriptor.page_count, UnmapPagesFlags.empty());
-
-        //self.reserve_count += region_to_remove.descriptor.page_count;
-
-        //if (self == &kernel.core.address_space)
-        //{
-            //TODO();
-        //}
-        //else
-        //{
-            //self.used_regions.remove(&region_to_remove.u.item.base);
-            //const address = region_to_remove.descriptor.base_address;
-
-            //{
-                //if (self.free_region_base.find(address, .largest_below_or_equal)) |before|
-                //{
-                    //if (before.value.?.descriptor.base_address + before.value.?.descriptor.page_count * page_size == region_to_remove.descriptor.base_address)
-                    //{
-                        //region_to_remove.descriptor.base_address = before.value.?.descriptor.base_address;
-                        //region_to_remove.descriptor.page_count += before.value.?.descriptor.page_count;
-                        //self.free_region_base.remove(before);
-                        //self.free_region_size.remove(&before.value.?.u.item.u.size);
-                        //kernel.core.heap.free(@ptrToInt(before.value), @sizeOf(Region));
-                    //}
-                //}
-            //}
-
-            //{
-                //if (self.free_region_base.find(address, .smallest_above_or_equal)) |after|
-                //{
-                    //if (region_to_remove.descriptor.base_address + region_to_remove.descriptor.page_count * page_size == after.value.?.descriptor.base_address)
-                    //{
-                        //region_to_remove.descriptor.page_count += after.value.?.descriptor.page_count;
-                        //self.free_region_base.remove(after);
-                        //self.free_region_size.remove(&after.value.?.u.item.u.size);
-                        //kernel.core.heap.free(@ptrToInt(after.value), @sizeOf(Region));
-                    //}
-                //}
-            //}
-            
-            //_ = self.free_region_base.insert(&region_to_remove.u.item.base, region_to_remove, region_to_remove.descriptor.base_address, .panic);
-            //_ = self.free_region_size.insert(&region_to_remove.u.item.u.size, region_to_remove, region_to_remove.descriptor.page_count, .allow);
-        //}
-    //}
-
-    //pub fn standard_allocate(self: *@This(), byte_count: u64, flags: Region.Flags) u64
-    //{
-        //return self.standard_allocate_extended(byte_count, flags, 0, true);
-    //}
-
-    //pub fn standard_allocate_extended(self: *@This(), byte_count: u64, flags: Region.Flags, base_address: u64, commit_all: bool) u64
-    //{
-        //_ = self.reserve_mutex.acquire();
-        //defer self.reserve_mutex.release();
-
-        //if (self.reserve_extended(byte_count, flags.or_flag(.normal), base_address)) |region|
-        //{
-            //if (commit_all and !self.commit_range(region, 0, region.descriptor.page_count))
-            //{
-                //self.unreserve(region, false);
-                //return 0;
-            //}
-
-            //return region.descriptor.base_address;
-        //}
-        //else
-        //{
-            //return 0;
-        //}
-    //}
-
-    //pub fn commit_range(self: *@This(), region: *Region, page_offset: u64, page_count: u64) bool
-    //{
-        //self.reserve_mutex.assert_locked();
-        
-        //if (region.flags.contains(.no_commit_tracking))
-        //{
-            //KernelPanic("region does not support commit tracking");
-        //}
-
-        //if (page_offset >= region.descriptor.page_count or page_count > region.descriptor.page_count - page_offset)
-        //{
-            //KernelPanic("invalid region offset and page count");
-        //}
-
-        //if (!region.flags.contains(.normal))
-        //{
-            //KernelPanic("cannot commit into non-normal region");
-        //}
-
-        //var delta_s: i64 = 0;
-
-        //_ = region.data.u.normal.commit.set(page_offset, page_offset + page_count, &delta_s, false);
-
-        //if (delta_s < 0)
-        //{
-            //KernelPanic("commit range invalid delta calculation");
-        //}
-        
-        //const delta = @intCast(u64, delta_s);
-
-        //if (delta == 0) return true;
-
-        //{
-            //const commit_byte_count = delta * page_size;
-            //if (!kernel.physical_allocator.commit(commit_byte_count, region.flags.contains(.fixed))) return false;
-
-            //region.data.u.normal.commit_page_count += delta;
-            //self.commit_count += delta;
-
-            //if (region.data.u.normal.commit_page_count > region.descriptor.page_count)
-            //{
-                //KernelPanic("invalid delta calculation increases region commit past page count");
-            //}
-        //}
-
-        //if (!region.data.u.normal.commit.set(page_offset, page_offset + page_count, null, true))
-        //{
-            //TODO();
-        //}
-
-        //if (region.flags.contains(.fixed))
-        //{
-            //var i: u64 = page_offset;
-            //while (i < page_offset + page_count) : (i += 1)
-            //{
-                //if (!self.handle_page_fault(region.descriptor.base_address + i * page_size, HandlePageFaultFlags.from_flag(.lock_acquired)))
-                //{
-                    //KernelPanic("unable to fix pages\n");
-                //}
-            //}
-        //}
-
-        //return true;
-    //}
-
-    //pub fn find_and_pin_region(self: *@This(), address: u64, size: u64) ?*Region
-    //{
-        //// @TODO: this is overflow, we should handle it in a different way
-        //if (address + size < address) return null;
-
-        //_ = self.reserve_mutex.acquire();
-        //defer self.reserve_mutex.release();
-
-        //if (self.find_region(address)) |region|
-        //{
-            //if (region.descriptor.base_address > address) return null;
-            //if (region.descriptor.base_address  + region.descriptor.page_count * page_size < address + size) return null;
-            //if (!region.data.pin.take_extended(WriterLock.shared, true)) return null;
-
-            //return region;
-        //}
-        //else
-        //{
-            //return null;
-        //}
-    //}
-
-    //pub fn unpin_region(self: *@This(), region: *Region) void
-    //{
-        //_ = self.reserve_mutex.acquire();
-        //region.data.pin.return_lock(WriterLock.shared);
-        //self.reserve_mutex.release();
-    //}
-
-    //pub fn free(self: *@This(), address: u64) bool
-    //{
-        //return self.free_extended(address, 0, false);
-    //}
-
-    //pub fn free_extended(self: *@This(), address: u64, expected_size: u64, user_only: bool) bool
-    //{
-        //{
-            //_ = self.reserve_mutex.acquire();
-            //defer self.reserve_mutex.release();
-
-            //if (self.find_region(address)) |region|
-            //{
-                //if (user_only and !region.flags.contains(.user)) return false;
-                //if (!region.data.pin.take_extended(WriterLock.exclusive, true)) return false;
-                //if (region.descriptor.base_address != address and !region.flags.contains(.physical)) return false;
-                //if (expected_size != 0 and (expected_size + page_size - 1) / page_size != region.descriptor.page_count) return false;
-
-                //var unmap_pages = true;
-
-                //if (region.flags.contains(.normal))
-                //{
-                    //TODO();
-                //}
-                //else if (region.flags.contains(.shared))
-                //{
-                    //TODO();
-                //}
-                //else if (region.flags.contains(.file))
-                //{
-                    //TODO();
-                //}
-                //else if (region.flags.contains(.physical))
-                //{
-                    //// do nothing
-                //}
-                //else if (region.flags.contains(.guard))
-                //{
-                    //return false;
-                //}
-                //else
-                //{
-                    //KernelPanic("unsupported region type\n");
-                //}
-
-                //self.unreserve(region, unmap_pages);
-            //}
-            //else
-            //{
-                //return false;
-            //}
-        //}
-
-        //// @TODO: handle this in their if block
-        ////if (sharedRegionToFree) CloseHandleToObject(sharedRegionToFree, KERNEL_OBJECT_SHMEM);
-        ////if (nodeToFree && fileHandleFlags) CloseHandleToObject(nodeToFree, KERNEL_OBJECT_NODE, fileHandleFlags);
-        //return true;
-    //}
-
-    //pub fn map_shared(self: *@This(), shared_region: *SharedRegion, offset: u64, byte_count: u64) u64
-    //{
-        //return self.map_shared(shared_region, offset, byte_count);
-    //}
-
-    //pub fn map_shared_extended(self: *@This(), shared_region: *SharedRegion, offset: u64, bytes: u64, additional_flags: Region.Flags, base_address: u64) u64
-    //{
-        //_ = open_handle(SharedRegion, shared_region, 0);
-
-        //_ = self.reserve_mutex.acquire();
-        //defer self.reserve_mutex.release();
-        //var byte_count = bytes;
-        //if (offset & (page_size - 1) != 0) byte_count += offset & (page_size - 1);
-        //if (shared_region.size > offset and shared_region.size >= offset + byte_count)
-        //{
-            //if (self.reserve_extended(byte_count, additional_flags.or_flag(.shared), base_address)) |region|
-            //{
-                //if (!region.flags.contains(.shared)) KernelPanic("cannot commit into non-shared region");
-                //if (region.data.u.shared.region != null) KernelPanic("a shared region has already been bound");
-
-                //region.data.u.shared.region = shared_region;
-                //region.data.u.shared.offset = offset & ~@as(u64, page_size - 1);
-                //return region.descriptor.base_address + (offset & (page_size - 1));
-            //}
-        //}
-
-        //// fail
-        //TODO();
-    //}
-
-    //pub fn map_physical(self: *@This(), asked_offset: u64, asked_byte_count: u64, flags: Region.Flags) u64
-    //{
-        //const offset2 = asked_offset & (page_size - 1);
-        //const offset = asked_offset - offset2;
-        //const byte_count= asked_byte_count + @as(u64, if (offset2 != 0) page_size else 0);
-
-        //const region = blk:
-        //{
-            //_ = self.reserve_mutex.acquire();
-            //defer self.reserve_mutex.release();
-
-            //if (self.reserve(byte_count, flags.or_flag(.physical).or_flag(.fixed))) |result|
-            //{
-                //result.data.u.physical.offset = offset;
-                //break :blk result;
-            //}
-            //else
-            //{
-                //return 0;
-            //}
-        //};
-
-        //var page: u64 = 0;
-        //while (page < region.descriptor.page_count) : (page += 1)
-        //{
-            //_ = self.handle_page_fault(region.descriptor.base_address + page * page_size, HandlePageFaultFlags.empty());
-        //}
-
-        //return region.descriptor.base_address + offset2;
-    //}
-
-    //pub fn open_reference(self: *@This()) void
-    //{
-        //if (self == &kernel.process.address_space) return;
-        //if (self.reference_count.read_volatile() < 1) KernelPanic("space has invalid reference count");
-
-        //// @TODO: max processors macro 
-        //if (self.reference_count.read_volatile() >= 256 + 1) KernelPanic("space has too many references");
-
-        //_ = self.reference_count.atomic_fetch_add(1);
-    //}
-
-    //pub fn close_reference(self: *@This()) void
-    //{
-        //if (self == &kernel.process.address_space) return;
-        //if (self.reference_count.read_volatile() < 1) KernelPanic("space has invalid reference count");
-
-        //if (self.reference_count.atomic_fetch_sub(1) > 1) return;
-
-        //self.remove_async_task.register(remove_async);
-    //}
-
-    //fn remove_async(task: *AsyncTask) void
-    //{
-        //_ = task;
-        //TODO();
-    //}
 };
 
 export var _kernelMMSpace: AddressSpace = undefined;
@@ -9190,6 +8558,7 @@ export fn KernelMain(_: u64) callconv(.C) void
     desktopProcess = ProcessSpawn(.desktop).?;
     drivers_init();
 
+    parse_superblock();
     start_desktop_process();
     _ = shutdownEvent.wait();
 }
@@ -10354,6 +9723,11 @@ const AHCI = struct
 
             return true;
         }
+
+        fn get_drive(self: *@This()) *AHCI.Drive
+        {
+            return &self.drives[0];
+        }
     };
 
     const Drive = extern struct
@@ -10767,26 +10141,53 @@ fn align_address(address: u64, alignment: u64) u64
 
 fn hard_disk_read_desktop_executable() Error
 {
-    const unaligned_desktop_offset = hardcoded_kernel_file_offset + kernel_size;
-    const desktop_offset = align_address(unaligned_desktop_offset, 0x200);
+    //const unaligned_desktop_offset = hardcoded_kernel_file_offset + kernel_size;
+    //const desktop_offset = align_address(unaligned_desktop_offset, 0x200);
 
-    assert(AHCI.driver.drives.len > 0);
-    assert(AHCI.driver.drives.len == 1);
-    assert(AHCI.driver.mbr_partition_count > 0);
-    assert(AHCI.driver.mbr_partition_count == 1);
+    //assert(AHCI.driver.drives.len > 0);
+    //assert(AHCI.driver.drives.len == 1);
+    //assert(AHCI.driver.mbr_partition_count > 0);
+    //assert(AHCI.driver.mbr_partition_count == 1);
 
     var buffer = zeroes(DMABuffer);
     buffer.virtual_address = @ptrToInt(&desktop_executable_buffer);
     var request = zeroes(BlockDevice.AccessRequest);
-    request.offset = desktop_offset;
-    request.count = align_address(hardcoded_desktop_size, 0x200);
+    //request.offset = desktop_offset;
+    //request.count = align_address(hardcoded_desktop_size, 0x200);
+    //while (!superblock_mutex.acquire()) { }
+    request.offset = superblock.desktop_raw_offset;
+    request.count = align_address(superblock.desktop_size, 0x200);
+    //superblock_mutex.release();
     request.operation = BlockDevice.read;
-    request.device = @ptrCast(*BlockDevice, &AHCI.driver.drives[0]);
+    request.device = @ptrCast(*BlockDevice, AHCI.driver.get_drive());
     request.buffer = &buffer;
 
     const result = FSBlockDeviceAccess(request);
     assert(result == ES_SUCCESS);
     return result;
+}
+
+var superblock: RNUFS.Superblock = undefined;
+var superblock_mutex: Mutex = undefined;
+
+fn parse_superblock() void
+{
+    var superblock_buffer: [0x200]u8 align(0x200) = undefined;
+    var buffer = zeroes(DMABuffer);
+    buffer.virtual_address = @ptrToInt(&superblock_buffer);
+    var request = zeroes(BlockDevice.AccessRequest);
+    request.offset = RNUFS.Superblock.offset;
+    request.count = align_address(@sizeOf(RNUFS.Superblock), 0x200);
+    request.operation = BlockDevice.read;
+    request.device = @ptrCast(*BlockDevice, AHCI.driver.get_drive());
+    request.buffer = &buffer;
+
+    const result = FSBlockDeviceAccess(request);
+    assert(result == ES_SUCCESS);
+    var superblock_buffer_ptr = @intToPtr(*RNUFS.Superblock, @ptrToInt(&superblock_buffer));
+    //while (!superblock_mutex.acquire()) { }
+    superblock = superblock_buffer_ptr.*;
+    //superblock_mutex.release();
 }
 
 const ELF = extern struct
