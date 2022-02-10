@@ -16,7 +16,7 @@ const panic = std.debug.panic;
 const allocPrint = std.fmt.allocPrint;
 const comptimePrint = std.fmt.comptimePrint;
 
-const RNUFS = @import("src/rnu_fs.zig");
+const RNUFS = @import("src/filesystem.zig");
 
 const a_megabyte = 1024 * 1024;
 

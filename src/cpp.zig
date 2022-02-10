@@ -13,7 +13,7 @@ fn zeroes(comptime T: type) T
     return zero_value;
 }
 
-const RNUFS = @import("rnu_fs.zig");
+const Filesystem = @import("filesystem.zig");
 
 pub const max_wait_count = 8;
 pub const max_processors = 256;
@@ -10211,7 +10211,7 @@ fn hard_disk_read_desktop_executable() Error
     return result;
 }
 
-var superblock: RNUFS.Superblock = undefined;
+var superblock: Filesystem.Superblock = undefined;
 var superblock_mutex: Mutex = undefined;
 
 fn parse_superblock() void
@@ -10220,15 +10220,15 @@ fn parse_superblock() void
     var buffer = zeroes(DMABuffer);
     buffer.virtual_address = @ptrToInt(&superblock_buffer);
     var request = zeroes(BlockDevice.AccessRequest);
-    request.offset = RNUFS.Superblock.offset;
-    request.count = align_u64(@sizeOf(RNUFS.Superblock), 0x200);
+    request.offset = Filesystem.Superblock.offset;
+    request.count = align_u64(@sizeOf(Filesystem.Superblock), 0x200);
     request.operation = BlockDevice.read;
     request.device = @ptrCast(*BlockDevice, AHCI.driver.get_drive());
     request.buffer = &buffer;
 
     const result = FSBlockDeviceAccess(request);
     assert(result == ES_SUCCESS);
-    var superblock_buffer_ptr = @intToPtr(*RNUFS.Superblock, @ptrToInt(&superblock_buffer));
+    var superblock_buffer_ptr = @intToPtr(*Filesystem.Superblock, @ptrToInt(&superblock_buffer));
     //while (!superblock_mutex.acquire()) { }
     superblock = superblock_buffer_ptr.*;
     //superblock_mutex.release();
