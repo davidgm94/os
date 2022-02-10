@@ -16,7 +16,7 @@ const panic = std.debug.panic;
 const allocPrint = std.fmt.allocPrint;
 const comptimePrint = std.fmt.comptimePrint;
 
-const RNUFS = @import("src/filesystem.zig");
+const RNUFS = @import("src/shared/filesystem.zig");
 
 const a_megabyte = 1024 * 1024;
 
@@ -36,14 +36,6 @@ const Loader = enum
 const build_cache_dir = "zig-cache/";
 const build_output_dir = "zig-out/bin/";
 
-const common_c_flags = &[_][]const u8
-{
-    "-ffreestanding",
-    "-fno-exceptions",
-    "-Wall",
-    "-Wextra",
-};
-
 const NASM = struct
 {
     fn build_flat_binary(builder: *Builder, comptime src: []const u8, comptime out: []const u8) *RunStep
@@ -51,92 +43,25 @@ const NASM = struct
         const base_nasm_command = &[_][]const u8 { "nasm", "-fbin", src, "-o", out };
         return builder.addSystemCommand(base_nasm_command);
     }
-
-    fn build_object(builder: *Builder, executable: *LibExeObjStep, comptime obj_src: []const u8, comptime obj_out: []const u8) void
-    {
-        const base_nasm_command = &[_][]const u8 { "nasm", "-felf64", "-g", "-F", "dwarf", obj_src, "-o", obj_out };
-        const nasm_command = builder.addSystemCommand(base_nasm_command);
-        executable.addObjectFile(obj_out);
-        executable.step.dependOn(&nasm_command.step);
-    }
 };
 
 const Kernel = struct
 {
-    elf_name: []const u8,
-    out_path: []const u8,
-    elf_path: []const u8,
-    stripped: []const u8,
+    const elf_name = "kernel.elf";
+    const out_path = build_cache_dir;
+    const elf_path = build_cache_dir ++ elf_name;
+    const linker_script_path = "src/kernel/linker.ld";
 
-    const Version = enum
+    fn build(b: *Builder) void
     {
-        Rust,
-        CPP,
-        Zig,
-    };
-
-    const rust = Kernel
-    {
-        .elf_name = Rust.elf_name,
-        .out_path = Rust.out_path,
-        .elf_path = Rust.out_path ++ Rust.elf_name,
-        .stripped = Rust.out_path ++ Rust.elf_name ++ ".stripped",
-    };
-
-    const cpp = Kernel
-    {
-        .elf_name = CPP.elf_name,
-        .out_path = build_cache_dir,
-        .elf_path = build_cache_dir ++ CPP.elf_name,
-        .stripped = undefined
-    };
-
-    const zig = Kernel
-    {
-        .elf_name = Zig.elf_name,
-        .out_path = build_cache_dir,
-        .elf_path = build_cache_dir ++ Zig.elf_name,
-        .stripped = undefined
-    };
-
-    fn strip_symbols(b: *Builder) ?*RunStep
-    {
-        if (kernel_version == .Rust)
-        {
-            const result = b.addSystemCommand(&[_][]const u8
-                {
-                    "objcopy",
-                    "--strip-debug",
-                    switch (kernel_version)
-                    {
-                        .CPP => Kernel.cpp.elf_path,
-                        .Rust => Kernel.rust.elf_path,
-                        .Zig => Kernel.zig.elf_path,
-                    },
-                    switch (kernel_version)
-                    {
-                        .CPP => Kernel.cpp.stripped,
-                        .Rust => Kernel.rust.stripped,
-                        .Zig => Kernel.zig.stripped,
-                    },
-                    });
-            result.step.dependOn(b.default_step);
-            return result;
-        }
-
-        return null;
-    }
-
-    fn build_kernel_common(b: *Builder, kernel_zig_file: ?[]const u8, kernel_output_file: []const u8) *LibExeObjStep
-    {
-        const kernel = b.addExecutable(kernel_output_file, kernel_zig_file);
+        const kernel = b.addExecutable(elf_name, "src/kernel/main.zig");
         kernel.red_zone = false;
         kernel.code_model = .kernel;
         kernel.disable_stack_probing = true;
         kernel.disable_sanitize_c = false;
         kernel.link_function_sections = false;
         kernel.setBuildMode(b.standardReleaseOptions());
-        kernel.setMainPkgPath("src");
+        kernel.setMainPkgPath(".");
         kernel.setLinkerScriptPath(FileSource.relative(Kernel.linker_script_path));
         kernel.setOutputDir(build_cache_dir);
 
@@ -166,55 +91,8 @@ const Kernel = struct
         };
         kernel.setTarget(kernel_cross_target);
 
-        return kernel;
+        b.default_step.dependOn(&kernel.step);
     }
-
-    const Rust = struct
-    {
-        const elf_name = "renaissance-os";
-        const out_path = "target/rust_target/debug/";
-
-        fn build(b: *Builder) void
-        {
-            const cargo_build = b.addSystemCommand(&[_][]const u8 { "cargo", "build" });
-            b.default_step.dependOn(&cargo_build.step);
-        }
-    };
-
-    const CPP = struct
-    {
-        fn build(b: *Builder) void
-        {
-            const kernel = build_kernel_common(b, "src/cpp.zig", cpp.elf_name);
-
-            //kernel.addCSourceFiles(c_source_files, common_c_flags);
-
-            //NASM.build_object(b, kernel, "src/x86_64.S", "zig-cache/kernel_x86.o");
-
-            b.default_step.dependOn(&kernel.step);
-        }
-
-        const elf_name = "cpp_kernel.elf";
-        const c_source_files = &[_][]const u8
-        {
-            "src/kernel.cpp",
-        };
-    };
-
-    const Zig = struct
-    {
-        const elf_name = "zig_kernel.elf";
-        const src_file = "src/main.zig";
-
-        fn build(b: *Builder) void
-        {
-            const kernel = build_kernel_common(b, Zig.src_file, zig.elf_name);
-            //kernel.addAssemblyFile("src/arch.S");
-            b.default_step.dependOn(&kernel.step);
-        }
-    };
-
-    const linker_script_path = "src/linker.ld";
 };
 
 const BIOS = struct
@@ -225,7 +103,7 @@ const BIOS = struct
 
     const Bootloader = struct
     {
-        const source_root_dir = "src/boot/x86/";
+        const source_root_dir = "src/boot/x86/bios/";
 
         const mbr_source_file = source_root_dir ++ "mbr.S";
         const mbr_output_file = "mbr.bin";
@@ -267,7 +145,7 @@ const BIOS = struct
         fn build(_step: *Step) !void
         {
             const self = @fieldParentPtr(Self, "step", _step);
-            const MBR = @import("src/boot/x86/mbr.zig");
+            const MBR = @import("src/boot/x86/bios/mbr.zig");
 
             self.file_buffer = try ArrayList(u8).initCapacity(self.builder.allocator, Image.size);
             self.file_buffer.items.len = Image.size;
@@ -300,14 +178,7 @@ const BIOS = struct
             self.file_buffer.items.len = kernel_offset;
             print("File offset: {}\n", .{self.file_buffer.items.len});
             var kernel_size: u32 = 0;
-            try self.copy_file(
-                switch (kernel_version)
-                {
-                    .Rust => Kernel.rust.stripped,
-                    .CPP => Kernel.cpp.elf_path,
-                    .Zig => Kernel.zig.elf_path,
-                },
-                null);
+            try self.copy_file(Kernel.elf_path, null);
             kernel_size = @intCast(u32, self.file_buffer.items.len - kernel_offset);
             var kernel_size_writer = @ptrCast(*align(1) u32, &self.file_buffer.items[MBR.Offset.kernel_size]);
             kernel_size_writer.* = kernel_size;
@@ -359,11 +230,6 @@ const BIOS = struct
             };
 
             self.step.dependOn(b.default_step);
-
-            if (Kernel.strip_symbols(b)) |strip_symbols|
-            {
-                self.step.dependOn(&strip_symbols.step);
-            }
 
             step = b.step("bios", "Create BIOS image");
             step.dependOn(&self.step);
@@ -443,12 +309,7 @@ const UEFI = struct
         const files_to_copy = &[_][]const u8
         {
             app_out_path,
-            switch (kernel_version)
-            {
-                .Rust => Kernel.rust.stripped,
-                .CPP => Kernel.cpp.elf_path,
-                .Zig => Kernel.zig.elf_path,
-            },
+            Kernel.elf_path,
             Desktop.out_elf_path,
             UEFI.asm_out_path,
         };
@@ -598,8 +459,6 @@ const UEFI = struct
                         }
                     }
 
-                    const strip_symbols = Kernel.strip_symbols(b);
-
                     assert(created_directories.items.len == directory_steps.items.len);
 
                     var previous_command_step: *Step = undefined;
@@ -619,7 +478,6 @@ const UEFI = struct
                             }
                         );
                         partition_copy_efi_file.step.dependOn(b.default_step);
-                        if (strip_symbols) |strip| partition_copy_efi_file.step.dependOn(&strip.step);
                         partition_copy_efi_file.step.dependOn(&partition_create_zero_blob.step);
                         partition_copy_efi_file.step.dependOn(&partition_format.step);
 
@@ -772,26 +630,17 @@ const UEFI = struct
 
 const Desktop = struct
 {
-    const build_cpp = false;
     const exe_name = "desktop.elf";
-    const cpp_src_file = "src/desktop.cpp";
-    const zig_src_file = "src/desktop.zig";
-    const asm_src_file = "src/desktop.S";
-    const asm_out_file = build_cache_dir ++ "desktop_asm.o";
+    const zig_src_file = "src/desktop/desktop.zig";
     const out_elf_path = build_cache_dir ++ exe_name;
 
     fn build(b: *Builder) void
     {
-        const desktop = b.addExecutable(exe_name, if (build_cpp) null else zig_src_file);
+        const desktop = b.addExecutable(exe_name, zig_src_file);
+        desktop.setMainPkgPath(".");
         desktop.setOutputDir(build_cache_dir);
         desktop.setBuildMode(b.standardReleaseOptions());
         desktop.setTarget(cross_target);
-
-        if (build_cpp)
-        {
-            desktop.addCSourceFile(cpp_src_file, common_c_flags);
-            NASM.build_object(b, desktop, asm_src_file, asm_out_file);
-        }
 
         b.default_step.dependOn(&desktop.step);
     }
@@ -806,7 +655,7 @@ const qemu_base_command_str = &[_][]const u8
     "-M", "q35", "-cpu", "Haswell",
     "-m", "4096",
     "-serial", "stdio",
-    //"-d", "int,cpu_reset,in_asm",
+    "-d", "int,cpu_reset,in_asm",
     //"-D", "logging.txt",
     //"-d", "guest_errors,int,cpu,cpu_reset,in_asm"
 };
@@ -876,7 +725,6 @@ const Debug = struct
 };
 
 const loader = Loader.BIOS;
-const kernel_version = Kernel.Version.CPP;
 const final_image = switch (loader)
 {
     .BIOS => BIOS.Image.final_path,
@@ -892,12 +740,8 @@ pub fn build(b: *Builder) !void
             .BIOS => BIOS.Bootloader.build(b),
             .UEFI => UEFI.Bootloader.build(b),
         }
-        switch (kernel_version)
-        {
-            .CPP  => Kernel.CPP.build(b),
-            .Rust => Kernel.Rust.build(b),
-            .Zig  => Kernel.Zig.build(b),
-        }
+
+        Kernel.build(b);
         Desktop.build(b);
     }
 
@@ -941,14 +785,7 @@ pub fn build(b: *Builder) !void
                 \\target remote localhost:1234
                 \\c
                 ,
-                .{
-                    switch (kernel_version)
-                    {
-                        .CPP => Kernel.cpp.elf_path,
-                        .Rust => Kernel.rust.elf_path,
-                        .Zig => Kernel.zig.elf_path,
-                    }
-                });
+                .{Kernel.elf_path});
         };
         const debug_step = Debug.create(b, image_step, gdb_script, true);
         const debug_step_named = b.step("debug", "The debugger GF and QEMU are launched in order to debug the kernel"); 

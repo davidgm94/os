@@ -13,7 +13,7 @@ fn zeroes(comptime T: type) T
     return zero_value;
 }
 
-const Filesystem = @import("filesystem.zig");
+const Filesystem = @import("../shared/filesystem.zig");
 
 pub const max_wait_count = 8;
 pub const max_processors = 256;
@@ -44,9 +44,9 @@ pub const low_memory_limit = 0x100000000; // The first 4GB is mapped here.
 
 const ES_SUCCESS = -1;
 
-
 export var _stack: [0x4000]u8 align(0x1000) linksection(".bss") = undefined;
 export var _idt_data: [idt_entry_count]IDTEntry align(0x1000) linksection(".bss") = undefined;
+/// Array of pointers to the CPU local states
 export var _cpu_local_storage: [0x2000]u8 align(0x1000) linksection(".bss") = undefined;
 
 export var timeStampCounterSynchronizationValue = Volatile(u64) { .value = 0 };
@@ -968,7 +968,7 @@ fn KernelPanic(message: []const u8) noreturn
     ProcessorHalt();
 }
 
-fn KernelPanicF(comptime format: []const u8, args: anytype) noreturn
+pub fn KernelPanicF(comptime format: []const u8, args: anytype) noreturn
 {
     ProcessorDisableInterrupts();
     _ = ProcessorSendIPI(kernel_panic_ipi, true, -1);
@@ -9075,6 +9075,12 @@ const AHCI = struct
             driver.partition_devices.ptr = @intToPtr([*]PartitionDevice, address + partition_devices_offset);
             driver.partition_devices.len = 0;
             driver.setup();
+
+            // @TODO: delete in the future
+            assert(AHCI.driver.drives.len > 0);
+            assert(AHCI.driver.drives.len == 1);
+            assert(AHCI.driver.mbr_partition_count > 0);
+            assert(AHCI.driver.mbr_partition_count == 1);
         }
 
         fn setup(self: *@This()) void
@@ -9641,6 +9647,27 @@ const AHCI = struct
         port: u64,
 
         const max_count = 64;
+
+
+        fn read_file(self: *@This(), file_buffer: []u8, file_descriptor: *const Filesystem.File.Descriptor) ReadError!void
+        {
+            if (file_descriptor.offset & (self.block_device.sector_size - 1) != 0) KernelPanic("Disk offset should be sector-aligned");
+            const sector_aligned_size = align_u64(file_descriptor.size, self.block_device.sector_size);
+            if (file_buffer.len < sector_aligned_size) KernelPanic("Buffer too small\n");
+
+            var buffer = zeroes(DMABuffer);
+            buffer.virtual_address = @ptrToInt(file_buffer.ptr);
+
+            var request = zeroes(BlockDevice.AccessRequest);
+            request.offset = file_descriptor.offset;
+            request.count = sector_aligned_size;
+            request.operation = BlockDevice.read;
+            request.device = &self.block_device;
+            request.buffer = &buffer;
+
+            const result = FSBlockDeviceAccess(request);
+            if (result != ES_SUCCESS) return ReadError.failed;
+        }
     };
 
     var driver: *Driver = undefined;
@@ -10183,55 +10210,37 @@ fn align_u64(address: u64, alignment: u64) u64
     return (address + mask) & ~mask;
 }
 
-fn hard_disk_read_desktop_executable() Error
+const ReadError = error
 {
-    //const unaligned_desktop_offset = hardcoded_kernel_file_offset + kernel_size;
-    //const desktop_offset = align_u64(unaligned_desktop_offset, 0x200);
+    failed,
+};
 
-    //assert(AHCI.driver.drives.len > 0);
-    //assert(AHCI.driver.drives.len == 1);
-    //assert(AHCI.driver.mbr_partition_count > 0);
-    //assert(AHCI.driver.mbr_partition_count == 1);
+fn read_file_in_buffer(file_buffer: []u8, file_descriptor: *const Filesystem.File.Descriptor) ReadError!void
+{
+    try AHCI.driver.get_drive().read_file(file_buffer, file_descriptor);
+}
 
-    var buffer = zeroes(DMABuffer);
-    buffer.virtual_address = @ptrToInt(&desktop_executable_buffer);
-    var request = zeroes(BlockDevice.AccessRequest);
-    //request.offset = desktop_offset;
-    //request.count = align_u64(hardcoded_desktop_size, 0x200);
-    //while (!superblock_mutex.acquire()) { }
-    request.offset = superblock.desktop_raw_offset;
-    request.count = align_u64(superblock.desktop_size, 0x200);
-    //superblock_mutex.release();
-    request.operation = BlockDevice.read;
-    request.device = @ptrCast(*BlockDevice, AHCI.driver.get_drive());
-    request.buffer = &buffer;
+fn read_file_alloc(space: *AddressSpace, file_descriptor: *const Filesystem.File.Descriptor) ![]u8
+{
+    const drive = AHCI.Driver.get_drive();
+    const sector_aligned_size = align_u64(file_descriptor.size, drive.block_device.sector_size);
+    const file_buffer = @intToPtr(?[*]u8, MMStandardAllocate(space, sector_aligned_size, Region.Flags.empty(), 0, true)) orelse return ReadError.failed;
+    return try drive.read_file(file_buffer, file_descriptor);
+}
 
-    const result = FSBlockDeviceAccess(request);
-    assert(result == ES_SUCCESS);
-    return result;
+fn hard_disk_read_desktop_executable() void
+{
+    read_file_in_buffer(@intToPtr([*]u8, @ptrToInt(&desktop_executable_buffer))[0..desktop_executable_buffer.len], &superblock.desktop_exe) catch KernelPanic("Unable to read desktop executable\n");
 }
 
 var superblock: Filesystem.Superblock = undefined;
-var superblock_mutex: Mutex = undefined;
 
 fn parse_superblock() void
 {
     var superblock_buffer: [0x200]u8 align(0x200) = undefined;
-    var buffer = zeroes(DMABuffer);
-    buffer.virtual_address = @ptrToInt(&superblock_buffer);
-    var request = zeroes(BlockDevice.AccessRequest);
-    request.offset = Filesystem.Superblock.offset;
-    request.count = align_u64(@sizeOf(Filesystem.Superblock), 0x200);
-    request.operation = BlockDevice.read;
-    request.device = @ptrCast(*BlockDevice, AHCI.driver.get_drive());
-    request.buffer = &buffer;
-
-    const result = FSBlockDeviceAccess(request);
-    assert(result == ES_SUCCESS);
+    read_file_in_buffer(&superblock_buffer, &Filesystem.Superblock.file_descriptor) catch KernelPanic("Unable to read superblock\n");
     var superblock_buffer_ptr = @intToPtr(*Filesystem.Superblock, @ptrToInt(&superblock_buffer));
-    //while (!superblock_mutex.acquire()) { }
     superblock = superblock_buffer_ptr.*;
-    //superblock_mutex.release();
 }
 
 const ELF = extern struct
@@ -10282,7 +10291,7 @@ export fn LoadDesktopELF(exe: *LoadedExecutable) Error
 {
     const process = GetCurrentThread().?.process.?;
 
-    if (hard_disk_read_desktop_executable() != ES_SUCCESS) KernelPanic("Can't read desktop executable from the disk");
+    hard_disk_read_desktop_executable();
 
     const header = @ptrCast(*ELF.Header, &desktop_executable_buffer);
     if (header.magic != 0x464c457f) return Errors.ES_ERROR_UNSUPPORTED_EXECUTABLE;
