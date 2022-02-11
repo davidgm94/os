@@ -12,6 +12,6 @@ pub fn init() void
     serial.write("AHCI driver initialized\n");
     SVGA.Driver.init();
     serial.write("SVGA driver initialized\n");
-    SVGA.driver.debug_clear_screen();
+    SVGA.driver.debug_clear_screen(0x18, 0x7e, 0xcf);
 }
 

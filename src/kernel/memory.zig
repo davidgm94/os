@@ -63,7 +63,7 @@ pub const Heap = extern struct
 
     pub fn allocate(self: *@This(), asked_size: u64, zero_memory: bool) u64
     {
-        if (@bitCast(i64, asked_size) < 0) kernel.panic("heap panic");
+        if (@bitCast(i64, asked_size) < 0) kernel.panicf("heap panic", .{});
 
         const size = (asked_size + HeapRegion.used_header_size + 0x1f) & ~@as(u64, 0x1f);
 
@@ -136,7 +136,7 @@ pub const Heap = extern struct
             }
         };
 
-        if (region.used != 0 or region.u1.size < size) kernel.panic("heap panic\n");
+        if (region.used != 0 or region.u1.size < size) kernel.panicf("heap panic\n", .{});
 
         self.allocation_count.increment();
         _ = self.size.atomic_fetch_add(size);
@@ -184,7 +184,7 @@ pub const Heap = extern struct
     {
         if (region.used != 0 or region.u1.size < 32)
         {
-            kernel.panic("heap panic\n");
+            kernel.panicf("heap panic\n", .{});
         }
 
         const index = HeapCalculateIndex(region.u1.size);
@@ -224,12 +224,12 @@ pub const Heap = extern struct
 
     pub fn free(self: *@This(), address: u64, expected_size: u64) void
     {
-        if (address == 0 and expected_size != 0) kernel.panic("heap panic");
+        if (address == 0 and expected_size != 0) kernel.panicf("heap panic", .{});
         if (address == 0) return;
 
         var region = @intToPtr(*HeapRegion, address).get_header().?;
-        if (region.used != HeapRegion.used_magic) kernel.panic("heap panic");
-        if (expected_size != 0 and region.u2.allocation_size != expected_size) kernel.panic("heap panic");
+        if (region.used != HeapRegion.used_magic) kernel.panicf("heap panic", .{});
+        if (expected_size != 0 and region.u2.allocation_size != expected_size) kernel.panicf("heap panic", .{});
 
         if (region.u1.size == 0)
         {
@@ -240,7 +240,7 @@ pub const Heap = extern struct
 
         {
             const first_region = @intToPtr(*HeapRegion, @ptrToInt(region) - region.offset + 65536 - 32);
-            if (@intToPtr(**Heap, first_region.get_data()).* != self) kernel.panic("heap panic");
+            if (@intToPtr(**Heap, first_region.get_data()).* != self) kernel.panicf("heap panic", .{});
         }
 
         _ = self.mutex.acquire();
@@ -249,7 +249,7 @@ pub const Heap = extern struct
 
         region.used = 0;
 
-        if (region.offset < region.previous) kernel.panic("heap panic");
+        if (region.offset < region.previous) kernel.panicf("heap panic", .{});
 
         self.allocation_count.decrement();
         _ = self.size.atomic_fetch_sub(region.u1.size);
@@ -278,7 +278,7 @@ pub const Heap = extern struct
 
         if (region.u1.size == 65536 - 32)
         {
-            if (region.offset != 0) kernel.panic("heap panic");
+            if (region.offset != 0) kernel.panicf("heap panic", .{});
 
             self.block_count.decrement();
 
@@ -326,34 +326,34 @@ pub const Heap = extern struct
                     {
                         if (@ptrToInt(previous) != @ptrToInt(region.get_previous()))
                         {
-                            kernel.panic("heap panic\n");
+                            kernel.panicf("heap panic\n", .{});
                         }
                     }
                     else
                     {
-                        if (region.previous != 0) kernel.panic("heap panic\n");
+                        if (region.previous != 0) kernel.panicf("heap panic\n", .{});
                     }
 
-                    if (region.u1.size & 31 != 0) kernel.panic("heap panic");
+                    if (region.u1.size & 31 != 0) kernel.panicf("heap panic", .{});
 
                     if (@ptrToInt(region) - @ptrToInt(start) != region.offset)
                     {
-                        kernel.panic("heap panic\n");
+                        kernel.panicf("heap panic\n", .{});
                     }
 
                     if (region.used != HeapRegion.used_magic and region.used != 0)
                     {
-                        kernel.panic("heap panic");
+                        kernel.panicf("heap panic", .{});
                     }
 
                     if (region.used == 0 and region.region_list_reference == null)
                     {
-                        kernel.panic("heap panic\n");
+                        kernel.panicf("heap panic\n", .{});
                     }
 
                     if (region.used == 0 and region.u2.region_list_next != null and region.u2.region_list_next.?.region_list_reference != &region.u2.region_list_next)
                     {
-                        kernel.panic("heap panic");
+                        kernel.panicf("heap panic", .{});
                     }
 
                     maybe_previous = region;
@@ -362,7 +362,7 @@ pub const Heap = extern struct
 
                 if (region != end)
                 {
-                    kernel.panic("heap panic");
+                    kernel.panicf("heap panic", .{});
                 }
             }
         }
@@ -397,7 +397,7 @@ pub const HeapRegion = extern struct
 
     fn remove_free(self: *@This()) void
     {
-        if (self.region_list_reference == null or self.used != 0) kernel.panic("heap panic\n");
+        if (self.region_list_reference == null or self.used != 0) kernel.panicf("heap panic\n", .{});
 
         self.region_list_reference.?.* = self.u2.region_list_next;
 
@@ -473,7 +473,7 @@ pub const AddressSpace = extern struct
         {
             const item = self.used_regions.find(address, .largest_below_or_equal) orelse return null;
             const region = item.value.?;
-            if (region.descriptor.base_address > address) kernel.panic("broken used regions tree");
+            if (region.descriptor.base_address > address) kernel.panicf("broken used regions tree", .{});
             if (region.descriptor.base_address + region.descriptor.page_count * page_size <= address) return null;
             return region;
         }
@@ -601,8 +601,8 @@ pub const AddressSpace = extern struct
 
             if (region.flags.contains(.normal))
             {
-                if (!space.decommit_range(region, 0, region.descriptor.page_count)) kernel.panic("Could not decommit the entere region");
-                if (region.data.u.normal.commit_page_count != 0) kernel.panic("After decommiting range covering the entere region, some pages were still commited");
+                if (!space.decommit_range(region, 0, region.descriptor.page_count)) kernel.panicf("Could not decommit the entere region", .{});
+                if (region.data.u.normal.commit_page_count != 0) kernel.panicf("After decommiting range covering the entere region, some pages were still commited", .{});
                 region.data.u.normal.commit.ranges.free();
                 unmap_pages = false;
             }
@@ -616,7 +616,7 @@ pub const AddressSpace = extern struct
             }
             else if (region.flags.contains(.physical)) { } // do nothing
             else if (region.flags.contains(.guard)) return false
-            else kernel.panic("unsupported region type");
+            else kernel.panicf("unsupported region type", .{});
             return true;
         }
     }
@@ -624,7 +624,7 @@ pub const AddressSpace = extern struct
     {
         if (space != &kernel.address_space)
         {
-            if (space.reference_count.read_volatile() < 1) kernel.panic("space has invalid reference count");
+            if (space.reference_count.read_volatile() < 1) kernel.panicf("space has invalid reference count", .{});
             _ = space.reference_count.atomic_fetch_add(1);
         }
     }
@@ -675,14 +675,14 @@ pub const AddressSpace = extern struct
     {
         space.reserve_mutex.assert_locked();
 
-        if (region.flags.contains(.no_commit_tracking)) kernel.panic("region does not support commit tracking");
-        if (page_offset >= region.descriptor.page_count or page_count > region.descriptor.page_count - page_offset) kernel.panic("invalid region offset and page count");
-        if (!region.flags.contains(.normal)) kernel.panic("cannot commit into non-normal region");
+        if (region.flags.contains(.no_commit_tracking)) kernel.panicf("region does not support commit tracking", .{});
+        if (page_offset >= region.descriptor.page_count or page_count > region.descriptor.page_count - page_offset) kernel.panicf("invalid region offset and page count", .{});
+        if (!region.flags.contains(.normal)) kernel.panicf("cannot commit into non-normal region", .{});
 
         var delta: i64 = 0;
         _ = region.data.u.normal.commit.set(page_offset, page_offset + page_count, &delta, false);
 
-        if (delta < 0) kernel.panic("Invalid delta calculation");
+        if (delta < 0) kernel.panicf("Invalid delta calculation", .{});
         if (delta == 0) return true;
 
         const delta_u = @intCast(u64, delta);
@@ -691,7 +691,7 @@ pub const AddressSpace = extern struct
         region.data.u.normal.commit_page_count += delta_u;
         space.commit_count += delta_u;
 
-        if (region.data.u.normal.commit_page_count > region.descriptor.page_count) kernel.panic("invalid delta calculation increases region commit past page count");
+        if (region.data.u.normal.commit_page_count > region.descriptor.page_count) kernel.panicf("invalid delta calculation increases region commit past page count", .{});
 
         if (!region.data.u.normal.commit.set(page_offset, page_offset + page_count, null, true))
         {
@@ -706,7 +706,7 @@ pub const AddressSpace = extern struct
             var i = page_offset;
             while (i < page_offset + page_count) : (i += 1)
             {
-                if (!space.handle_page_fault(region.descriptor.base_address + i * page_size, HandlePageFaultFlags.from_flag(.lock_acquired))) kernel.panic("unable to fix pages");
+                if (!space.handle_page_fault(region.descriptor.base_address + i * page_size, HandlePageFaultFlags.from_flag(.lock_acquired))) kernel.panicf("unable to fix pages", .{});
             }
         }
 
@@ -727,7 +727,7 @@ pub const AddressSpace = extern struct
             {
                 if (kernel.mmCoreRegionCount == arch.core_memory_region_count) return null;
 
-                if (forced_address != 0) kernel.panic("Using a forced address in core address space\n");
+                if (forced_address != 0) kernel.panicf("Using a forced address in core address space\n", .{});
 
                 {
                     const new_region_count = kernel.mmCoreRegionCount + 1;
@@ -879,18 +879,18 @@ pub const AddressSpace = extern struct
     {
         space.reserve_mutex.assert_locked();
 
-        if (region.flags.contains(.no_commit_tracking)) kernel.panic("Region does not support commit tracking");
-        if (page_offset >= region.descriptor.page_count or page_count > region.descriptor.page_count - page_offset) kernel.panic("invalid region offset and page count");
-        if (!region.flags.contains(.normal)) kernel.panic("Cannot decommit from non-normal region");
+        if (region.flags.contains(.no_commit_tracking)) kernel.panicf("Region does not support commit tracking", .{});
+        if (page_offset >= region.descriptor.page_count or page_count > region.descriptor.page_count - page_offset) kernel.panicf("invalid region offset and page count", .{});
+        if (!region.flags.contains(.normal)) kernel.panicf("Cannot decommit from non-normal region", .{});
 
         var delta: i64 = 0;
 
         if (!region.data.u.normal.commit.clear(page_offset, page_offset + page_count, &delta, true)) return false;
 
-        if (delta > 0) kernel.panic("invalid delta calculation");
+        if (delta > 0) kernel.panicf("invalid delta calculation", .{});
         const delta_u = @intCast(u64, -delta);
 
-        if (region.data.u.normal.commit_page_count < delta_u) kernel.panic("invalid delta calculation");
+        if (region.data.u.normal.commit_page_count < delta_u) kernel.panicf("invalid delta calculation", .{});
 
         decommit(delta_u * page_size, region.flags.contains(.fixed));
         space.commit_count -= delta_u;
@@ -970,7 +970,7 @@ pub const AddressSpace = extern struct
         else if (region.flags.contains(.shared))
         {
             const shared_region = region.data.u.shared.region.?;
-            if (shared_region.handle_count.read_volatile() == 0) kernel.panic("Shared region has no handles");
+            if (shared_region.handle_count.read_volatile() == 0) kernel.panicf("Shared region has no handles", .{});
             _ = shared_region.mutex.acquire();
 
             const offset = address - region.descriptor.base_address + region.data.u.shared.offset;
@@ -1023,7 +1023,7 @@ pub const AddressSpace = extern struct
     pub fn close_reference(space: *AddressSpace) callconv(.C) void
     {
         if (space == &kernel.address_space) return;
-        if (space.reference_count.read_volatile() < 1) kernel.panic("space has invalid reference count");
+        if (space.reference_count.read_volatile() < 1) kernel.panicf("space has invalid reference count", .{});
         if (space.reference_count.atomic_fetch_sub(1) > 1) return;
 
         space.remove_async_task.register(CloseReferenceTask);
@@ -1071,8 +1071,8 @@ pub const AddressSpace = extern struct
             return 0;
         };
 
-        if (!region.flags.contains(.shared)) kernel.panic("cannot commit into non-shared region");
-        if (region.data.u.shared.region != null) kernel.panic("a shared region has already been bound");
+        if (!region.flags.contains(.shared)) kernel.panicf("cannot commit into non-shared region", .{});
+        if (region.data.u.shared.region != null) kernel.panicf("a shared region has already been bound", .{});
 
         region.data.u.shared.region = shared_region;
         region.data.u.shared.offset = offset & ~@as(u64, page_size - 1);
@@ -1237,8 +1237,8 @@ pub fn init() void
     {
         kernel.pmm.zero_page_event.auto_reset.write_volatile(true);
         _ = commit(Physical.memory_manipulation_region_page_count * page_size, true);
-        kernel.pmm.zero_page_thread = Thread.spawn(arch.GetMMZeroPageThreadAddress(), 0, Thread.Flags.from_flag(.low_priority), null, 0) orelse kernel.panic("Unable to spawn zero page thread");
-        Thread.spawn(arch.GetMMBalanceThreadAddress(), 0, Thread.Flags.empty(), null, 0).?.is_page_generator = true;
+        kernel.pmm.zero_page_thread = Thread.spawn("zero_page_thread", arch.GetMMZeroPageThreadAddress(), 0, Thread.Flags.from_flag(.low_priority), null, 0) orelse kernel.panicf("Unable to spawn zero page thread", .{});
+        Thread.spawn("mm_balance_thread", arch.GetMMBalanceThreadAddress(), 0, Thread.Flags.empty(), null, 0).?.is_page_generator = true;
     }
 
     {
@@ -1425,7 +1425,7 @@ pub const Physical = extern struct
 
 pub fn decommit(byte_count: u64, fixed: bool) callconv(.C) void
 {
-    if (byte_count & (page_size - 1) != 0) kernel.panic("byte count not page-aligned");
+    if (byte_count & (page_size - 1) != 0) kernel.panicf("byte count not page-aligned", .{});
 
     const needed_page_count = @intCast(i64, byte_count / page_size);
     _ = kernel.pmm.commit_mutex.acquire();
@@ -1433,12 +1433,12 @@ pub fn decommit(byte_count: u64, fixed: bool) callconv(.C) void
 
     if (fixed)
     {
-        if (kernel.pmm.commit_fixed < needed_page_count) kernel.panic("decommited too many pages");
+        if (kernel.pmm.commit_fixed < needed_page_count) kernel.panicf("decommited too many pages", .{});
         kernel.pmm.commit_fixed -= needed_page_count;
     }
     else
     {
-        if (kernel.pmm.commit_pageable < needed_page_count) kernel.panic("decommited too many pages");
+        if (kernel.pmm.commit_pageable < needed_page_count) kernel.panicf("decommited too many pages", .{});
         kernel.pmm.commit_pageable -= needed_page_count;
     }
 }
@@ -1535,7 +1535,7 @@ export fn MMPhysicalActivatePages(pages: u64, count: u64) callconv(.C) void
                     }
                 }
             },
-            else => kernel.panic("Corrupt page frame database"),
+            else => kernel.panicf("Corrupt page frame database", .{}),
         }
 
         frame.u.list.previous.?.* = frame.u.list.next.read_volatile();
@@ -1554,7 +1554,7 @@ export fn MMPhysicalActivatePages(pages: u64, count: u64) callconv(.C) void
 
 pub export fn commit(byte_count: u64, fixed: bool) callconv(.C) bool
 {
-    if (byte_count & (page_size - 1) != 0) kernel.panic("Bytes should be page-aligned");
+    if (byte_count & (page_size - 1) != 0) kernel.panicf("Bytes should be page-aligned", .{});
 
     const needed_page_count = @intCast(i64, byte_count / page_size);
 
@@ -1736,7 +1736,7 @@ export fn physical_allocate(flags: Physical.Flags, count: u64, alignment: u64, b
 
     if (!kernel.pmm.pageframeDatabaseInitialised)
     {
-        if (!simple) kernel.panic("non-simple allocation before initialization of the pageframe database");
+        if (!simple) kernel.panicf("non-simple allocation before initialization of the pageframe database", .{});
         const page = arch.EarlyAllocatePage();
         if (flags.contains(.zeroed))
         {
@@ -1781,12 +1781,12 @@ export fn physical_allocate(flags: Physical.Flags, count: u64, alignment: u64, b
 
             switch (frame.state.read_volatile())
             {
-                .active => kernel.panic("corrupt page frame database"),
+                .active => kernel.panicf("corrupt page frame database", .{}),
                 .standby =>
                 {
                     if (frame.cache_reference.?.* != ((page << page_bit_count) | 1)) // MM_SHARED_ENTRY_PRESENT
                     {
-                        kernel.panic("corrupt shared reference back pointer in frame");
+                        kernel.panicf("corrupt shared reference back pointer in frame", .{});
                     }
 
                     frame.cache_reference.?.* = 0;
@@ -1810,7 +1810,7 @@ export fn physical_allocate(flags: Physical.Flags, count: u64, alignment: u64, b
     // failed
     if (!flags.contains(.can_fail))
     {
-        kernel.panic("out of memory");
+        kernel.panicf("out of memory", .{});
     }
 
     decommit(@intCast(u64, commit_now), true);
@@ -1846,7 +1846,7 @@ pub export fn physical_allocate_and_map(asked_size: u64, asked_alignment: u64, m
 
 export fn MMPhysicalInsertZeroedPage(page: u64) callconv(.C) void
 {
-    if (arch.get_current_thread() != kernel.pmm.zero_page_thread) kernel.panic("inserting a zeroed page not on the mmzeropagethread");
+    if (arch.get_current_thread() != kernel.pmm.zero_page_thread) kernel.panicf("inserting a zeroed page not on the mmzeropagethread", .{});
 
     const frame = &kernel.pmm.pageframes[page];
     frame.state.write_volatile(.zeroed);
@@ -2047,10 +2047,10 @@ pub fn physical_insert_free_pages_next(page: u64) callconv(.C) void
 
 pub fn physical_free(asked_page: u64, mutex_already_acquired: bool, count: u64) callconv(.C) void
 {
-    if (asked_page == 0) kernel.panic("invalid page");
+    if (asked_page == 0) kernel.panicf("invalid page", .{});
     if (mutex_already_acquired) kernel.pmm.pageframe_mutex.assert_locked()
     else _ = kernel.pmm.pageframe_mutex.acquire();
-    if (!kernel.pmm.pageframeDatabaseInitialised) kernel.panic("PMM not yet initialized");
+    if (!kernel.pmm.pageframeDatabaseInitialised) kernel.panicf("PMM not yet initialized", .{});
 
     const page = asked_page >> page_bit_count;
 
@@ -2058,7 +2058,7 @@ pub fn physical_free(asked_page: u64, mutex_already_acquired: bool, count: u64) 
 
     for (kernel.pmm.pageframes[0..count]) |*frame|
     {
-        if (frame.state.read_volatile() == .free) kernel.panic("attempting to free a free page");
+        if (frame.state.read_volatile() == .free) kernel.panicf("attempting to free a free page", .{});
         if (kernel.pmm.commit_fixed_limit != 0) kernel.pmm.active_page_count -= 1;
         physical_insert_free_pages_next(page);
     }
@@ -2073,7 +2073,7 @@ pub export fn check_unusable(physical_start: u64, byte_count: u64) callconv(.C) 
     var i = physical_start / page_size;
     while (i < (physical_start + byte_count + page_size - 1) / page_size and i < kernel.pmm.pageframeDatabaseCount) : (i += 1)
     {
-        if (kernel.pmm.pageframes[i].state.read_volatile() != .unusable) kernel.panic("Pageframe at address should be unusable");
+        if (kernel.pmm.pageframes[i].state.read_volatile() != .unusable) kernel.panicf("Pageframe at address should be unusable", .{});
     }
 }
 

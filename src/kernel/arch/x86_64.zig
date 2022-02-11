@@ -143,7 +143,7 @@ pub export fn initialize_thread(kernel_stack: u64, kernel_stack_size: u64, threa
     context._check = 0x123456789ABCDEF;
     context.flags = 1 << 9;
     context.rip = start_address;
-    if (context.rip == 0) kernel.panic("RIP is 0");
+    if (context.rip == 0) kernel.panicf("RIP is 0", .{});
     context.rsp = user_stack + user_stack_size - 8;
     context.rdi = argument1;
     context.rsi = argument2;
@@ -162,15 +162,16 @@ export fn MMArchInvalidatePages(virtual_address_start: u64, page_count: u64) cal
 export fn InterruptHandler(context: *InterruptContext) callconv(.C) void
 {
     if (kernel.scheduler.panic.read_volatile() and context.interrupt_number != 2) return;
-    if (are_interrupts_enabled()) kernel.panic("interrupts were enabled at the start of the interrupt handler");
+    if (are_interrupts_enabled()) kernel.panicf("interrupts were enabled at the start of the interrupt handler", .{});
 
     const interrupt = context.interrupt_number;
     var maybe_local = get_local_storage();
     if (maybe_local) |local|
     {
         if (local.current_thread) |current_thread| current_thread.last_interrupt_timestamp = ProcessorReadTimeStamp();
-        if (local.spinlock_count != 0 and context.cr8 != 0xe) kernel.panic("Spinlock count is not zero but interrupts were enabled");
+        if (local.spinlock_count != 0 and context.cr8 != 0xe) kernel.panicf("Spinlock count is not zero but interrupts were enabled", .{});
     }
+    const maybe_current_thread = get_current_thread();
 
     if (interrupt < 0x20)
     {
@@ -184,13 +185,13 @@ export fn InterruptHandler(context: *InterruptContext) callconv(.C) void
 
         if (!supervisor)
         {
-            if (context.cs != 0x5b and context.cs != 0x6b) kernel.panic("Unexpected value of CS");
-            const current_thread = get_current_thread().?;
-            if (current_thread.is_kernel_thread) kernel.panic("Kernel thread executing user code");
+            if (context.cs != 0x5b and context.cs != 0x6b) kernel.panicf("Unexpected value of CS", .{});
+            const current_thread = maybe_current_thread.?;
+            if (current_thread.is_kernel_thread) kernel.panicf("Kernel thread executing user code", .{});
             const previous_terminatable_state = current_thread.terminatable_state.read_volatile();
             current_thread.terminatable_state.write_volatile(.in_syscall);
 
-            if (maybe_local) |local| if (local.spinlock_count != 0) kernel.panic("user exception occurred with spinlock acquired");
+            if (maybe_local) |local| if (local.spinlock_count != 0) kernel.panicf("user exception occurred with spinlock acquired", .{});
 
             enable_interrupts();
             maybe_local = null;
@@ -217,7 +218,7 @@ export fn InterruptHandler(context: *InterruptContext) callconv(.C) void
                 current_thread.process.?.crash(&crash_reason);
             }
 
-            if (current_thread.terminatable_state.read_volatile() != .in_syscall) kernel.panic("thread changed terminatable state during interrupt");
+            if (current_thread.terminatable_state.read_volatile() != .in_syscall) kernel.panicf("thread changed terminatable state during interrupt", .{});
 
             current_thread.terminatable_state.write_volatile(previous_terminatable_state);
             if (current_thread.terminating.read_volatile() or current_thread.paused.read_volatile()) fake_timer_interrupt();
@@ -226,13 +227,13 @@ export fn InterruptHandler(context: *InterruptContext) callconv(.C) void
         }
         else
         {
-            if (context.cs != 0x48) kernel.panic("unexpected value of CS");
+            if (context.cs != 0x48) kernel.panicf("unexpected value of CS", .{});
 
             if (interrupt == 14)
             {
-                if (context.error_code & (1 << 3) != 0) kernel.panic("unresolvable page fault");
+                if (context.error_code & (1 << 3) != 0) kernel.panicf("unresolvable page fault", .{});
 
-                if (maybe_local) |local| if (local.spinlock_count != 0 and (context.cr2 >= 0xFFFF900000000000 and context.cr2 < 0xFFFFF00000000000)) kernel.panic("page fault occurred with spinlocks active");
+                if (maybe_local) |local| if (local.spinlock_count != 0 and (context.cr2 >= 0xFFFF900000000000 and context.cr2 < 0xFFFFF00000000000)) kernel.panicf("page fault occurred with spinlocks active", .{});
 
                 if (context.flags & 0x200 != 0 and context.cr8 != 0xe)
                 {
@@ -244,9 +245,10 @@ export fn InterruptHandler(context: *InterruptContext) callconv(.C) void
                 var safe_copy = false;
                 if (!result)
                 {
-                    if (get_current_thread().?.in_safe_copy and context.cr2 < 0x8000000000000000)
+                    if (maybe_current_thread.?.in_safe_copy and context.cr2 < 0x8000000000000000)
                     {
                         safe_copy = true;
+                        kernel.log("Safe copying...\n", .{});
                         context.rip = context.r8;
                     }
                 }
@@ -257,12 +259,62 @@ export fn InterruptHandler(context: *InterruptContext) callconv(.C) void
                 }
                 else
                 {
-                    kernel.panic("unhandled page fault");
+                    kernel.panicf(
+                        \\Unresolvable handle page fault in supervisor mode at 0x{x}
+                        \\Error codes: (error_code): 0x{x}, (CR2): 0x{x}
+                        \\Stack: [rsp]: 0x{x} [rbp]: 0x{x}
+                        \\Registers:
+                        \\[rax]: 0x{x}
+                        \\[rbx]: 0x{x}
+                        \\[rsi]: 0x{x}
+                        \\[rdi]: 0x{x}
+                        \\[rcx]: 0x{x}
+                        \\[rdx]: 0x{x}
+                        \\Thread ID: {}. Name: {s}
+                        \\
+                        \\
+                        , .{
+                            context.rip,
+                            context.error_code, context.cr2,
+                            context.rsp, context.rbp,
+                            context.rax,
+                            context.rbx,
+                            context.rsi,
+                            context.rdi,
+                            context.rcx,
+                            context.rdx,
+                            if (maybe_current_thread) |thread| @as(?u64, thread.id) else null, if (maybe_current_thread) |thread| @as(?[]const u8, thread.name_ptr[0..thread.name_len]) else null
+                        });
                 }
             }
             else
             {
-                kernel.panic("Unresolvable exception");
+                kernel.panicf(
+                    \\Unresolvable exception in supervisor mode: 0x{x} at 0x{x}
+                    \\Error codes: (error_code): 0x{x}, (CR2): 0x{x}
+                    \\Stack: [rsp]: 0x{x} [rbp]: 0x{x}
+                    \\Registers:
+                    \\[rax]: 0x{x}
+                    \\[rbx]: 0x{x}
+                    \\[rsi]: 0x{x}
+                    \\[rdi]: 0x{x}
+                    \\[rcx]: 0x{x}
+                    \\[rdx]: 0x{x}
+                    \\Thread ID: {}. Name: {s}
+                    \\
+                    \\
+                    , .{
+                        interrupt, context.rip,
+                        context.error_code, context.cr2,
+                        context.rsp, context.rbp,
+                        context.rax,
+                        context.rbx,
+                        context.rsi,
+                        context.rdi,
+                        context.rcx,
+                        context.rdx,
+                        if (maybe_current_thread) |thread| @as(?u64, thread.id) else null, if (maybe_current_thread) |thread| @as(?[]const u8, thread.name_ptr[0..thread.name_len]) else null
+                    });
             }
         }
     }
@@ -294,7 +346,7 @@ export fn InterruptHandler(context: *InterruptContext) callconv(.C) void
                 {
                     //TODO();
                     kernel.scheduler.yield(context);
-                    kernel.panic("returned from scheduler yield");
+                    kernel.panicf("returned from scheduler yield", .{});
                 }
                 else
                 {
@@ -303,7 +355,7 @@ export fn InterruptHandler(context: *InterruptContext) callconv(.C) void
             }
             else
             {
-                kernel.panic("MSI handler didn't have a callback assigned");
+                kernel.panicf("MSI handler didn't have a callback assigned", .{});
             }
         }
         else
@@ -327,7 +379,7 @@ export fn InterruptHandler(context: *InterruptContext) callconv(.C) void
             if (local.IRQ_switch_thread and kernel.scheduler.started.read_volatile() and local.scheduler_ready)
             {
                 kernel.scheduler.yield(context);
-                kernel.panic("returned from scheduler yield");
+                kernel.panicf("returned from scheduler yield", .{});
             }
             else
             {
@@ -338,7 +390,7 @@ export fn InterruptHandler(context: *InterruptContext) callconv(.C) void
 
     ContextSanityCheck(context);
 
-    if (are_interrupts_enabled()) kernel.panic("interrupts were enabled while returning from an interrupt handler");
+    if (are_interrupts_enabled()) kernel.panicf("interrupts were enabled while returning from an interrupt handler", .{});
 }
 
 const CPUDescriptorTable = packed struct 
@@ -1194,7 +1246,7 @@ pub const InterruptContext = extern struct
             (self.rip >= 0x1000000000000 and self.rip < 0xFFFF000000000000) or
             (self.rip < 0xFFFF800000000000 and self.cs == 0x48))
         {
-            kernel.panic("context sanity check failed\n");
+            kernel.panicf("context sanity check failed\n", .{});
         }
     }
 
@@ -1373,7 +1425,7 @@ const interrupt_vector_msi_count = 0x40;
 fn ArchCallFunctionOnAllProcessors(callback: CallFunctionOnAllProcessorsCallback, including_this_processor: bool) void
 {
     ipiLock.assert_locked();
-    //if (callback == 0) kernel.panic("Callback is null");
+    //if (callback == 0) kernel.panicf("Callback is null", .{});
 
     const cpu_count = ACPI.driver.processor_count;
     if (cpu_count > 1)
@@ -1538,7 +1590,7 @@ pub fn free_address_space(space: *memory.AddressSpace) callconv(.C) void
 
     if (space.arch.active_page_table_count != 0)
     {
-        kernel.panic("space has still active page tables");
+        kernel.panicf("space has still active page tables", .{});
     }
 
     _ = kernel.core_address_space.reserve_mutex.acquire();
@@ -1619,11 +1671,11 @@ const NewProcessorStorage = extern struct
         storage.gdt = kernel.address_space.map_physical(gdt_physical_address, page_size, memory.Region.Flags.empty());
         storage.local.cpu = cpu;
         cpu.local_storage = storage.local;
-        storage.local.async_task_thread = Thread.spawn(GetAsyncTaskThreadAddress(), 0, Thread.Flags.from_flag(.async_task), null, 0);
-        storage.local.idle_thread = Thread.spawn(0, 0, Thread.Flags.from_flag(.idle), null, 0);
+        storage.local.async_task_thread = Thread.spawn("async_task_thread", GetAsyncTaskThreadAddress(), 0, Thread.Flags.from_flag(.async_task), null, 0);
+        storage.local.idle_thread = Thread.spawn("IDLE", 0, 0, Thread.Flags.from_flag(.idle), null, 0);
         storage.local.current_thread = storage.local.idle_thread;
         storage.local.processor_ID = @intCast(u32, @atomicRmw(@TypeOf(kernel.scheduler.next_processor_id), &kernel.scheduler.next_processor_id, .Add, 1, .SeqCst));
-        if (storage.local.processor_ID >= kernel.max_processors) kernel.panic("cpu max count exceeded");
+        if (storage.local.processor_ID >= kernel.max_processors) kernel.panicf("cpu max count exceeded", .{});
         cpu.kernel_processor_ID = @intCast(u8, storage.local.processor_ID);
         return storage;
     }
@@ -1646,7 +1698,7 @@ pub fn init() callconv(.C) void
             }
         }
 
-        kernel.panic("could not find the bootstrap processor");
+        kernel.panicf("could not find the bootstrap processor", .{});
     };
 
     disable_interrupts();
@@ -1772,7 +1824,7 @@ pub export fn EarlyAllocatePage() callconv(.C) u64
             }
         }
 
-        kernel.panic("Unable to early allocate a page\n");
+        kernel.panicf("Unable to early allocate a page\n", .{});
     };
 
     const region = &physicalMemoryRegions[index];
@@ -1971,7 +2023,7 @@ fn handle_missing_page_table(space: *memory.AddressSpace, comptime level: PageTa
 
     if (PageTables.access(level, indices).* & 1 == 0)
     {
-        if (flags.contains(.no_new_tables)) kernel.panic("no new tables flag set but a table was missing\n");
+        if (flags.contains(.no_new_tables)) kernel.panicf("no new tables flag set but a table was missing\n", .{});
 
         const physical_allocation_flags = memory.Physical.Flags.from_flag(.lock_acquired);
         const physical_allocation = memory.physical_allocate_with_flags(physical_allocation_flags) | 0b111;
@@ -1990,7 +2042,7 @@ pub export fn map_page(space: *memory.AddressSpace, asked_physical_address: u64,
 {
     if ((asked_virtual_address | asked_physical_address) & (page_size - 1) != 0)
     {
-        kernel.panic("Mapping pages that are not aligned\n");
+        kernel.panicf("Mapping pages that are not aligned\n", .{});
     }
 
     if (kernel.pmm.pageframeDatabaseCount != 0 and (asked_physical_address >> page_bit_count) < kernel.pmm.pageframeDatabaseCount)
@@ -1998,16 +2050,16 @@ pub export fn map_page(space: *memory.AddressSpace, asked_physical_address: u64,
         const frame_state = kernel.pmm.pageframes[asked_physical_address >> page_bit_count].state.read_volatile();
         if (frame_state != .active and frame_state != .unusable)
         {
-            kernel.panic("Physical pageframe not marked as active or unusable\n");
+            kernel.panicf("Physical pageframe not marked as active or unusable\n", .{});
         }
     }
 
-    if (asked_physical_address == 0) kernel.panic("Attempt to map physical page 0\n");
-    if (asked_virtual_address == 0) kernel.panic("Attempt to map virtual page 0\n");
+    if (asked_physical_address == 0) kernel.panicf("Attempt to map physical page 0\n", .{});
+    if (asked_virtual_address == 0) kernel.panicf("Attempt to map virtual page 0\n", .{});
 
     if (asked_virtual_address < 0xFFFF800000000000 and ProcessorReadCR3() != space.arch.cr3)
     {
-        kernel.panic("Attempt to map page into another address space\n");
+        kernel.panicf("Attempt to map page into another address space\n", .{});
     }
 
     const acquire_framelock = !flags.contains(.no_new_tables) and !flags.contains(.frame_lock_acquired);
@@ -2026,13 +2078,13 @@ pub export fn map_page(space: *memory.AddressSpace, asked_physical_address: u64,
     if (space != &kernel.core_address_space and space != &kernel.address_space)
     {
         const index_L4 = indices[@enumToInt(PageTables.Level.level4)];
-        if (space.arch.commit.L3[index_L4 >> 3] & (@as(u8, 1) << @truncate(u3, index_L4 & 0b111)) == 0) kernel.panic("attempt to map using uncommited L3 page table\n");
+        if (space.arch.commit.L3[index_L4 >> 3] & (@as(u8, 1) << @truncate(u3, index_L4 & 0b111)) == 0) kernel.panicf("attempt to map using uncommited L3 page table\n", .{});
 
         const index_L3 = indices[@enumToInt(PageTables.Level.level3)];
-        if (space.arch.commit.L2[index_L3 >> 3] & (@as(u8, 1) << @truncate(u3, index_L3 & 0b111)) == 0) kernel.panic("attempt to map using uncommited L3 page table\n");
+        if (space.arch.commit.L2[index_L3 >> 3] & (@as(u8, 1) << @truncate(u3, index_L3 & 0b111)) == 0) kernel.panicf("attempt to map using uncommited L3 page table\n", .{});
 
         const index_L2 = indices[@enumToInt(PageTables.Level.level2)];
-        if (space.arch.commit.L1[index_L2 >> 3] & (@as(u8, 1) << @truncate(u3, index_L2 & 0b111)) == 0) kernel.panic("attempt to map using uncommited L3 page table\n");
+        if (space.arch.commit.L1[index_L2 >> 3] & (@as(u8, 1) << @truncate(u3, index_L2 & 0b111)) == 0) kernel.panicf("attempt to map using uncommited L3 page table\n", .{});
     }
 
     handle_missing_page_table(space, .level4, indices, flags);
@@ -2060,19 +2112,19 @@ pub export fn map_page(space: *memory.AddressSpace, asked_physical_address: u64,
 
         if (old_value & ~@as(u64, page_size - 1) != physical_address)
         {
-            kernel.panic("attempt to map page tha has already been mapped\n");
+            kernel.panicf("attempt to map page tha has already been mapped\n", .{});
         }
 
         if (old_value == value)
         {
-            kernel.panic("attempt to rewrite page translation\n");
+            kernel.panicf("attempt to rewrite page translation\n", .{});
         }
         else
         {
             const page_become_writable = old_value & 2 == 0 and value & 2 != 0;
             if (!page_become_writable)
             {
-                kernel.panic("attempt to change flags mapping address\n");
+                kernel.panicf("attempt to change flags mapping address\n", .{});
             }
         }
     }
@@ -2106,7 +2158,7 @@ pub export fn handle_page_fault(fault_address: u64, flags: memory.HandlePageFaul
 
     if (!are_interrupts_enabled())
     {
-        kernel.panic("Page fault with interrupts disabled\n");
+        kernel.panicf("Page fault with interrupts disabled\n", .{});
     }
 
     const fault_in_very_low_memory = virtual_address < page_size;
@@ -2150,7 +2202,7 @@ pub export fn handle_page_fault(fault_address: u64, flags: memory.HandlePageFaul
             }
             else
             {
-                kernel.panic("unreachable path\n");
+                kernel.panicf("unreachable path\n", .{});
             }
         }
     }
@@ -2166,13 +2218,13 @@ export fn ContextSanityCheck(context: *InterruptContext) callconv(.C) void
         (context.rip >= 0x1000000000000 and context.rip < 0xFFFF000000000000) or
         (context.rip < 0xFFFF800000000000 and context.cs == 0x48))
     {
-        kernel.panic("Context sanity check failed");
+        kernel.panicf("Context sanity check failed", .{});
     }
 }
 
 export fn PostContextSwitch(context: *InterruptContext, old_address_space: *memory.AddressSpace) callconv(.C) bool
 {
-    if (kernel.scheduler.dispatch_spinlock.interrupts_enabled.read_volatile()) kernel.panic ("Interrupts were enabled");
+    if (kernel.scheduler.dispatch_spinlock.interrupts_enabled.read_volatile()) kernel.panicf("Interrupts were enabled", .{});
 
     kernel.scheduler.dispatch_spinlock.release_ex(true);
 
@@ -2187,9 +2239,9 @@ export fn PostContextSwitch(context: *InterruptContext, old_address_space: *memo
     old_address_space.close_reference();
     current_thread.last_known_execution_address = context.rip;
 
-    if (are_interrupts_enabled()) kernel.panic("interrupts were enabled");
+    if (are_interrupts_enabled()) kernel.panicf("interrupts were enabled", .{});
 
-    if (local.spinlock_count != 0) kernel.panic("spinlock_count is not zero");
+    if (local.spinlock_count != 0) kernel.panicf("spinlock_count is not zero", .{});
 
     current_thread.timer_adjust_ticks += ProcessorReadTimeStamp() - local.current_thread.?.last_interrupt_timestamp;
 
@@ -2297,7 +2349,7 @@ pub export fn unmap_pages(space: *memory.AddressSpace, virtual_address_start: u6
 
         if ((~translation & (1 << 5) != 0) or (~translation & (1 << 6) != 0))
         {
-            kernel.panic("page found without accessed or dirty bit set");
+            kernel.panicf("page found without accessed or dirty bit set", .{});
         }
 
         PageTables.access(.level1, indices).* = 0;
@@ -2338,7 +2390,7 @@ export fn DoSyscall(index: syscall.Type, argument0: u64, argument1: u64, argumen
             fake_timer_interrupt();
         }
 
-        if (current_thread.terminatable_state.read_volatile() != .terminatable) kernel.panic("Current thread was not terminatable");
+        if (current_thread.terminatable_state.read_volatile() != .terminatable) kernel.panicf("Current thread was not terminatable", .{});
 
         current_thread.terminatable_state.write_volatile(.in_syscall);
     }
@@ -2411,12 +2463,12 @@ pub fn pci_read_config(bus: u8, device: u8, function: u8, offset: u8, size: u32)
     pciConfigSpinlock.acquire();
     defer pciConfigSpinlock.release();
 
-    if (offset & 3 != 0) kernel.panic("offset is not 4-byte aligned");
+    if (offset & 3 != 0) kernel.panicf("offset is not 4-byte aligned", .{});
     out32(IO_PCI_CONFIG, 0x80000000 | (@intCast(u32, bus) << 16) | (@intCast(u32, device) << 11) | (@intCast(u32, function) << 8) | @intCast(u32, offset));
     if (size == 8) return in8(IO_PCI_DATA);
     if (size == 16) return in16(IO_PCI_DATA);
     if (size == 32) return in32(IO_PCI_DATA);
-    kernel.panic("invalid size");
+    kernel.panicf("invalid size", .{});
 }
 
 pub fn pci_write_config(bus: u8, device: u8, function: u8, offset: u8, value: u32, size: u32) void
@@ -2424,12 +2476,12 @@ pub fn pci_write_config(bus: u8, device: u8, function: u8, offset: u8, value: u3
     pciConfigSpinlock.acquire();
     defer pciConfigSpinlock.release();
 
-    if (offset & 3 != 0) kernel.panic("offset is not 4-byte aligned");
+    if (offset & 3 != 0) kernel.panicf("offset is not 4-byte aligned", .{});
     out32(IO_PCI_CONFIG, 0x80000000 | (@intCast(u32, bus) << 16) | (@intCast(u32, device) << 11) | (@intCast(u32, function) << 8) | @intCast(u32, offset));
     if (size == 8) out8(IO_PCI_DATA, @intCast(u8, value))
     else if (size == 16) out16(IO_PCI_DATA, @intCast(u16, value))
     else if (size == 32) out32(IO_PCI_DATA, value)
-    else kernel.panic("Invalid size\n");
+    else kernel.panicf("Invalid size\n", .{});
 }
 pub var module_ptr: u64 = modules_start;
 
@@ -2486,7 +2538,7 @@ pub export fn initialize_user_space(space: *memory.AddressSpace, region: *memory
         space.arch.commit.L1 = @intToPtr([*]u8, L1_region.descriptor.base_address);
     }
 
-    const page_table_address = @intToPtr(?[*]u64, kernel.address_space.map_physical(space.arch.cr3, page_size, memory.Region.Flags.empty())) orelse kernel.panic("Expected page table allocation to be good");
+    const page_table_address = @intToPtr(?[*]u64, kernel.address_space.map_physical(space.arch.cr3, page_size, memory.Region.Flags.empty())) orelse kernel.panicf("Expected page table allocation to be good", .{});
     EsMemoryZero(@ptrToInt(page_table_address), page_size / 2);
     EsMemoryCopy(@ptrToInt(page_table_address) + (0x100 * @sizeOf(u64)), @ptrToInt(PageTables.access_at_index(.level4, 0x100)), page_size / 2);
     page_table_address[512 - 2] = space.arch.cr3 | 0b11;

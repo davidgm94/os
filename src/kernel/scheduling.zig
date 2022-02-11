@@ -102,17 +102,17 @@ pub const Scheduler = extern struct
                 self.active_timers_spinlock.release();
             }
 
-            if (local.spinlock_count != 0) kernel.panic("Spinlocks acquired while attempting to yield");
+            if (local.spinlock_count != 0) kernel.panicf("Spinlocks acquired while attempting to yield", .{});
 
             arch.disable_interrupts();
             self.dispatch_spinlock.acquire();
 
             if (self.dispatch_spinlock.interrupts_enabled.read_volatile())
             {
-                kernel.panic("interrupts were enabled when scheduler lock was acquired");
+                kernel.panicf("interrupts were enabled when scheduler lock was acquired", .{});
             }
 
-            if (!local.current_thread.?.executing.read_volatile()) kernel.panic("current thread marked as not executing");
+            if (!local.current_thread.?.executing.read_volatile()) kernel.panicf("current thread marked as not executing", .{});
 
             const old_address_space = if (local.current_thread.?.temporary_address_space) |tas| @ptrCast(*AddressSpace, tas) else local.current_thread.?.process.?.address_space;
 
@@ -197,13 +197,13 @@ pub const Scheduler = extern struct
                 }
                 else
                 {
-                    kernel.panic("unrecognized thread type");
+                    kernel.panicf("unrecognized thread type", .{});
                 }
             }
 
-            const new_thread = self.pick_thread(local) orelse kernel.panic("Could not find a thread to execute");
+            const new_thread = self.pick_thread(local) orelse kernel.panicf("Could not find a thread to execute", .{});
             local.current_thread = new_thread;
-            if (new_thread.executing.read_volatile()) kernel.panic("thread in active queue already executing");
+            if (new_thread.executing.read_volatile()) kernel.panicf("thread in active queue already executing", .{});
 
             new_thread.executing.write_volatile(true);
             new_thread.executing_processor_ID = local.processor_ID;
@@ -216,17 +216,17 @@ pub const Scheduler = extern struct
             const address_space = if (new_thread.temporary_address_space) |tas| @ptrCast(*AddressSpace, tas) else new_thread.process.?.address_space;
             address_space.open_reference();
             arch.switch_context(new_context, &address_space.arch, new_thread.kernel_stack, new_thread, old_address_space);
-            kernel.panic("do context switch unexpectedly returned");
+            kernel.panicf("do context switch unexpectedly returned", .{});
         }
     }
 
     pub fn add_active_thread(self: *@This(), thread: *Thread, start: bool) void
     {
         if (thread.type == .async_task) return;
-        if (thread.state.read_volatile() != .active) kernel.panic("thread not active")
-        else if (thread.executing.read_volatile()) kernel.panic("thread executing")
-        else if (thread.type != .normal) kernel.panic("thread not normal")
-        else if (thread.item.list != null) kernel.panic("thread already in queue");
+        if (thread.state.read_volatile() != .active) kernel.panicf("thread not active", .{})
+        else if (thread.executing.read_volatile()) kernel.panicf("thread executing", .{})
+        else if (thread.type != .normal) kernel.panicf("thread not normal", .{})
+        else if (thread.item.list != null) kernel.panicf("thread already in queue", .{});
 
         if (thread.paused.read_volatile() and thread.terminatable_state.read_volatile() == .terminatable)
         {
@@ -277,12 +277,12 @@ pub const Scheduler = extern struct
     pub fn maybe_update_list(self: *@This(), thread: *Thread) void
     {
         if (thread.type == .async_task) return;
-        if (thread.type != .normal) kernel.panic("trying to update the active list of a non-normal thread");
+        if (thread.type != .normal) kernel.panicf("trying to update the active list of a non-normal thread", .{});
 
         self.dispatch_spinlock.assert_locked();
 
         if (thread.state.read_volatile() != .active or thread.executing.read_volatile()) return;
-        if (thread.item.list == null) kernel.panic("Despite thread being active and not executing, it is not in an active thread list");
+        if (thread.item.list == null) kernel.panicf("Despite thread being active and not executing, it is not in an active thread list", .{});
 
         const effective_priority = @intCast(u64, self.get_thread_effective_priority(thread));
         if (&self.active_threads[effective_priority] == thread.item.list) return;
@@ -299,7 +299,7 @@ pub const Scheduler = extern struct
             .waiting_mutex => TODO(@src()),
             .waiting_event => TODO(@src()),
             .waiting_writer_lock => TODO(@src()),
-            else => kernel.panic("unexpected thread state"),
+            else => kernel.panicf("unexpected thread state", .{}),
         }
 
         unblocked_thread.state.write_volatile(.active);
@@ -316,7 +316,7 @@ pub const Scheduler = extern struct
         {
             if (@ptrToInt(unblocked_item) < 0xf000000000000000)
             {
-                kernel.panic("here");
+                kernel.panicf("here", .{});
             }
             const next_unblocked_item = unblocked_item.?.next;
             const unblocked_thread = unblocked_item.?.value.?;
@@ -414,6 +414,9 @@ pub const Thread = extern struct
     interrupt_context: *arch.InterruptContext,
     last_known_execution_address: u64, // @TODO: for debugging
 
+    name_ptr: [*]const u8,
+    name_len: u64,
+
     pub const Priority = enum(i8)
     {
         normal = 0,
@@ -474,13 +477,13 @@ pub const Thread = extern struct
         (@ptrCast(*AddressSpace, old_space)).close_reference(); // this reference was opened by Scheduler.yield and would have been closed in PostContextSwitch
     }
 
-    pub fn spawn(start_address: u64, argument1: u64, flags: Thread.Flags, maybe_process: ?*Process, argument2: u64) callconv(.C) ?*Thread
+    pub fn spawn(name: []const u8, start_address: u64, argument1: u64, flags: Thread.Flags, maybe_process: ?*Process, argument2: u64) ?*Thread
     {
-        if (start_address == 0 and !flags.contains(.idle)) kernel.panic("Start address is 0");
+        if (start_address == 0 and !flags.contains(.idle)) kernel.panicf("Start address is 0", .{});
         const userland = flags.contains(.userland);
         const parent_thread = arch.get_current_thread();
         const process = if (maybe_process) |process_r| process_r else &kernel.process;
-        if (userland and process == &kernel.process) kernel.panic("cannot add userland thread to kernel process");
+        if (userland and process == &kernel.process) kernel.panicf("cannot add userland thread to kernel process", .{});
 
         _ = process.threads_mutex.acquire();
         defer process.threads_mutex.release();
@@ -539,6 +542,8 @@ pub const Thread = extern struct
             thread.item.value = thread;
             thread.all_item.value = thread;
             thread.process_item.value = thread;
+            thread.name_ptr = name.ptr;
+            thread.name_len = name.len;
 
             if (thread.type != .idle)
             {
@@ -657,7 +662,7 @@ pub const Timer = extern struct
     {
         kernel.scheduler.active_timers_spinlock.acquire();
 
-        if (self.callback != 0) kernel.panic("timer with callback cannot be removed");
+        if (self.callback != 0) kernel.panicf("timer with callback cannot be removed", .{});
 
         if (self.item.list != null) kernel.scheduler.active_timers.remove(&self.item);
 
@@ -790,8 +795,8 @@ pub const Process = extern struct
     pub fn crash(self: *Process, crash_reason: *CrashReason) callconv(.C) void
     {
         assert(arch.get_current_thread().?.process == self);
-        if (self == &kernel.process) kernel.panic("kernel process has crashed");
-        if (self.type != .normal) kernel.panic("A critical process has crashed");
+        if (self == &kernel.process) kernel.panicf("kernel process has crashed", .{});
+        if (self.type != .normal) kernel.panicf("A critical process has crashed", .{});
 
         var pause_process = false;
         _ = self.crash_mutex.acquire();
@@ -867,7 +872,7 @@ export fn KThreadTerminate() callconv(.C) void
 
 export fn ProcessKill(process: *Process) callconv(.C) void
 {
-    if (process.handle_count.read_volatile() == 0) kernel.panic("process is on the all process list but there are no handles in it");
+    if (process.handle_count.read_volatile() == 0) kernel.panicf("process is on the all process list but there are no handles in it", .{});
 
     _ = kernel.scheduler.active_process_count.atomic_fetch_add(1);
 
@@ -911,7 +916,7 @@ export fn ThreadPause(thread: *Thread, resume_after: bool) callconv(.C) void
 
                     arch.fake_timer_interrupt();
 
-                    if (thread.paused.read_volatile()) kernel.panic("current thread incorrectly resumed");
+                    if (thread.paused.read_volatile()) kernel.panicf("current thread incorrectly resumed", .{});
                 }
                 else
                 {
@@ -1001,7 +1006,7 @@ export fn process_start_with_something(process: *Process) bool
 
     if (kernel.scheduler.all_processes_terminated_event.poll())
     {
-        kernel.panic("all process terminated event was set");
+        kernel.panicf("all process terminated event was set", .{});
     }
 
     process.block_shutdown = true;
@@ -1010,7 +1015,7 @@ export fn process_start_with_something(process: *Process) bool
 
     _ = kernel.scheduler.all_processes_mutex.acquire();
     kernel.scheduler.all_processes.insert_at_end(&process.all_item);
-    const load_executable_thread = Thread.spawn(arch.GetProcesssLoadDesktopExecutableAddress(), 0, Thread.Flags.empty(), process, 0);
+    const load_executable_thread = Thread.spawn("load_desktop_executable", arch.GetProcesssLoadDesktopExecutableAddress(), 0, Thread.Flags.empty(), process, 0);
     kernel.scheduler.all_processes_mutex.release();
 
     if (load_executable_thread) |thread|
@@ -1034,9 +1039,9 @@ export fn ProcessLoadDesktopExecutable() callconv(.C) void
     var exe = zeroes(files.LoadedExecutable);
     exe.is_desktop = true;
     const result = files.LoadDesktopELF(&exe);
-    if (result != kernel.ES_SUCCESS) kernel.panic("Failed to load desktop executable");
+    if (result != kernel.ES_SUCCESS) kernel.panicf("Failed to load desktop executable", .{});
 
-    const startup_information = @intToPtr(?*ProcessStartupInformation, process.address_space.allocate_standard(@sizeOf(ProcessStartupInformation), Region.Flags.empty(), 0, true)) orelse kernel.panic("Can't allocate startup information");
+    const startup_information = @intToPtr(?*ProcessStartupInformation, process.address_space.allocate_standard(@sizeOf(ProcessStartupInformation), Region.Flags.empty(), 0, true)) orelse kernel.panicf("Can't allocate startup information", .{});
     startup_information.is_desktop = true;
     startup_information.is_bundle = false;
     startup_information.application_start_address = exe.start_address;
@@ -1049,7 +1054,7 @@ export fn ProcessLoadDesktopExecutable() callconv(.C) void
     var thread_flags = Thread.Flags.from_flag(.userland);
     if (process.creation_flags.contains(.paused)) thread_flags = thread_flags.or_flag(.paused);
     process.executable_state = .loaded;
-    process.executable_main_thread = Thread.spawn(exe.start_address, @ptrToInt(startup_information), thread_flags, process, 0) orelse kernel.panic("Couldn't create main thread for executable");
+    process.executable_main_thread = Thread.spawn("desktop", exe.start_address, @ptrToInt(startup_information), thread_flags, process, 0) orelse kernel.panicf("Couldn't create main thread for executable", .{});
     _ = process.executable_load_attempt_complete.set(false);
 }
 
@@ -1076,7 +1081,7 @@ export fn thread_exit(thread: *Thread) callconv(.C) void
         {
             .terminatable =>
             {
-                if (thread.state.read_volatile() != .active) kernel.panic("terminatable thread non-active");
+                if (thread.state.read_volatile() != .active) kernel.panicf("terminatable thread non-active", .{});
 
                 thread.item.remove_from_list();
                 thread.kill_async_task.register(Thread.kill);
@@ -1122,13 +1127,13 @@ pub export fn process_exit(process: *Process, status: i32) callconv(.C) void
         }
         else
         {
-            kernel.panic("found current thread in the wrong process");
+            kernel.panicf("found current thread in the wrong process", .{});
         }
     }
 
     process.threads_mutex.release();
 
-    if (!found_current_thread and is_current_process) kernel.panic("could not find current thread in the current process")
+    if (!found_current_thread and is_current_process) kernel.panicf("could not find current thread in the current process", .{})
     else if (is_current_process)
     {
         thread_exit(current_thread);

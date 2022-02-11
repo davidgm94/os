@@ -95,7 +95,7 @@ pub const Driver = extern struct
         {
             if (EsMemorySumBytes(@ptrCast([*]u8, self), self.length) != 0)
             {
-                kernel.panic("ACPI table checksum failed!");
+                kernel.panicf("ACPI table checksum failed!", .{});
             }
         }
     };
@@ -124,17 +124,17 @@ pub const Driver = extern struct
             }
             else
             {
-                kernel.panic("unable to get RSDP");
+                kernel.panicf("unable to get RSDP", .{});
             }
         };
 
         const is_valid = ((sdt.signature == XSDT_signature and is_XSDT) or (sdt.signature == RSDT_signature and !is_XSDT)) and sdt.length < 16384 and EsMemorySumBytes(@ptrCast([*]u8, sdt), sdt.length) == 0;
 
-        if (!is_valid) kernel.panic("system descriptor pointer is invalid");
+        if (!is_valid) kernel.panicf("system descriptor pointer is invalid", .{});
 
         const table_count = (sdt.length - @sizeOf(DescriptorTable)) >> (@as(u2, 2) + @boolToInt(is_XSDT));
 
-        if (table_count == 0) kernel.panic("no tables found");
+        if (table_count == 0) kernel.panicf("no tables found", .{});
 
         const table_list_address = @ptrToInt(sdt) + DescriptorTable.header_length;
 
@@ -224,12 +224,12 @@ pub const Driver = extern struct
 
                         if (self.processor_count > 256 or self.IO_APIC_count > 16 or self.interrupt_override_count > 256 or self.LAPIC_NMI_count > 32)
                         {
-                            kernel.panic("wrong numbers");
+                            kernel.panicf("wrong numbers", .{});
                         }
                     }
                     else
                     {
-                        kernel.panic("ACPI initialization - couldn't find the MADT table");
+                        kernel.panicf("ACPI initialization - couldn't find the MADT table", .{});
                     }
                 },
                 FADT_signature =>
@@ -268,7 +268,7 @@ pub const Driver = extern struct
                         }
                         else
                         {
-                            kernel.panic("failed to map HPET base address\n");
+                            kernel.panicf("failed to map HPET base address\n", .{});
                         }
                     }
 
@@ -281,7 +281,7 @@ pub const Driver = extern struct
             _ = kernel.address_space.free(@ptrToInt(header), 0, false);
         }
 
-        if (!found_madt) kernel.panic("MADT not found");
+        if (!found_madt) kernel.panicf("MADT not found", .{});
     }
 
     fn map_physical_memory(physical_address: u64, length: u64) u64

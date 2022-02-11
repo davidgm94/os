@@ -23,7 +23,7 @@ pub const Driver = struct
         const devices_offset = round_up(u64, @sizeOf(Driver), @alignOf(Device));
         const allocation_size = devices_offset + (@sizeOf(Device) * Device.max_count);
         const address = kernel.address_space.allocate_standard(allocation_size, Region.Flags.from_flag(.fixed), arch.module_ptr, true);
-        if (address == 0) kernel.panic("Could not allocate memory for PCI driver");
+        if (address == 0) kernel.panicf("Could not allocate memory for PCI driver", .{});
         arch.module_ptr += round_up(u64, allocation_size, page_size);
 
         driver = @intToPtr(*Driver, address);
@@ -49,7 +49,7 @@ pub const Driver = struct
             }
         }
 
-        if (bus_to_scan_count == 0) kernel.panic("No bus found");
+        if (bus_to_scan_count == 0) kernel.panicf("No bus found", .{});
 
         var found_usb = false;
 

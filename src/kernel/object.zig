@@ -157,7 +157,7 @@ pub fn open_handle(object: anytype, flags: u32) bool
         else => TODO(@src()),
     }
 
-    if (had_no_handles) kernel.panic("object had no handles");
+    if (had_no_handles) kernel.panicf("object had no handles", .{});
 
     return !failed;
 }
@@ -173,7 +173,7 @@ pub fn close_handle(object: anytype, flags: u32) void
             const _process = @ptrCast(*Process, object);
             const previous = _process.handle_count.atomic_fetch_sub(1);
             // @Log
-            if (previous == 0) kernel.panic("All handles to process have been closed")
+            if (previous == 0) kernel.panicf("All handles to process have been closed", .{})
             else if (previous == 1) TODO(@src());
         },
         *Thread =>
@@ -181,7 +181,7 @@ pub fn close_handle(object: anytype, flags: u32) void
             const thread = @ptrCast(*Thread, object);
             const previous = thread.handle_count.atomic_fetch_sub(1);
 
-            if (previous == 0) kernel.panic("All handles to thread have been closed")
+            if (previous == 0) kernel.panicf("All handles to thread have been closed", .{})
             else if (previous == 1) thread.remove();
         },
         else => TODO(@src()),

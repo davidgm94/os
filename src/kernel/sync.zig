@@ -73,7 +73,7 @@ pub const Spinlock = extern struct
 
         if (self.state.read_volatile() == 0 or arch.are_interrupts_enabled())
         {
-            kernel.panic("Spinlock not correctly acquired\n");
+            kernel.panicf("Spinlock not correctly acquired\n", .{});
         }
     }
 };
@@ -95,12 +95,12 @@ pub const Mutex = extern struct
                 {
                     if (current_thread.terminatable_state.read_volatile() == .terminatable)
                     {
-                        kernel.panic("thread is terminatable\n");
+                        kernel.panicf("thread is terminatable\n", .{});
                     }
 
                     if (self.owner != null and self.owner == current_thread)
                     {
-                        kernel.panic("Attempt to acquire a mutex owned by current thread already acquired\n");
+                        kernel.panicf("Attempt to acquire a mutex owned by current thread already acquired\n", .{});
                     }
 
                     break :addr_block @ptrToInt(current_thread);
@@ -116,7 +116,7 @@ pub const Mutex = extern struct
 
         if (!arch.are_interrupts_enabled())
         {
-            kernel.panic("trying to acquire a mutex with interrupts disabled");
+            kernel.panicf("trying to acquire a mutex with interrupts disabled", .{});
         }
 
         while (true)
@@ -135,7 +135,7 @@ pub const Mutex = extern struct
                 {
                     if (current_thread.state.read_volatile() != .active)
                     {
-                        kernel.panic("Attempting to wait on a mutex in a non-active thread\n");
+                        kernel.panicf("Attempting to wait on a mutex in a non-active thread\n", .{});
                     }
 
                     current_thread.blocking.mutex = self;
@@ -175,7 +175,7 @@ pub const Mutex = extern struct
 
         if (self.owner != current_thread)
         {
-            kernel.panic("Invalid owner thread\n");
+            kernel.panicf("Invalid owner thread\n", .{});
         }
 
         return true;
@@ -193,7 +193,7 @@ pub const Mutex = extern struct
         {
             if (@cmpxchgStrong(?*align(1) volatile Thread, &self.owner, current_thread, null, .SeqCst, .SeqCst) != null)
             {
-                kernel.panic("Invalid owner thread\n");
+                kernel.panicf("Invalid owner thread\n", .{});
             }
         }
         else self.owner = null;
@@ -226,7 +226,7 @@ pub const Mutex = extern struct
 
         if (self.owner != current_thread)
         {
-            kernel.panic("Mutex not correctly acquired\n");
+            kernel.panicf("Mutex not correctly acquired\n", .{});
         }
     }
 };
@@ -322,9 +322,9 @@ pub const Event = extern struct
     fn wait_multiple(event_ptr: [*]*Event, event_len: u64) u64
     {
         var events = event_ptr[0..event_len];
-        if (events.len > kernel.max_wait_count) kernel.panic("count too high")
-        else if (events.len == 0) kernel.panic("count 0")
-        else if (!arch.are_interrupts_enabled()) kernel.panic("timer with interrupts disabled");
+        if (events.len > kernel.max_wait_count) kernel.panicf("count too high", .{})
+        else if (events.len == 0) kernel.panicf("count 0", .{})
+        else if (!arch.are_interrupts_enabled()) kernel.panicf("timer with interrupts disabled", .{});
 
         const thread = arch.get_current_thread().?;
         thread.blocking.event.count = events.len;
@@ -433,7 +433,7 @@ pub const WriterLock = extern struct
                 }
                 else
                 {
-                    kernel.panic("scheduler not ready yet\n");
+                    kernel.panicf("scheduler not ready yet\n", .{});
                 }
             }
         }
@@ -448,17 +448,17 @@ pub const WriterLock = extern struct
         const lock_state = self.state.read_volatile();
         if (lock_state == -1)
         {
-            if (!write) kernel.panic("attempt to return shared access to an exclusively owned lock");
+            if (!write) kernel.panicf("attempt to return shared access to an exclusively owned lock", .{});
 
             self.state.write_volatile(0);
         }
         else if (lock_state == 0)
         {
-            kernel.panic("attempt to return access to an unowned lock");
+            kernel.panicf("attempt to return access to an unowned lock", .{});
         }
         else
         {
-            if (write) kernel.panic("attempting to return exclusive access to a shared lock");
+            if (write) kernel.panicf("attempting to return exclusive access to a shared lock", .{});
 
             self.state.decrement();
         }
@@ -474,20 +474,20 @@ pub const WriterLock = extern struct
     pub fn assert_exclusive(self: *@This()) void
     {
         const lock_state = self.state.read_volatile();
-        if (lock_state == 0) kernel.panic("unlocked")
-        else if (lock_state > 0) kernel.panic("shared mode");
+        if (lock_state == 0) kernel.panicf("unlocked")
+        else if (lock_state > 0) kernel.panicf("shared mode", .{});
     }
 
     pub fn assert_shared(self: *@This()) void
     {
         const lock_state = self.state.read_volatile();
-        if (lock_state == 0) kernel.panic("unlocked")
-        else if (lock_state < 0) kernel.panic("exclusive mode");
+        if (lock_state == 0) kernel.panicf("unlocked")
+        else if (lock_state < 0) kernel.panicf("exclusive mode", .{});
     }
 
     pub fn assert_locked(self: *@This()) void
     {
-        if (self.state.read_volatile() == 0) kernel.panic("unlocked");
+        if (self.state.read_volatile() == 0) kernel.panicf("unlocked", .{});
     }
 
     pub fn convert_exclusive_to_shared(self: *@This()) void

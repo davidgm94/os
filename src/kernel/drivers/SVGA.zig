@@ -26,9 +26,9 @@ pub const Driver = struct
 
     fn setup(self: *@This()) void
     {
-        info = @intToPtr(?*VideoModeInformation, kernel.address_space.map_physical(0x7000 + arch.bootloader_information_offset, @sizeOf(VideoModeInformation), Region.Flags.empty())) orelse kernel.panic("Unable to map VBE");
+        info = @intToPtr(?*VideoModeInformation, kernel.address_space.map_physical(0x7000 + arch.bootloader_information_offset, @sizeOf(VideoModeInformation), Region.Flags.empty())) orelse kernel.panicf("Unable to map VBE", .{});
 
-        if (!info.validation.contains(.valid)) kernel.panic("Unable to initialize VBE: valid is missing\n");
+        if (!info.validation.contains(.valid)) kernel.panicf("Unable to initialize VBE: valid is missing\n", .{});
 
         if (info.validation.contains(.edid_valid))
         {
@@ -41,7 +41,7 @@ pub const Driver = struct
             serial.write("\n");
         }
 
-        self.linear_buffer = @intToPtr(?[*]volatile u8, kernel.address_space.map_physical(info.buffer_physical_address, @intCast(u32, info.bytes_per_scanline) * @intCast(u32, info.height), Region.Flags.from_flag(.write_combining))) orelse kernel.panic("Unable to map VBE");
+        self.linear_buffer = @intToPtr(?[*]volatile u8, kernel.address_space.map_physical(info.buffer_physical_address, @intCast(u32, info.bytes_per_scanline) * @intCast(u32, info.height), Region.Flags.from_flag(.write_combining))) orelse kernel.panicf("Unable to map VBE", .{});
         log("Linear buffer: {*}\n", .{self.linear_buffer});
         self.width = info.width;
         self.height = info.height;
@@ -61,7 +61,7 @@ pub const Driver = struct
 
         if (destination_x > self.width or source_width > self.width - destination_x or destination_y > self.height or source_height > self.height - destination_y)
         {
-            kernel.panic("Update region outside graphics target bounds");
+            kernel.panicf("Update region outside graphics target bounds", .{});
 
             var y: u64 = 0;
             while (y < source_height) :
@@ -99,7 +99,8 @@ pub const Driver = struct
 
     }
 
-    pub fn debug_clear_screen(self: *@This()) void
+    //0x18; 0x7e; 0xcf; default
+    pub fn debug_clear_screen(self: *@This(), r: u8, g: u8, b: u8) void
     {
         var height_i: u64 = 0;
         while (height_i < self.height) : (height_i += 1)
@@ -109,9 +110,9 @@ pub const Driver = struct
             {
                 if (true)
                 {
-                    self.linear_buffer[height_i * self.pixel_byte_count_y + width_i + 2] = 0x18;
-                    self.linear_buffer[height_i * self.pixel_byte_count_y + width_i + 1] = 0x7e;
-                    self.linear_buffer[height_i * self.pixel_byte_count_y + width_i + 0] = 0xcf;
+                    self.linear_buffer[height_i * self.pixel_byte_count_y + width_i + 2] = r;
+                    self.linear_buffer[height_i * self.pixel_byte_count_y + width_i + 1] = g;
+                    self.linear_buffer[height_i * self.pixel_byte_count_y + width_i + 0] = b;
                 }
                 else
                 {

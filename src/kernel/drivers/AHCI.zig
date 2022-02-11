@@ -141,7 +141,7 @@ pub const Driver = struct
         const partition_devices_offset = round_up(u64, drives_offset + (@sizeOf(Drive) * Drive.max_count), @alignOf(PartitionDevice));
         const allocation_size = partition_devices_offset + (@sizeOf(PartitionDevice) * PartitionDevice.max_count);
         const address = kernel.address_space.allocate_standard(allocation_size, Region.Flags.from_flag(.fixed), arch.module_ptr, true);
-        if (address == 0) kernel.panic("Could not allocate memory for PCI driver");
+        if (address == 0) kernel.panicf("Could not allocate memory for PCI driver", .{});
         arch.module_ptr += round_up(u64, allocation_size, page_size);
         driver = @intToPtr(*Driver, address);
         driver.drives.ptr = @intToPtr([*]Drive, address + drives_offset);
@@ -163,7 +163,7 @@ pub const Driver = struct
 
         const is_ahci_pci_device = self.pci.class_code == class_code and self.pci.subclass_code == subclass_code and self.pci.prog_IF == prog_IF;
 
-        if (!is_ahci_pci_device) kernel.panic("AHCI PCI device not found");
+        if (!is_ahci_pci_device) kernel.panicf("AHCI PCI device not found", .{});
 
         _ = self.pci.enable_features(PCI.Features.from_flags(.{ .interrupts, .busmastering_DMA, .memory_space_access, .bar_5 }));
 
@@ -195,18 +195,18 @@ pub const Driver = struct
             }
 
             // error
-            if (timeout.hit()) kernel.panic("AHCI timeout hit");
+            if (timeout.hit()) kernel.panicf("AHCI timeout hit", .{});
         }
 
         assert(@ptrToInt(handler) != 0);
-        if (!self.pci.enable_single_interrupt(handler, @ptrToInt(self), "AHCI")) kernel.panic("Unable to initialize AHCI");
+        if (!self.pci.enable_single_interrupt(handler, @ptrToInt(self), "AHCI")) kernel.panicf("Unable to initialize AHCI", .{});
 
         GHC.write(self, GHC.read(self) | (1 << 31) | (1 << 1));
         self.capabilities = CAP.read(self);
         self.capabilities2 = CAP2.read(self);
         self.command_slot_count = ((self.capabilities >> 8) & 31) + 1;
         self.dma64_supported = self.capabilities & (1 << 31) != 0;
-        if (!self.dma64_supported) kernel.panic("DMA is not supported");
+        if (!self.dma64_supported) kernel.panicf("DMA is not supported", .{});
 
         const maximum_number_of_ports = (self.capabilities & 31) + 1;
         var found_port_count: u64 = 0;
@@ -233,7 +233,7 @@ pub const Driver = struct
 
                 if (!kernel.memory.physical_allocate_and_map(needed_byte_count, page_size, if (self.dma64_supported) 64 else 32, true, Region.Flags.from_flag(.not_cacheable), &virtual_address, &physical_address))
                 {
-                    kernel.panic("AHCI allocation failure");
+                    kernel.panicf("AHCI allocation failure", .{});
                 }
 
                 port.command_list = @intToPtr([*]u32, virtual_address);
@@ -360,7 +360,7 @@ pub const Driver = struct
         var identify_data_physical: u64 = 0;
         if (!kernel.memory.physical_allocate_and_map(0x200, page_size, if (self.dma64_supported) 64 else 32, true, Region.Flags.from_flag(.not_cacheable), &identify_data, &identify_data_physical))
         {
-            kernel.panic("Allocation failure");
+            kernel.panicf("Allocation failure", .{});
         }
 
         for (self.ports) |*port, _port_i|
@@ -669,7 +669,7 @@ pub const Driver = struct
 
         while (!buffer.is_complete())
         {
-            if (m_PRDT_entry_count == PRDT_entry_count) kernel.panic("Too many PRDT entries");
+            if (m_PRDT_entry_count == PRDT_entry_count) kernel.panicf("Too many PRDT entries", .{});
 
             const segment = buffer.next_segment(false);
 
@@ -724,9 +724,9 @@ pub const Drive = extern struct
 
     pub fn read_file(self: *@This(), file_buffer: []u8, file_descriptor: *const Filesystem.File.Descriptor) files.ReadError!void
     {
-        if (file_descriptor.offset & (self.block_device.sector_size - 1) != 0) kernel.panic("Disk offset should be sector-aligned");
+        if (file_descriptor.offset & (self.block_device.sector_size - 1) != 0) kernel.panicf("Disk offset should be sector-aligned", .{});
         const sector_aligned_size = align_u64(file_descriptor.size, self.block_device.sector_size);
-        if (file_buffer.len < sector_aligned_size) kernel.panic("Buffer too small\n");
+        if (file_buffer.len < sector_aligned_size) kernel.panicf("Buffer too small\n", .{});
 
         var buffer = zeroes(DMABuffer);
         buffer.virtual_address = @ptrToInt(file_buffer.ptr);
@@ -802,13 +802,13 @@ const BlockDevice = extern struct
         _ = self.detect_filesystem_mutex.acquire();
         defer self.detect_filesystem_mutex.release();
 
-        if (self.nest_level > 4) kernel.panic("Filesystem nest limit");
+        if (self.nest_level > 4) kernel.panicf("Filesystem nest limit", .{});
 
         const sectors_to_read = (signature_block_size + self.sector_size - 1) / self.sector_size;
-        if (sectors_to_read > self.sector_count) kernel.panic("Drive too small");
+        if (sectors_to_read > self.sector_count) kernel.panicf("Drive too small", .{});
 
         const bytes_to_read = sectors_to_read * self.sector_size;
-        self.signature_block = @intToPtr(?[*]u8, kernel.heapFixed.allocate(bytes_to_read, false)) orelse kernel.panic("unable to allocate memory for fs detection"); 
+        self.signature_block = @intToPtr(?[*]u8, kernel.heapFixed.allocate(bytes_to_read, false)) orelse kernel.panicf("unable to allocate memory for fs detection", .{});
         var dma_buffer = zeroes(DMABuffer);
         dma_buffer.virtual_address = @ptrToInt(self.signature_block);
         var request = zeroes(BlockDevice.AccessRequest);
@@ -819,11 +819,11 @@ const BlockDevice = extern struct
 
         if (FSBlockDeviceAccess(request) != ES_SUCCESS)
         {
-            kernel.panic("Could not read disk");
+            kernel.panicf("Could not read disk", .{});
         }
         assert(self.nest_level == 0);
 
-        if (!self.check_mbr()) kernel.panic("Only MBR is supported\n");
+        if (!self.check_mbr()) kernel.panicf("Only MBR is supported\n", .{});
 
         kernel.heapFixed.free(@ptrToInt(self.signature_block), bytes_to_read);
     }
@@ -943,19 +943,19 @@ fn FSBlockDeviceAccess(_request: BlockDevice.AccessRequest) Error
     if (device.read_only and request.operation == BlockDevice.write)
     {
         if (request.flags.contains(.soft_errors)) return Errors.ES_ERROR_BLOCK_ACCESS_INVALID;
-        kernel.panic("The device is read-only and the access requests for write permission");
+        kernel.panicf("The device is read-only and the access requests for write permission", .{});
     }
 
     if (request.offset / device.sector_size > device.sector_count or (request.offset + request.count) / device.sector_size > device.sector_count)
     {
         if (request.flags.contains(.soft_errors)) return Errors.ES_ERROR_BLOCK_ACCESS_INVALID;
-        kernel.panic("Disk access out of bounds");
+        kernel.panicf("Disk access out of bounds", .{});
     }
 
     if (request.offset % device.sector_size != 0 or request.count % device.sector_size != 0)
     {
         if (request.flags.contains(.soft_errors)) return Errors.ES_ERROR_BLOCK_ACCESS_INVALID;
-        kernel.panic("Unaligned access\n");
+        kernel.panicf("Unaligned access\n", .{});
     }
 
     var buffer = request.buffer.*;
@@ -963,7 +963,7 @@ fn FSBlockDeviceAccess(_request: BlockDevice.AccessRequest) Error
     if (buffer.virtual_address & 3 != 0)
     {
         if (request.flags.contains(.soft_errors)) return Errors.ES_ERROR_BLOCK_ACCESS_INVALID;
-        kernel.panic("Buffer must be 4-byte aligned");
+        kernel.panicf("Buffer must be 4-byte aligned", .{});
     }
 
     var fake_dispatch_group = zeroes(Workgroup);
@@ -1029,7 +1029,7 @@ const DMABuffer = extern struct
 
     fn next_segment(self: *@This(), peek: bool) DMASegment
     {
-        if (self.offset >= self.total_byte_count or self.virtual_address == 0) kernel.panic("Invalid state of DMA buffer");
+        if (self.offset >= self.total_byte_count or self.virtual_address == 0) kernel.panicf("Invalid state of DMA buffer", .{});
 
         var transfer_byte_count: u64 = page_size;
         const virtual_address = self.virtual_address + self.offset;

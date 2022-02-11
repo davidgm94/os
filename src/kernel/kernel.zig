@@ -114,16 +114,6 @@ pub fn TODO(src: std.builtin.SourceLocation) noreturn
     panicf("TODO: Unimplemented at {s}:{}:{} -> {s}\n", .{src.file, src.line, src.column, src.fn_name});
 }
 
-pub fn panic(message: []const u8) noreturn
-{
-    arch.disable_interrupts();
-    _ = arch.IPI.send(arch.IPI.kernel_panic, true, -1);
-    scheduler.panic.write_volatile(true);
-    serial.write("KERNEL PANIC:\n");
-    serial.write(message);
-    arch.halt();
-}
-
 var panic_lock: Spinlock = undefined;
 var panic_buffer: [0x4000]u8 align(0x1000) = undefined;
 pub fn panicf(comptime format: []const u8, args: anytype) noreturn
@@ -131,6 +121,7 @@ pub fn panicf(comptime format: []const u8, args: anytype) noreturn
     arch.disable_interrupts();
     _ = arch.IPI.send(arch.IPI.kernel_panic, true, -1);
     scheduler.panic.write_volatile(true);
+    drivers.SVGA.driver.debug_clear_screen(0xff, 0, 0);
     log_ex(&panic_buffer, &panic_lock, "KERNEL PANIC:\n" ++ format, args);
     arch.halt();
 }
@@ -175,14 +166,14 @@ pub fn LinkedList(comptime T: type) type
                 }
                 else
                 {
-                    panic("list null when trying to remove item");
+                    panicf("list null when trying to remove item", .{});
                 }
             }
         };
 
         pub fn insert_at_start(self: *@This(), item: *Item) void
         {
-            if (item.list != null) panic("inserting an item that is already in a list");
+            if (item.list != null) panicf("inserting an item that is already in a list", .{});
 
             if (self.first) |first|
             {
@@ -206,7 +197,7 @@ pub fn LinkedList(comptime T: type) type
 
         pub fn insert_at_end(self: *@This(), item: *Item) void
         {
-            if (item.list != null) panic("inserting an item that is already in a list");
+            if (item.list != null) panicf("inserting an item that is already in a list", .{});
 
             if (self.last) |last|
             {
@@ -230,7 +221,7 @@ pub fn LinkedList(comptime T: type) type
 
         pub fn insert_before(self: *@This(), item: *Item, before: *Item) void
         {
-            if (item.list != null) panic("inserting an item that is already in a list");
+            if (item.list != null) panicf("inserting an item that is already in a list", .{});
 
             if (before != self.first)
             {
@@ -255,11 +246,11 @@ pub fn LinkedList(comptime T: type) type
         {
             if (item.list) |list|
             {
-                if (list != self) panic("item is in another list");
+                if (list != self) panicf("item is in another list", .{});
             }
             else
             {
-                panic("item is not in any list");
+                panicf("item is not in any list", .{});
             }
 
             if (item.previous) |previous| previous.next = item.next
@@ -280,7 +271,7 @@ pub fn LinkedList(comptime T: type) type
         {
             if (self.count == 0)
             {
-                if (self.first != null or self.last != null) panic("invalid list");
+                if (self.first != null or self.last != null) panicf("invalid list", .{});
             }
             else if (self.count == 1)
             {
@@ -290,7 +281,7 @@ pub fn LinkedList(comptime T: type) type
                     self.first.?.list != self or
                     self.first.?.value == null)
                 {
-                    panic("invalid list");
+                    panicf("invalid list", .{});
                 }
             }
             else
@@ -299,7 +290,7 @@ pub fn LinkedList(comptime T: type) type
                     self.first.?.previous != null or
                     self.last.?.next != null)
                 {
-                    panic("invalid list");
+                    panicf("invalid list", .{});
                 }
 
                 {
@@ -313,13 +304,13 @@ pub fn LinkedList(comptime T: type) type
 
                         if (item.?.next == item or item.?.list != self or item.?.value == null)
                         {
-                            panic("invalid list");
+                            panicf("invalid list", .{});
                         }
 
                         item = item.?.next;
                     }
 
-                    if (item != self.last) panic("invalid list");
+                    if (item != self.last) panicf("invalid list", .{});
                 }
 
                 {
@@ -333,13 +324,13 @@ pub fn LinkedList(comptime T: type) type
 
                         if (item.?.previous == item)
                         {
-                            panic("invalid list");
+                            panicf("invalid list", .{});
                         }
 
                         item = item.?.previous;
                     }
 
-                    if (item != self.first) panic("invalid list");
+                    if (item != self.first) panicf("invalid list", .{});
                 }
             }
         }
@@ -383,7 +374,7 @@ pub const Pool = extern struct
         _ = self.mutex.acquire();
         defer self.mutex.release();
 
-        if (self.element_size != 0 and element_size != self.element_size) panic("pool size mismatch");
+        if (self.element_size != 0 and element_size != self.element_size) panicf("pool size mismatch", .{});
         self.element_size = element_size;
 
         if (self.cache_entry_count != 0)
@@ -432,7 +423,7 @@ pub const SimpleList = extern struct
     {
         if (item.previous_or_last != null or item.next_or_first != null)
         {
-            panic("bad links");
+            panicf("bad links", .{});
         }
 
         if (self.next_or_first == null and self.previous_or_last == null)
@@ -460,7 +451,7 @@ pub const SimpleList = extern struct
 
     pub fn remove(self: *@This()) void
     {
-        if (self.previous_or_last.?.next_or_first != self or self.next_or_first.?.previous_or_last != self) panic("bad links");
+        if (self.previous_or_last.?.next_or_first != self or self.next_or_first.?.previous_or_last != self) panicf("bad links", .{});
 
         if (self.previous_or_last == self.next_or_first)
         {
@@ -597,7 +588,7 @@ pub fn Array(comptime T: type, comptime heap_type: HeapType) type
             }
             else
             {
-                panic("Array ptr is null");
+                panicf("Array ptr is null", .{});
             }
         }
 
@@ -700,7 +691,7 @@ pub fn AVLTree(comptime T: type) type
             
             if (item.tree != null)
             {
-                panic("item already in a tree\n");
+                panicf("item already in a tree\n", .{});
             }
 
             item.tree = self;
@@ -721,7 +712,7 @@ pub fn AVLTree(comptime T: type) type
                 {
                     if (item.compare(node) == 0)
                     {
-                        if (duplicate_key_policy == .panic) panic("avl duplicate panic")
+                        if (duplicate_key_policy == .panic) panicf("avl duplicate panic", .{})
                         else if (duplicate_key_policy == .fail) return false;
                     }
 
@@ -799,7 +790,7 @@ pub fn AVLTree(comptime T: type) type
 
         pub fn find(self: *@This(), key: KeyDefaultType, search_mode: SearchMode) ?*Item
         {
-            if (self.modcheck) panic("concurrent access\n");
+            if (self.modcheck) panicf("concurrent access\n", .{});
             self.validate();
             return self.find_recursive(self.root, key, search_mode);
         }
@@ -841,12 +832,12 @@ pub fn AVLTree(comptime T: type) type
 
         pub fn remove(self: *@This(), item: *Item) void
         {
-            if (self.modcheck) panic("concurrent modification");
+            if (self.modcheck) panicf("concurrent modification", .{});
             self.modcheck = true;
             defer self.modcheck = false;
 
             self.validate();
-            if (item.tree != self) panic("item not in tree");
+            if (item.tree != self) panicf("item not in tree", .{});
 
             var fake_root = zeroes(Item);
             self.root.?.parent = &fake_root;
@@ -933,7 +924,7 @@ pub fn AVLTree(comptime T: type) type
             self.root = fake_root.children[0];
             if (self.root) |root|
             {
-                if (root.parent != &fake_root) panic("incorrect root parent");
+                if (root.parent != &fake_root) panicf("incorrect root parent", .{});
                 root.parent = null;
             }
 
@@ -1046,14 +1037,14 @@ pub fn AVLTree(comptime T: type) type
 
             fn validate(self: *@This(), tree: *Tree, parent: ?*@This()) i32
             {
-                if (self.parent != parent) panic("tree panic");
-                if (self.tree != tree) panic("tree panic");
+                if (self.parent != parent) panicf("tree panic", .{});
+                if (self.tree != tree) panicf("tree panic", .{});
 
                 const left_height = blk:
                 {
                     if (self.children[0]) |left|
                     {
-                        if (left.compare(self) > 0) panic("invalid tree");
+                        if (left.compare(self) > 0) panicf("invalid tree", .{});
                         break :blk left.validate(tree, self);
                     }
                     else
@@ -1066,7 +1057,7 @@ pub fn AVLTree(comptime T: type) type
                 {
                     if (self.children[1]) |right|
                     {
-                        if (right.compare(self) < 0) panic("invalid tree");
+                        if (right.compare(self) < 0) panicf("invalid tree", .{});
                         break :blk right.validate(tree, self);
                     }
                     else
@@ -1076,7 +1067,7 @@ pub fn AVLTree(comptime T: type) type
                 };
 
                 const height = 1 + if (left_height > right_height) left_height else right_height;
-                if (height != self.height) panic("invalid tree");
+                if (height != self.height) panicf("invalid tree", .{});
 
                 return height;
             }
@@ -1141,8 +1132,8 @@ pub const Range = extern struct
 
             for (self.ranges.get_slice()) |range|
             {
-                if (previous_to != 0 and range.from <= previous_to) panic("range in set is not placed after the prior range\n");
-                if (range.from >= range.to) panic("range in set is invalid\n");
+                if (previous_to != 0 and range.from <= previous_to) panicf("range in set is not placed after the prior range\n", .{});
+                if (range.from >= range.to) panicf("range in set is invalid\n", .{});
 
                 previous_to = range.to;
             }
@@ -1163,7 +1154,7 @@ pub const Range = extern struct
 
         pub fn clear(self: *@This(), from: u64, to: u64, maybe_delta: ?*i64, modify: bool) bool
         {
-            if (to <= from) panic("invalid range");
+            if (to <= from) panicf("invalid range", .{});
 
             if (self.ranges.length() == 0)
             {
@@ -1265,7 +1256,7 @@ pub const Range = extern struct
 
         pub fn set(self: *@This(), from: u64, to: u64, maybe_delta: ?*i64, modify: bool) bool
         {
-            if (to <= from) panic("invalid range");
+            if (to <= from) panicf("invalid range", .{});
 
             const initial_length = self.ranges.length();
             if (initial_length == 0)
@@ -1466,12 +1457,6 @@ pub export fn EsMemoryMove(start_address: u64, end_address: u64, amount: i64, ze
     }
 }
 
-pub export fn EsAssertionFailure(file: [*:0]const u8, line: i32) callconv(.C) void
-{
-    _ = file; _ = line;
-    panic("Assertion failure called");
-}
-
 const ArrayHeader = extern struct
 {
     length: u64,
@@ -1559,8 +1544,8 @@ pub export fn _ArrayDelete(array: ?*u64, position: u64, item_size: u64, count: u
     if (count == 0) return;
 
     const old_array_length = ArrayHeaderGetLength(array);
-    if (position >= old_array_length) panic("position out of bounds");
-    if (count > old_array_length - position) panic("count out of bounds");
+    if (position >= old_array_length) panicf("position out of bounds", .{});
+    if (count > old_array_length - position) panicf("count out of bounds", .{});
     ArrayHeaderGet(array).length = old_array_length - count;
     const array_address = @ptrToInt(array);
     // @TODO @WARNING @Dangerous @ERROR @PANIC
@@ -1570,7 +1555,7 @@ pub export fn _ArrayDelete(array: ?*u64, position: u64, item_size: u64, count: u
 pub export fn _ArrayDeleteSwap(array: ?*u64, position: u64, item_size: u64) callconv(.C) void
 {
     const old_array_length = ArrayHeaderGetLength(array);
-    if (position >= old_array_length) panic("position out of bounds");
+    if (position >= old_array_length) panicf("position out of bounds", .{});
     ArrayHeaderGet(array).length = old_array_length - 1;
     const array_address = @ptrToInt(array);
     EsMemoryCopy(array_address + item_size * position, array_address * ArrayHeaderGetLength(array), item_size);
@@ -1580,7 +1565,7 @@ pub export fn _ArrayInsert(array: *?*u64, item: u64, item_size: u64, maybe_posit
 {
     const old_array_length = ArrayHeaderGetLength(array.*);
     const position: u64 = if (maybe_position == -1) old_array_length else @intCast(u64, maybe_position);
-    if (maybe_position < 0 or position > old_array_length) panic("position out of bounds");
+    if (maybe_position < 0 or position > old_array_length) panicf("position out of bounds", .{});
     if (!_ArraySetLength(array, old_array_length + 1, item_size, additional_header_bytes, heap)) return 0;
     const array_address = @ptrToInt(array.*);
     EsMemoryMove(array_address + item_size * position, array_address + item_size * old_array_length, @intCast(i64, item_size), false);
@@ -1593,7 +1578,7 @@ pub export fn _ArrayInsertMany(array: *?*u64, item_size: u64, maybe_position: i6
 {
     const old_array_length = ArrayHeaderGetLength(array.*);
     const position: u64 = if (maybe_position == -1) old_array_length else @intCast(u64, maybe_position);
-    if (maybe_position < 0 or position > old_array_length) panic("position out of bounds");
+    if (maybe_position < 0 or position > old_array_length) panicf("position out of bounds", .{});
     if (!_ArraySetLength(array, old_array_length + insert_count, item_size, 0, heap)) return 0;
     const array_address = @ptrToInt(array.*);
     EsMemoryMove(array_address + item_size * position, array_address + item_size * old_array_length, @intCast(i64, item_size * insert_count), false);
@@ -1824,7 +1809,7 @@ pub const RandomNumberGenerator = extern struct
         fn release(self: *@This()) void
         {
             @fence(.SeqCst);
-            if (self.state.read_volatile() == 0) panic("spinlock not acquired");
+            if (self.state.read_volatile() == 0) panicf("spinlock not acquired", .{});
             self.state.write_volatile(0);
             @fence(.SeqCst);
         }
@@ -1839,9 +1824,11 @@ pub fn log_ex(buffer: []u8, buffer_lock: *Spinlock, comptime format: []const u8,
     var log_slice = std.fmt.bufPrint(buffer[0..], format, args)
     catch |err|
     {
+        buffer_lock.release();
         var _format_buffer: [512]u8 = undefined;
         const error_str = std.fmt.bufPrint(_format_buffer[0..], "Unable to print: {}", .{err}) catch unreachable;
-        panic(error_str);
+        serial.write(error_str);
+        return;
     };
     serial.write(log_slice);
     buffer_lock.release();
@@ -1862,7 +1849,7 @@ pub export fn KernelInitialise() callconv(.C) void
     _ = Process.spawn(.kernel).?;
     memory.init();
     // Currently it felt impossible to pass arguments to this function
-    _ = Thread.spawn(arch.GetKernelMainAddress(), 0, Thread.Flags.empty(), null, 0);
+    _ = Thread.spawn("kernel_main", arch.GetKernelMainAddress(), 0, Thread.Flags.empty(), null, 0);
     arch.init();
     scheduler.started.write_volatile(true);
 }
@@ -1893,14 +1880,14 @@ pub const Workgroup = extern struct
     pub fn wait(self: *@This()) bool
     {
         if (self.remaining.atomic_fetch_sub(1) != 1) _ = self.event.wait();
-        if (self.remaining.read_volatile() != 0) panic("Expected remaining operations to be 0 after event set");
+        if (self.remaining.read_volatile() != 0) panicf("Expected remaining operations to be 0 after event set", .{});
 
         return self.success.read_volatile() != 0;
     }
 
     pub fn start(self: *@This()) void
     {
-        if (self.remaining.atomic_fetch_add(1) == 0) panic("Could not start operation on completed dispatch group");
+        if (self.remaining.atomic_fetch_add(1) == 0) panicf("Could not start operation on completed dispatch group", .{});
     }
 
     pub fn end(self: *@This(), success: bool) void

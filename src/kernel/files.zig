@@ -53,7 +53,7 @@ export var desktop_executable_buffer: [0x8000]u8 align(0x1000) = undefined;
 
 fn hard_disk_read_desktop_executable() void
 {
-    read_file_in_buffer(@intToPtr([*]u8, @ptrToInt(&desktop_executable_buffer))[0..desktop_executable_buffer.len], &superblock.desktop_exe) catch kernel.panic("Unable to read desktop executable\n");
+    read_file_in_buffer(@intToPtr([*]u8, @ptrToInt(&desktop_executable_buffer))[0..desktop_executable_buffer.len], &superblock.desktop_exe) catch kernel.panicf("Unable to read desktop executable\n", .{});
 }
 
 var superblock: Filesystem.Superblock = undefined;
@@ -61,7 +61,7 @@ var superblock: Filesystem.Superblock = undefined;
 pub fn parse_superblock() void
 {
     var superblock_buffer: [0x200]u8 align(0x200) = undefined;
-    read_file_in_buffer(&superblock_buffer, &Filesystem.Superblock.file_descriptor) catch kernel.panic("Unable to read superblock\n");
+    read_file_in_buffer(&superblock_buffer, &Filesystem.Superblock.file_descriptor) catch kernel.panicf("Unable to read superblock\n", .{});
     var superblock_buffer_ptr = @intToPtr(*Filesystem.Superblock, @ptrToInt(&superblock_buffer));
     superblock = superblock_buffer_ptr.*;
 }
