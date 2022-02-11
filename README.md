@@ -1,3 +1,5 @@
+The project is based of Essence OS. Its license can be found in the licenses folder.
+
 # Design ideas
 My OS goals come to cover mainly the Jonathan Blow's and part of Casey Muratori's ideas.
 

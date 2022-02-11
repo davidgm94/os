@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const Handle = u64;
+pub const Filesystem = @import("filesystem.zig");
 
 pub const Syscall = enum(u64)
 {

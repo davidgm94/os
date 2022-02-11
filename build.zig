@@ -60,8 +60,8 @@ const Kernel = struct
         kernel.disable_stack_probing = true;
         kernel.disable_sanitize_c = false;
         kernel.link_function_sections = false;
+        kernel.addPackagePath("shared", "src/shared/lib.zig");
         kernel.setBuildMode(b.standardReleaseOptions());
-        kernel.setMainPkgPath(".");
         kernel.setLinkerScriptPath(FileSource.relative(Kernel.linker_script_path));
         kernel.setOutputDir(build_cache_dir);
 
@@ -637,7 +637,7 @@ const Desktop = struct
     fn build(b: *Builder) void
     {
         const desktop = b.addExecutable(exe_name, zig_src_file);
-        desktop.setMainPkgPath(".");
+        desktop.addPackagePath("shared", "src/shared/lib.zig");
         desktop.setOutputDir(build_cache_dir);
         desktop.setBuildMode(b.standardReleaseOptions());
         desktop.setTarget(cross_target);
@@ -775,12 +775,12 @@ pub fn build(b: *Builder) !void
                 \\set disassembly-flavor intel
                 \\symbol-file {s}
                 \\b _start
-                \\b panic
+                \\b kernel.panic
+                \\b kernel.panicf
+                \\b kernel.TODO
                 \\b KernelInitialise
-                \\b KernelPanic
                 \\b KernelMain
-                \\b SchedulerUnblockThread
-                \\b TODO
+                \\b halt
                 //\\watch *(uint64_t*)0xffffffff8003e168
                 \\target remote localhost:1234
                 \\c
@@ -798,10 +798,6 @@ pub fn build(b: *Builder) !void
                 \\set disassembly-flavor intel
                 ++ "\nsymbol-file " ++ Desktop.out_elf_path ++ "\n" ++
                 \\b _start
-                \\b panic
-                \\b KernelInitialise
-                \\b KernelPanic
-                \\b KernelMain
                 \\target remote localhost:1234
                 \\c
         ;
